@@ -1,0 +1,14 @@
+node_modules/
+.wrangler/
+.dev.vars
+.env
+
+# Test artifacts
+coverage/
+*.lcov
+
+# Local D1 / wrangler state
+.wrangler/
+
+# OS files
+.DS_Store

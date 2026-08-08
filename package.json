@@ -1,0 +1,23 @@
+{
+  "name": "xenoblade",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm --filter @xenoblade/bot-worker dev",
+    "generate-types": "pnpm --filter @xenoblade/bot-worker generate-types",
+    "typecheck": "pnpm --filter @xenoblade/bot-worker typecheck",
+    "test": "pnpm --filter @xenoblade/bot-worker test",
+    "lint": "oxlint .",
+    "format:check": "oxfmt --check --ignore-path .oxfmtignore .",
+    "format": "oxfmt --ignore-path .oxfmtignore ."
+  },
+  "devDependencies": {
+    "@types/node": "26.1.2",
+    "oxfmt": "0.62.0",
+    "oxlint": "1.77.0",
+    "typescript": "7.0.2",
+    "vitest": "4.1.10"
+  },
+  "packageManager": "pnpm@11.20.0"
+}
