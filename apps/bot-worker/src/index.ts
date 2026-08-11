@@ -29,6 +29,7 @@ function createBot(env: Env): Chat {
         publicKey: env.DISCORD_PUBLIC_KEY,
         applicationId: env.DISCORD_APPLICATION_ID,
         createThreadsForMentions: false,
+        mentionRoleIds: ["1536654090992623638"],
       }),
     },
     state: createCloudflareState({
