@@ -15,7 +15,7 @@ import type { GatewayCredentials } from "discord-gateway-cloudflare-do";
  * `disconnect()` and `status()` are not reserved names and work over RPC.
  */
 export class XenobladeGatewayDO<TEnv = unknown> extends DiscordGatewayDO<TEnv> {
-  async connectGateway(credentials: GatewayCredentials) {
+  connectGateway(credentials: GatewayCredentials) {
     return this.connect(credentials);
   }
 }

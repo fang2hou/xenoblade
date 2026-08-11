@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Registers the global `/status` slash command for the Xenoblade dev app.
+// Registers the global `/status` and `/clear-context` slash commands for the Xenoblade dev app.
 // Run manually AFTER Discord credentials are configured (Checkpoint B).
 // Requires env: DISCORD_APPLICATION_ID, DISCORD_BOT_TOKEN.
 // Never paste tokens into chat; load them from your local environment.
@@ -21,6 +21,10 @@ const res = await fetch(`https://discord.com/api/v10/applications/${appId}/comma
       name: "status",
       description: "Check Xenoblade gateway status",
     },
+    {
+      name: "clear-context",
+      description: "Clear your conversation context in this channel",
+    },
   ]),
 });
 
@@ -31,5 +35,5 @@ if (!res.ok) {
   process.exit(1);
 }
 
-console.log("Registered global /status command:");
+console.log("Registered global /status and /clear-context commands:");
 console.log(body);

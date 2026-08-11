@@ -28,19 +28,40 @@ export type InteractionRecord = {
   latencyMs: number | null;
   errorCode: string | null;
   createdAt: number;
+  /** Provider-reported input token count, if available. */
+  inputTokens?: number | null;
+  /** Cache read token count (DeepSeek/OpenRouter prompt caching), if available. */
+  cacheReadTokens?: number | null;
+  /** Cache write token count (prefix persisted this turn), if available. */
+  cacheWriteTokens?: number | null;
 };
 
-/** Scope id used for direct messages (no guild). */
+/**
+ * Per-user, per-container context state. `resetAt` filters which historical
+ * messages a user may use (messages older than `resetAt` are excluded);
+ * `active` indicates an interaction within {@link SESSION_TTL_MS}.
+ */
+export type UserContextState = {
+  resetAt: number;
+  lastInteractionAt: number | null;
+  /** Whether the user has an active session (interaction within TTL). */
+  active: boolean;
+};
+
 export const DM_SCOPE = "dm";
 
 /** Tokens reserved per generation as a conservative budget. */
-export const RESERVATION_TOKENS = 512 as const;
+export const RESERVATION_TOKENS = 1024 as const;
 
 /** Rolling window over which generation budget is enforced. */
 export const BUDGET_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /** Maximum reserved tokens allowed within the rolling window. */
-export const BUDGET_MAX_TOKENS = 20_000;
+export const BUDGET_MAX_TOKENS = 40_000;
+
+/** Active-session window for per-user context. Interactions older than this
+ * are treated as inactive (no forced context). */
+export const SESSION_TTL_MS = 30 * 60 * 1000;
 
 /**
  * Thrown by {@link reserveGeneration} when the rolling-window token budget
@@ -197,8 +218,9 @@ export async function recordInteraction(db: D1Database, row: InteractionRecord):
       `INSERT INTO interactions
         (message_id, thread_id, user_id, scope_id, kind, provider, model,
          status, requested_output_tokens, completion_tokens, cost_micros,
-         latency_ms, error_code, created_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)`,
+         latency_ms, error_code, created_at,
+         input_tokens, cache_read_tokens, cache_write_tokens)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)`,
     )
     .bind(
       row.messageId,
@@ -213,8 +235,100 @@ export async function recordInteraction(db: D1Database, row: InteractionRecord):
       row.completionTokens,
       row.costMicros,
       row.latencyMs,
-      row.errorCode,
       row.createdAt,
+      row.inputTokens ?? null,
+      row.cacheReadTokens ?? null,
+      row.cacheWriteTokens ?? null,
     )
     .run();
+}
+
+/**
+ * Read per-user, per-container context state. Returns a default
+ * `{ resetAt: 0, lastInteractionAt: null, active: false }` when no row
+ * exists. Fail-closed: on any D1 error returns a freshly-reset state
+ * (`resetAt = now`, inactive) so generation degrades to current-message-only
+ * instead of leaking history.
+ */
+export async function getUserContextState(
+  db: D1Database,
+  key: { scopeId: string; containerId: string; userId: string },
+): Promise<UserContextState> {
+  const now = Date.now();
+  try {
+    const res = await db
+      .prepare(
+        `SELECT reset_at AS resetAt, last_interaction_at AS lastInteractionAt
+         FROM user_context_state
+         WHERE scope_id = ?1 AND container_id = ?2 AND user_id = ?3`,
+      )
+      .bind(key.scopeId, key.containerId, key.userId)
+      .first<{ resetAt: number; lastInteractionAt: number | null }>();
+    if (!res) {
+      return { resetAt: 0, lastInteractionAt: null, active: false };
+    }
+    const lastInteractionAt = res.lastInteractionAt ?? null;
+    const active = lastInteractionAt !== null && now - lastInteractionAt < SESSION_TTL_MS;
+    return { resetAt: res.resetAt, lastInteractionAt, active };
+  } catch (error) {
+    console.log(JSON.stringify({ event: "context_state_read_error", error: String(error) }));
+    return { resetAt: now, lastInteractionAt: null, active: false };
+  }
+}
+
+/**
+ * Persistently clear a user's context in a container: sets `reset_at = now`
+ * and clears `last_interaction_at`. Returns true on success, false on error.
+ * Callers must NOT send a success confirmation when this returns false.
+ * Never affects other users or other containers.
+ */
+export async function clearUserContext(
+  db: D1Database,
+  key: { scopeId: string; containerId: string; userId: string; now: number },
+): Promise<boolean> {
+  try {
+    await db
+      .prepare(
+        `INSERT INTO user_context_state
+           (scope_id, container_id, user_id, reset_at, last_interaction_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, NULL, ?4)
+         ON CONFLICT(scope_id, container_id, user_id) DO UPDATE SET
+           reset_at = excluded.reset_at,
+           last_interaction_at = NULL,
+           updated_at = excluded.updated_at`,
+      )
+      .bind(key.scopeId, key.containerId, key.userId, key.now)
+      .run();
+    return true;
+  } catch (error) {
+    console.log(JSON.stringify({ event: "context_state_clear_error", error: String(error) }));
+    return false;
+  }
+}
+
+/**
+ * Record that a user interacted in a container, updating
+ * `last_interaction_at` and `updated_at`. Never overwrites an existing
+ * `reset_at`. On error, logs and swallows: a telemetry failure must not
+ * revoke an already-sent AI reply.
+ */
+export async function markUserInteraction(
+  db: D1Database,
+  key: { scopeId: string; containerId: string; userId: string; now: number },
+): Promise<void> {
+  try {
+    await db
+      .prepare(
+        `INSERT INTO user_context_state
+           (scope_id, container_id, user_id, reset_at, last_interaction_at, updated_at)
+         VALUES (?1, ?2, ?3, 0, ?4, ?4)
+         ON CONFLICT(scope_id, container_id, user_id) DO UPDATE SET
+           last_interaction_at = excluded.last_interaction_at,
+           updated_at = excluded.updated_at`,
+      )
+      .bind(key.scopeId, key.containerId, key.userId, key.now)
+      .run();
+  } catch (error) {
+    console.log(JSON.stringify({ event: "context_state_mark_error", error: String(error) }));
+  }
 }

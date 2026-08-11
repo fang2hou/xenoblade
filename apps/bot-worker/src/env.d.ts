@@ -8,6 +8,7 @@ interface Env {
   DISCORD_APPLICATION_ID: string;
   OPENROUTER_API_KEY: string;
   GATEWAY_CONTROL_TOKEN: string;
+  BRAVE_SEARCH_API_KEY: string;
   GATEWAY_STATUS_TOKEN: string;
 }
 
@@ -18,7 +19,7 @@ declare namespace Cloudflare {
     DISCORD_APPLICATION_ID: string;
     OPENROUTER_API_KEY: string;
     GATEWAY_CONTROL_TOKEN: string;
-    GATEWAY_STATUS_TOKEN: string;
+    BRAVE_SEARCH_API_KEY: string;
     /** Test-only: parsed D1 migrations, injected via vitest.config.ts. */
     TEST_MIGRATIONS?: { name: string; queries: string[] }[];
   }

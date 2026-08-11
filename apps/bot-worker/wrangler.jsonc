@@ -9,7 +9,7 @@
   },
   "vars": {
     "AI_PROVIDER": "openrouter",
-    "AI_MODEL": "deepseek/deepseek-chat",
+    "AI_MODEL": "openai/gpt-5.6-luna",
   },
   "d1_databases": [
     {
