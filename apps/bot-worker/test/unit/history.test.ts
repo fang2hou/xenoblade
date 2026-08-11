@@ -51,22 +51,22 @@ describe("getBoundedHistory", () => {
     expect(result.filter((m) => m.id === "c")).toHaveLength(1);
   });
 
-  it("caps the result at 40 messages", async () => {
+  it("caps the result at 20 messages", async () => {
     const msgs: Message[] = [];
-    for (let i = 0; i < 50; i++) {
+    for (let i = 0; i < 30; i++) {
       msgs.push(msg(`m${i}`, "x"));
     }
     const current = msgs[msgs.length - 1];
     const result = await getBoundedHistory(thread(msgs), current);
-    expect(result).toHaveLength(40);
+    expect(result).toHaveLength(20);
     // newest 40 retained, oldest dropped first
     expect(result[0]?.id).toBe("m10");
-    expect(result[39]?.id).toBe("m49");
+    expect(result[19]?.id).toBe("m29");
   });
 
-  it("enforces the 16000 Unicode character cap", async () => {
-    const big = "a".repeat(8_000);
-    // current + two 8000-char messages = 24,000 chars; only two fit (16,000).
+  it("enforces the 8000 Unicode character cap", async () => {
+    const big = "a".repeat(4_000);
+    // current + two 4000-char messages = 24,000 chars; only two fit (16,000).
     const current = msg("c", big);
     const result = await getBoundedHistory(
       thread([msg("a", big), msg("b", big), current]),
@@ -76,22 +76,22 @@ describe("getBoundedHistory", () => {
   });
 
   it("counts Unicode characters, not UTF-16 code units", async () => {
-    // Each emoji is 2 UTF-16 code units but 1 Unicode code point. 8000 emoji
-    // = 8000 chars but 16000 code units; the char cap uses [...str].length.
-    const emoji = "😀".repeat(8_000);
+    // Each emoji is 2 UTF-16 code units but 1 Unicode code point. 4000 emoji
+    // = 4000 chars but 16000 code units; the char cap uses [...str].length.
+    const emoji = "😀".repeat(4_000);
     const current = msg("c", emoji);
     const result = await getBoundedHistory(
       thread([msg("a", emoji), msg("b", emoji), current]),
       current,
     );
-    // 8000 chars each; two messages = 16,000 (== cap, allowed), three exceeds.
+    // 4000 chars each; two messages = 8,000 (== cap, allowed), three exceeds.
     expect(result.map((m) => m.id)).toEqual(["b", "c"]);
   });
 
-  it("enforces the 8000 estimated-token cap", async () => {
-    // ceil(totalChars / 2) <= 8000. One 16000-char message → 8000 tokens (ok).
+  it("enforces the 4000 estimated-token cap", async () => {
+    // ceil(totalChars / 2) <= 8000. One 8000-char message → 4000 tokens (ok).
     // Adding a second message pushes tokens over 8000.
-    const big = "z".repeat(16_000);
+    const big = "z".repeat(8_000);
     const current = msg("c", big);
     const result = await getBoundedHistory(
       thread([msg("a", big), msg("b", big), current]),
@@ -102,7 +102,7 @@ describe("getBoundedHistory", () => {
 
   it("drops older messages before the newer ones when over the cap", async () => {
     // current is large enough that it alone fits but a sibling does not.
-    const big = "z".repeat(17_000);
+    const big = "z".repeat(9_000);
     const current = msg("c", "small");
     const result = await getBoundedHistory(
       thread([msg("a", big), msg("b", "small"), current]),
@@ -128,7 +128,7 @@ describe("getBoundedHistory", () => {
     expect(result.map((m) => m.id)).toEqual(["a", "c"]);
   });
 
-  it("uses only the adapter page (limit 50), never an unbounded source", async () => {
+  it("uses only the adapter page (limit 25), never an unbounded source", async () => {
     const current = msg("c", "current");
     let requestedLimit: number | undefined;
     const t: HistoryThread = {
@@ -141,7 +141,7 @@ describe("getBoundedHistory", () => {
       },
     };
     await getBoundedHistory(t, current);
-    expect(requestedLimit).toBe(50);
+    expect(requestedLimit).toBe(25);
   });
 
   it("de-duplicates repeated ids, keeping the last occurrence", async () => {
@@ -172,7 +172,7 @@ describe("getBoundedHistory — container branching", () => {
     };
     await getBoundedHistory(t, msg("a", "hi"));
     expect(fetchMessages).toHaveBeenCalledWith("discord:guild:parent:thread1", {
-      limit: 50,
+      limit: 25,
     });
   });
 
@@ -204,7 +204,7 @@ describe("getBoundedHistory — container branching", () => {
     const current = msg("a", "channel");
     const result = await getBoundedHistory(t, current);
     expect(fetchChannelMessages).toHaveBeenCalledWith("discord:guild:channel1", {
-      limit: 50,
+      limit: 25,
     });
     expect(fetchMessages).not.toHaveBeenCalled();
     expect(result.map((m) => m.id)).toEqual(["a"]);
@@ -221,7 +221,7 @@ describe("getBoundedHistory — container branching", () => {
     const current = msg("a", "fallback");
     const result = await getBoundedHistory(t, current);
     expect(fetchMessages).toHaveBeenCalledWith("discord:guild:channel1", {
-      limit: 50,
+      limit: 25,
     });
     expect(result.map((m) => m.id)).toEqual(["a"]);
   });
