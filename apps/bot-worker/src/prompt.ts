@@ -128,7 +128,14 @@ export async function buildGenerationMessages(
   const block = formatContextBlock(contextMessages);
 
   if (context.forced) {
-    const history = await toAiMessages(contextMessages, { includeNames: false });
+    // Strip attachments/links from history to avoid CPU-intensive image
+    // processing in toAiMessages. Only the current message carries images.
+    const textOnly = contextMessages.map((m) => ({
+      ...m,
+      attachments: [],
+      links: [],
+    })) as unknown as Message[];
+    const history = await toAiMessages(textOnly, { includeNames: false });
     return [...history, withContextBlock(current, block)];
   }
 

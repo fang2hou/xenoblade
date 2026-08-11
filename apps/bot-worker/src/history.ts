@@ -1,13 +1,13 @@
 import type { Message } from "chat";
 
 /** Maximum number of messages returned to the AI. */
-const MAX_MESSAGES = 40;
+const MAX_MESSAGES = 20;
 /** Maximum total Unicode characters across the returned history. */
-const MAX_CHARACTERS = 16_000;
+const MAX_CHARACTERS = 8_000;
 /** Maximum estimated tokens (chars / 2, rounded up) across the history. */
-const MAX_TOKENS = 8_000;
+const MAX_TOKENS = 4_000;
 /** Page size used when fetching recent messages. */
-const FETCH_LIMIT = 50;
+const FETCH_LIMIT = 25;
 
 /**
  * Minimal structural view of a Chat SDK thread. Only the fields consumed by

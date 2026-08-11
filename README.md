@@ -103,15 +103,15 @@ Model and provider are configured in `wrangler.jsonc`:
 
 ## Usage
 
-| Action              | Description                                                          |
-| ------------------- | ------------------------------------------------------------------- |
-| `@bot <message>`    | Mention with text — full conversation context included              |
-| `@bot` (bare)       | Read and respond to your most recent prior message                  |
-| Reply to bot        | Continue a conversation thread                                       |
-| `/status`           | Check gateway status                                                |
-| `/clear-context`    | Clear your conversation context in the current channel              |
-| Voice message + `@bot` | Transcribe via gpt-transcribe, then respond                       |
-| Image + `@bot`      | Bot sees and describes the image                                    |
+| Action                 | Description                                            |
+| ---------------------- | ------------------------------------------------------ |
+| `@bot <message>`       | Mention with text — full conversation context included |
+| `@bot` (bare)          | Read and respond to your most recent prior message     |
+| Reply to bot           | Continue a conversation thread                         |
+| `/status`              | Check gateway status                                   |
+| `/clear-context`       | Clear your conversation context in the current channel |
+| Voice message + `@bot` | Transcribe via gpt-transcribe, then respond            |
+| Image + `@bot`         | Bot sees and describes the image                       |
 
 The bot always replies in the user's language and switches when asked.
 
