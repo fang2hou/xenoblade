@@ -1,16 +1,15 @@
-import { getGatewayStub } from "discord-gateway-cloudflare-do";
-import type { DiscordGatewayDO } from "discord-gateway-cloudflare-do";
+import type { XenobladeGatewayDO } from "./gateway-do";
 
 import { timingSafeTokenMatch } from "./gateway-auth";
 
-type GatewayControl = Pick<DiscordGatewayDO, "connect" | "disconnect" | "status">;
+type GatewayControl = Pick<XenobladeGatewayDO, "connectGateway" | "disconnect" | "status">;
 
-// workers-types 5.x reserves `connect` on Durable Object stubs for TCP sockets,
-// hiding the gateway's own RPC connect; narrow to the gateway method surface.
+// `connect()` is a reserved name on DO stubs (socket-like connections), so the
+// gateway exposes connectGateway() as an RPC alias (see ./gateway-do). Narrow
+// the stub to the gateway method surface we actually call over RPC.
 function gatewayControl(env: Env): GatewayControl {
-  return getGatewayStub({
-    namespace: env.DISCORD_GATEWAY as DurableObjectNamespace<DiscordGatewayDO>,
-  }) as unknown as GatewayControl;
+  const id = env.DISCORD_GATEWAY.idFromName("default");
+  return env.DISCORD_GATEWAY.get(id) as unknown as GatewayControl;
 }
 
 export function notFound(): Response {
@@ -57,7 +56,7 @@ export async function handleGatewayRequest(request: Request, env: Env): Promise<
     }
     const gateway = gatewayControl(env);
     return Response.json(
-      await gateway.connect({
+      await gateway.connectGateway({
         botToken: env.DISCORD_BOT_TOKEN,
         webhookUrl: `${url.origin}/webhooks/discord`,
       }),
