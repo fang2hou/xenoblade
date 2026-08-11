@@ -22,6 +22,7 @@ import { fetchRecentMessages, type HistoryThread } from "./history";
 import { buildContext, postToConversation } from "./context";
 import { SAFETY_SYSTEM, buildGenerationMessages } from "./prompt";
 import { parseDiscordMessageLinks, fetchLinkedMessages } from "./discord-links";
+import { renderUrlViaBrowser } from "./browser-render";
 import { transcribeAudio } from "./transcribe";
 
 const FAILURE_REPLY = "这次处理失败了，请稍后重试。";
@@ -242,18 +243,29 @@ export async function handleAiTrigger(
       searchContext = await searchAndRead(message.text, env);
     }
 
-    // Read non-Discord URLs the user included in their message.
+    // Read non-Discord URLs: Jina Reader first, Browser Rendering fallback.
     let urlContext: string | undefined;
     const webUrls = extractWebUrls(message.text);
-    if (webUrls.length > 0 && env.JINA_API_KEY) {
+    if (webUrls.length > 0) {
       const contents = await Promise.allSettled(
-        webUrls.slice(0, 2).map((u) => readUrlViaJina(u, env.JINA_API_KEY)),
+        webUrls.slice(0, 2).map(async (url) => {
+          // Tier 2: Jina Reader
+          if (env.JINA_API_KEY) {
+            const text = await readUrlViaJina(url, env.JINA_API_KEY);
+            if (text && text.length > 100) return { url, text };
+          }
+          // Tier 3: Browser Rendering (JS-heavy pages)
+          if (env.BROWSER) {
+            const text = await renderUrlViaBrowser(url, env.BROWSER);
+            if (text) return { url, text };
+          }
+          return null;
+        }),
       );
       const parts: string[] = [];
-      for (let i = 0; i < contents.length; i++) {
-        const r = contents[i];
+      for (const r of contents) {
         if (r.status === "fulfilled" && r.value) {
-          parts.push(`## ${webUrls[i]}\n${r.value}`);
+          parts.push(`## ${r.value.url}\n${r.value.text}`);
         }
       }
       if (parts.length > 0) urlContext = parts.join("\n\n---\n\n");
