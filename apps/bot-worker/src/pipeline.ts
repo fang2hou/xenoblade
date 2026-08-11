@@ -452,7 +452,7 @@ function looksLikeSearch(text: string): boolean {
   return keywords.some((k) => lower.includes(k));
 }
 
-/** Search via Jina Search API (s.jina.ai) — returns URLs + full page content in one call. */
+/** Search: Brave Answers (synthesized) primary, Jina Search (raw content) fallback. */
 async function searchAndRead(query: string, env: Env): Promise<string | undefined> {
   const cleanQuery = query
     .replace(/<@!?\d+>/g, "")
@@ -460,7 +460,36 @@ async function searchAndRead(query: string, env: Env): Promise<string | undefine
     .slice(0, 200);
   if (!cleanQuery) return undefined;
 
-  // Try Jina Search first (single call: search + content)
+  // 1. Brave Answers — AI-generated grounded answer (OpenAI-compatible endpoint)
+  if (env.BRAVE_SEARCH_API_KEY) {
+    try {
+      const response = await fetch("https://api.search.brave.com/res/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-subscription-token": env.BRAVE_SEARCH_API_KEY,
+        },
+        body: JSON.stringify({
+          stream: false,
+          messages: [{ role: "user", content: cleanQuery }],
+        }),
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (response.ok) {
+        const data = (await response.json()) as {
+          choices?: Array<{ message?: { content?: string } }>;
+        };
+        const answer = data?.choices?.[0]?.message?.content;
+        if (answer && answer.trim()) {
+          return answer.trim().slice(0, 4000);
+        }
+      }
+    } catch {
+      // Brave Answers failed — try Jina
+    }
+  }
+
+  // 2. Jina Search — raw page content from top results
   if (env.JINA_API_KEY) {
     try {
       const response = await fetch(
@@ -485,34 +514,6 @@ async function searchAndRead(query: string, env: Env): Promise<string | undefine
                 `${i + 1}. ${r.title ?? ""}\n   ${r.url ?? ""}\n   ${(r.content ?? "").slice(0, 2000)}`,
             )
             .join("\n\n---\n\n");
-        }
-      }
-    } catch {
-      // Jina failed — fall back to Brave
-    }
-  }
-
-  // Fallback: Brave Search (snippets only, no full content)
-  if (env.BRAVE_SEARCH_API_KEY) {
-    try {
-      const response = await fetch(
-        `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(cleanQuery)}&count=5`,
-        {
-          headers: { Accept: "application/json", "X-Subscription-Token": env.BRAVE_SEARCH_API_KEY },
-          signal: AbortSignal.timeout(8_000),
-        },
-      );
-      if (response.ok) {
-        const data = (await response.json()) as {
-          web?: { results?: Array<{ title?: string; url?: string; description?: string }> };
-        };
-        const results = (data?.web?.results ?? []).slice(0, 5);
-        if (results.length > 0) {
-          return results
-            .map(
-              (r, i) => `${i + 1}. ${r.title ?? ""}\n   ${r.url ?? ""}\n   ${r.description ?? ""}`,
-            )
-            .join("\n\n");
         }
       }
     } catch {
