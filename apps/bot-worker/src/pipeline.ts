@@ -452,7 +452,7 @@ function looksLikeSearch(text: string): boolean {
   return keywords.some((k) => lower.includes(k));
 }
 
-/** Search via Brave, then fetch full content for top 2 results via Jina Reader. */
+/** Search via Jina Search API (s.jina.ai) — returns URLs + full page content in one call. */
 async function searchAndRead(query: string, env: Env): Promise<string | undefined> {
   const cleanQuery = query
     .replace(/<@!?\d+>/g, "")
@@ -460,66 +460,67 @@ async function searchAndRead(query: string, env: Env): Promise<string | undefine
     .slice(0, 200);
   if (!cleanQuery) return undefined;
 
-  let results: Array<{ title?: string; url?: string; description?: string }> = [];
-  if (env.BRAVE_SEARCH_API_KEY) {
+  // Try Jina Search first (single call: search + content)
+  if (env.JINA_API_KEY) {
     try {
-      const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(cleanQuery)}&count=5`;
-      const response = await fetch(url, {
-        headers: { Accept: "application/json", "X-Subscription-Token": env.BRAVE_SEARCH_API_KEY },
-        signal: AbortSignal.timeout(8_000),
-      });
+      const response = await fetch(
+        `https://s.jina.ai/?q=${encodeURIComponent(cleanQuery)}&count=3`,
+        {
+          headers: {
+            Accept: "application/json",
+            Authorization: `Bearer ${env.JINA_API_KEY}`,
+          },
+          signal: AbortSignal.timeout(15_000),
+        },
+      );
       if (response.ok) {
-        const data = (await response.json()) as { web?: { results?: typeof results } };
-        results = (data?.web?.results ?? []).slice(0, 5);
+        const data = (await response.json()) as {
+          data?: Array<{ title?: string; url?: string; content?: string }>;
+        };
+        const results = (data?.data ?? []).slice(0, 3);
+        if (results.length > 0) {
+          return results
+            .map(
+              (r, i) =>
+                `${i + 1}. ${r.title ?? ""}\n   ${r.url ?? ""}\n   ${(r.content ?? "").slice(0, 2000)}`,
+            )
+            .join("\n\n---\n\n");
+        }
       }
     } catch {
-      // Brave failed — continue with empty results
+      // Jina failed — fall back to Brave
     }
   }
 
-  const topUrls = results
-    .slice(0, 2)
-    .filter((r) => r.url)
-    .map((r) => r.url!);
-  const fullContents: string[] = [];
-  if (env.JINA_API_KEY && topUrls.length > 0) {
-    const contents = await Promise.allSettled(
-      topUrls.map((pageUrl) => fetchJinaContent(pageUrl, env.JINA_API_KEY)),
-    );
-    for (let i = 0; i < contents.length; i++) {
-      const r = contents[i];
-      if (r.status === "fulfilled" && r.value) {
-        fullContents.push(`## ${topUrls[i]}\n${r.value}`);
+  // Fallback: Brave Search (snippets only, no full content)
+  if (env.BRAVE_SEARCH_API_KEY) {
+    try {
+      const response = await fetch(
+        `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(cleanQuery)}&count=5`,
+        {
+          headers: { Accept: "application/json", "X-Subscription-Token": env.BRAVE_SEARCH_API_KEY },
+          signal: AbortSignal.timeout(8_000),
+        },
+      );
+      if (response.ok) {
+        const data = (await response.json()) as {
+          web?: { results?: Array<{ title?: string; url?: string; description?: string }> };
+        };
+        const results = (data?.web?.results ?? []).slice(0, 5);
+        if (results.length > 0) {
+          return results
+            .map(
+              (r, i) => `${i + 1}. ${r.title ?? ""}\n   ${r.url ?? ""}\n   ${r.description ?? ""}`,
+            )
+            .join("\n\n");
+        }
       }
+    } catch {
+      // Both failed
     }
   }
 
-  const parts: string[] = [];
-  if (results.length > 0) {
-    parts.push(
-      results
-        .map((r, i) => `${i + 1}. ${r.title ?? ""}\n   ${r.url ?? ""}\n   ${r.description ?? ""}`)
-        .join("\n\n"),
-    );
-  }
-  if (fullContents.length > 0) {
-    parts.push("## Full page content (via Jina Reader)\n" + fullContents.join("\n\n---\n\n"));
-  }
-  return parts.length > 0 ? parts.join("\n\n") : undefined;
-}
-
-/** Fetch clean markdown from a URL via Jina Reader API. */
-async function fetchJinaContent(url: string, apiKey: string): Promise<string | undefined> {
-  try {
-    const response = await fetch(`https://r.jina.ai/${url}`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-      signal: AbortSignal.timeout(12_000),
-    });
-    if (!response.ok) return undefined;
-    return (await response.text()).slice(0, 3000);
-  } catch {
-    return undefined;
-  }
+  return undefined;
 }
 
 export async function safePost(thread: Thread, text: string): Promise<void> {
