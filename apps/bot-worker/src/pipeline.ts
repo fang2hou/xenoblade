@@ -236,11 +236,32 @@ export async function handleAiTrigger(
       }
     }
 
-    // Pre-search: if the message looks like a search query, fetch results
-    // from Brave + full page content from Jina Reader, then inject as context.
+    // Fetch web content: search for queries, read URLs from messages.
     let searchContext: string | undefined;
     if (looksLikeSearch(message.text)) {
       searchContext = await searchAndRead(message.text, env);
+    }
+
+    // Read non-Discord URLs the user included in their message.
+    let urlContext: string | undefined;
+    const webUrls = extractWebUrls(message.text);
+    if (webUrls.length > 0 && env.JINA_API_KEY) {
+      const contents = await Promise.allSettled(
+        webUrls.slice(0, 2).map((u) => readUrlViaJina(u, env.JINA_API_KEY)),
+      );
+      const parts: string[] = [];
+      for (let i = 0; i < contents.length; i++) {
+        const r = contents[i];
+        if (r.status === "fulfilled" && r.value) {
+          parts.push(`## ${webUrls[i]}\n${r.value}`);
+        }
+      }
+      if (parts.length > 0) urlContext = parts.join("\n\n---\n\n");
+    }
+
+    // Combine search + URL content into one context block.
+    if (urlContext) {
+      searchContext = (searchContext ?? "") + "\n\n[URL content]\n" + urlContext;
     }
 
     let genUsage: {
@@ -522,6 +543,28 @@ async function searchAndRead(query: string, env: Env): Promise<string | undefine
   }
 
   return undefined;
+}
+
+/** Extract non-Discord HTTP(S) URLs from text (max 3). */
+function extractWebUrls(text: string): string[] {
+  const urls = text.match(
+    /https?:\/\/(?!discord\.com|ptb\.discord\.com|canary\.discord\.com)[^\s<>"']+/gi,
+  );
+  return (urls ?? []).slice(0, 3);
+}
+
+/** Read a single URL's content via Jina Reader (r.jina.ai). */
+async function readUrlViaJina(url: string, apiKey: string): Promise<string | undefined> {
+  try {
+    const response = await fetch(`https://r.jina.ai/${url}`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(12_000),
+    });
+    if (!response.ok) return undefined;
+    return (await response.text()).slice(0, 3000);
+  } catch {
+    return undefined;
+  }
 }
 
 export async function safePost(thread: Thread, text: string): Promise<void> {
