@@ -236,13 +236,11 @@ export async function handleAiTrigger(
       }
     }
 
-    // Pre-search: if the message looks like a search query and Brave API is
-    // available, fetch results BEFORE the model call and inject as context.
-    // This replaces fragile multi-step AI SDK tool execution with a single
-    // reliable model call.
+    // Pre-search: if the message looks like a search query, fetch results
+    // from Brave + full page content from Jina Reader, then inject as context.
     let searchContext: string | undefined;
-    if (env.BRAVE_SEARCH_API_KEY && looksLikeSearch(message.text)) {
-      searchContext = await braveSearch(message.text, env.BRAVE_SEARCH_API_KEY);
+    if (looksLikeSearch(message.text)) {
+      searchContext = await searchAndRead(message.text, env);
     }
 
     let genUsage: {
@@ -457,28 +455,71 @@ function looksLikeSearch(text: string): boolean {
   return keywords.some((k) => lower.includes(k));
 }
 
-/** Call Brave Search API and return formatted results. */
-async function braveSearch(query: string, apiKey: string): Promise<string | undefined> {
+/** Search via Brave, then fetch full content for top 2 results via Jina Reader. */
+async function searchAndRead(query: string, env: Env): Promise<string | undefined> {
   const cleanQuery = query
     .replace(/<@!?\d+>/g, "")
     .trim()
     .slice(0, 200);
   if (!cleanQuery) return undefined;
+
+  let results: Array<{ title?: string; url?: string; description?: string }> = [];
+  if (env.BRAVE_SEARCH_API_KEY) {
+    try {
+      const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(cleanQuery)}&count=5`;
+      const response = await fetch(url, {
+        headers: { Accept: "application/json", "X-Subscription-Token": env.BRAVE_SEARCH_API_KEY },
+        signal: AbortSignal.timeout(8_000),
+      });
+      if (response.ok) {
+        const data = (await response.json()) as { web?: { results?: typeof results } };
+        results = (data?.web?.results ?? []).slice(0, 5);
+      }
+    } catch {
+      // Brave failed — continue with empty results
+    }
+  }
+
+  const topUrls = results
+    .slice(0, 2)
+    .filter((r) => r.url)
+    .map((r) => r.url!);
+  const fullContents: string[] = [];
+  if (env.JINA_API_KEY && topUrls.length > 0) {
+    const contents = await Promise.allSettled(
+      topUrls.map((pageUrl) => fetchJinaContent(pageUrl, env.JINA_API_KEY)),
+    );
+    for (let i = 0; i < contents.length; i++) {
+      const r = contents[i];
+      if (r.status === "fulfilled" && r.value) {
+        fullContents.push(`## ${topUrls[i]}\n${r.value}`);
+      }
+    }
+  }
+
+  const parts: string[] = [];
+  if (results.length > 0) {
+    parts.push(
+      results
+        .map((r, i) => `${i + 1}. ${r.title ?? ""}\n   ${r.url ?? ""}\n   ${r.description ?? ""}`)
+        .join("\n\n"),
+    );
+  }
+  if (fullContents.length > 0) {
+    parts.push("## Full page content (via Jina Reader)\n" + fullContents.join("\n\n---\n\n"));
+  }
+  return parts.length > 0 ? parts.join("\n\n") : undefined;
+}
+
+/** Fetch clean markdown from a URL via Jina Reader API. */
+async function fetchJinaContent(url: string, apiKey: string): Promise<string | undefined> {
   try {
-    const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(cleanQuery)}&count=5`;
-    const response = await fetch(url, {
-      headers: { Accept: "application/json", "X-Subscription-Token": apiKey },
-      signal: AbortSignal.timeout(10_000),
+    const response = await fetch(`https://r.jina.ai/${url}`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(12_000),
     });
     if (!response.ok) return undefined;
-    const data = (await response.json()) as {
-      web?: { results?: Array<{ title?: string; url?: string; description?: string }> };
-    };
-    const results = (data?.web?.results ?? []).slice(0, 5);
-    if (results.length === 0) return undefined;
-    return results
-      .map((r, i) => `${i + 1}. ${r.title ?? ""}\n   ${r.url ?? ""}\n   ${r.description ?? ""}`)
-      .join("\n\n");
+    return (await response.text()).slice(0, 3000);
   } catch {
     return undefined;
   }
