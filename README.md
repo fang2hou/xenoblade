@@ -4,26 +4,26 @@ A natural Discord bot powered by LLMs — running entirely on Cloudflare Workers
 
 ## Features
 
-- **Natural conversation** — replies in-channel (no forced thread creation), reads context intelligently
+- **Natural conversation** — replies in-channel (no forced thread creation), always reads conversation context, matches the user's language
 - **Vision** — sees images in messages and Discord message links
 - **Voice** — transcribes audio messages via `openai/gpt-transcribe`
 - **Web search** — Brave Search tool for real-time information
-- **Per-user context** — isolated conversation state with `/clear-context` and natural-language directives
+- **Per-user context** — isolated conversation state with `/clear-context`
 - **Bare @mention fallback** — send a message, then `@bot` alone to trigger it
+- **Retry with backoff** — generation retries up to 3 times on transient failures
 
 ## Architecture
 
 ```
 Discord Gateway ──► Worker (/webhooks/discord)
-                        │
-                        ├── @xenoblade/ai    model selection + prompt construction
-                        ├── @xenoblade/db    D1: budget, dedup, user context state
-                        ├── context-policy   relevance scoring, directive parsing
-                        ├── context          history fetching + container isolation
-                        ├── prompt           cache-friendly message building
-                        ├── tools            Brave Search
-                        ├── transcribe       voice → text (gpt-transcribe)
-                        └── discord-links    message link unfurling (text + images)
+                       │
+                       ├── @xenoblade/ai    model selection + prompt construction
+                       ├── @xenoblade/db    D1: budget, dedup, user context state
+                       ├── context          history fetching + container isolation
+                       ├── prompt           cache-friendly message building
+                       ├── tools            Brave Search
+                       ├── transcribe       voice → text (gpt-transcribe)
+                       └── discord-links    message link unfurling (text + images)
 ```
 
 ## Quick Start
@@ -101,23 +101,28 @@ Model and provider are configured in `wrangler.jsonc`:
 }
 ```
 
-## Commands
+## Usage
 
-| Command          | Description                                            |
-| ---------------- | ------------------------------------------------------ |
-| `/status`        | Check gateway status                                   |
-| `/clear-context` | Clear your conversation context in the current channel |
-| `@bot` (bare)    | Read and respond to your most recent message           |
-| `不用参考之前的` | One-shot: skip history for this turn only              |
+| Action              | Description                                                          |
+| ------------------- | ------------------------------------------------------------------- |
+| `@bot <message>`    | Mention with text — full conversation context included              |
+| `@bot` (bare)       | Read and respond to your most recent prior message                  |
+| Reply to bot        | Continue a conversation thread                                       |
+| `/status`           | Check gateway status                                                |
+| `/clear-context`    | Clear your conversation context in the current channel              |
+| Voice message + `@bot` | Transcribe via gpt-transcribe, then respond                       |
+| Image + `@bot`      | Bot sees and describes the image                                    |
+
+The bot always replies in the user's language and switches when asked.
 
 ## Development
 
 ```bash
-pnpm test                                    # unit tests
-pnpm --filter @xenoblade/bot-worker test:worker  # worker integration tests
-pnpm typecheck                               # TypeScript check
-pnpm lint                                    # oxlint
-pnpm format                                  # oxfmt
+pnpm test                                         # unit tests
+pnpm --filter @xenoblade/bot-worker test:worker   # worker integration tests
+pnpm typecheck                                    # TypeScript check
+pnpm lint                                         # oxlint
+pnpm format                                       # oxfmt
 ```
 
 ## Tech Stack
