@@ -11,6 +11,7 @@ interface Env {
   BRAVE_SEARCH_API_KEY: string;
   JINA_API_KEY: string;
   GATEWAY_STATUS_TOKEN: string;
+  BROWSER: Fetcher;
 }
 
 declare namespace Cloudflare {
