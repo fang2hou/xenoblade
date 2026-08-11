@@ -12,3 +12,6 @@ coverage/
 
 # OS files
 .DS_Store
+
+# Generated types
+apps/bot-worker/worker-configuration.d.ts

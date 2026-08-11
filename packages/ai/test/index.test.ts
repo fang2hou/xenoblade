@@ -27,7 +27,14 @@ describe("selectModelId", () => {
   });
 
   it("only allows the whitelisted models", () => {
-    expect([...ALLOWED_MODELS.openrouter]).toEqual(["deepseek/deepseek-chat"]);
+    expect([...ALLOWED_MODELS.openrouter]).toEqual([
+      "openai/gpt-5.6-luna",
+      "deepseek/deepseek-chat",
+    ]);
+  });
+
+  it("returns the Luna model when explicitly requested", () => {
+    expect(selectModelId("openrouter", "openai/gpt-5.6-luna")).toBe("openai/gpt-5.6-luna");
   });
 });
 
@@ -48,6 +55,21 @@ describe("selectModel", () => {
     expect(() =>
       selectModel({ AI_PROVIDER: "deepseek", OPENROUTER_API_KEY: "sk-test" }),
     ).toThrowError(/Unknown AI provider: deepseek/);
+  });
+
+  it("succeeds with a sessionId option without throwing", () => {
+    expect(() =>
+      selectModel(
+        { AI_PROVIDER: "openrouter", OPENROUTER_API_KEY: "sk-test" },
+        { sessionId: "xenoblade:discord:123:456" },
+      ),
+    ).not.toThrow();
+  });
+
+  it("succeeds without a sessionId option (backward compat)", () => {
+    expect(() =>
+      selectModel({ AI_PROVIDER: "openrouter", OPENROUTER_API_KEY: "sk-test" }),
+    ).not.toThrow();
   });
 });
 

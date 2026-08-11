@@ -1,16 +1,16 @@
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 
 export const ALLOWED_MODELS = {
-  openrouter: new Set(["deepseek/deepseek-chat"]),
+  openrouter: new Set(["openai/gpt-5.6-luna", "deepseek/deepseek-chat"]),
 } as const;
 
 export const DEFAULT_MODELS = {
-  openrouter: "deepseek/deepseek-chat",
+  openrouter: "openai/gpt-5.6-luna",
 } as const;
 
 export const GENERATION_LIMITS = {
-  maxOutputTokens: 512,
-  timeout: { totalMs: 30_000, firstChunkMs: 10_000, chunkMs: 5_000 },
+  maxOutputTokens: 1024,
+  timeout: { totalMs: 60_000, firstChunkMs: 15_000, chunkMs: 5_000 },
 } as const;
 
 export function selectModelId(provider: string, requested?: string): string {
@@ -26,14 +26,32 @@ export function selectModelId(provider: string, requested?: string): string {
   return requested;
 }
 
-export function selectModel(env: {
-  AI_PROVIDER: string;
-  AI_MODEL?: string;
-  OPENROUTER_API_KEY?: string;
-}) {
+/**
+ * Selects an AI model for the configured provider.
+ *
+ * When `options.sessionId` is provided, it is forwarded to OpenRouter via
+ * `extraBody.session_id` to enable provider sticky routing, which improves
+ * DeepSeek automatic prefix-cache hit rates across turns for the same
+ * conversation container. The caller is responsible for keeping the session
+ * id stable (e.g. `xenoblade:${containerId}`) and under 256 characters.
+ */
+export function selectModel(
+  env: {
+    AI_PROVIDER: string;
+    AI_MODEL?: string;
+    OPENROUTER_API_KEY?: string;
+  },
+  options?: { sessionId?: string },
+) {
   const modelId = selectModelId(env.AI_PROVIDER, env.AI_MODEL);
   if (!env.OPENROUTER_API_KEY) {
     throw new Error("OPENROUTER_API_KEY is not configured");
+  }
+  if (options?.sessionId) {
+    return createOpenRouter({
+      apiKey: env.OPENROUTER_API_KEY,
+      extraBody: { session_id: options.sessionId },
+    }).chat(modelId);
   }
   return createOpenRouter({ apiKey: env.OPENROUTER_API_KEY }).chat(modelId);
 }

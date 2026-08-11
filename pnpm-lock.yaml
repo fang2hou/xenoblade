@@ -4,6 +4,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@chat-adapter/discord@4.36.0': eed909456d1f5ac790ab128461bc8285d9dda9d004bff507a1219747b7fe805c
+
 importers:
 
   .:
@@ -28,7 +31,7 @@ importers:
     dependencies:
       '@chat-adapter/discord':
         specifier: 4.36.0
-        version: 4.36.0(ai@7.0.55(zod@4.4.3))(supports-color@10.2.2)(zod@4.4.3)
+        version: 4.36.0(patch_hash=eed909456d1f5ac790ab128461bc8285d9dda9d004bff507a1219747b7fe805c)(ai@7.0.55(zod@4.4.3))(supports-color@10.2.2)(zod@4.4.3)
       '@xenoblade/ai':
         specifier: workspace:*
         version: link:../../packages/ai
@@ -1778,7 +1781,7 @@ snapshots:
     dependencies:
       json-schema: 0.4.0
 
-  '@chat-adapter/discord@4.36.0(ai@7.0.55(zod@4.4.3))(supports-color@10.2.2)(zod@4.4.3)':
+  '@chat-adapter/discord@4.36.0(patch_hash=eed909456d1f5ac790ab128461bc8285d9dda9d004bff507a1219747b7fe805c)(ai@7.0.55(zod@4.4.3))(supports-color@10.2.2)(zod@4.4.3)':
     dependencies:
       '@chat-adapter/shared': 4.36.0(ai@7.0.55(zod@4.4.3))(supports-color@10.2.2)(zod@4.4.3)
       chat: 4.36.0(ai@7.0.55(zod@4.4.3))(supports-color@10.2.2)(zod@4.4.3)

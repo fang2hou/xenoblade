@@ -36,6 +36,7 @@ export default defineConfig({
             OPENROUTER_API_KEY: "test-openrouter-key",
             GATEWAY_CONTROL_TOKEN: "test-control-token",
             GATEWAY_STATUS_TOKEN: "test-status-token",
+            BRAVE_SEARCH_API_KEY: "test-brave-key",
             TEST_MIGRATIONS: migrations,
           },
         },
