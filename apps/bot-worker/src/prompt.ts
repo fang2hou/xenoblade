@@ -117,27 +117,37 @@ export async function buildGenerationMessages(
   currentMessage: Message,
   linkedContent?: LinkedMessageContent[],
   audioTranscription?: string,
+  searchContext?: string,
 ): Promise<AiMessage[]> {
   const current = await currentMessageToAi(currentMessage, linkedContent, audioTranscription);
 
   if (context.mode === "none") {
-    return [current];
+    return [withSearchContext(current, searchContext)];
   }
 
   const contextMessages = context.messages.filter((m) => m.id !== currentMessage.id);
   const block = formatContextBlock(contextMessages);
 
   if (context.forced) {
-    // Strip attachments/links from history to avoid CPU-intensive image
-    // processing in toAiMessages. Only the current message carries images.
     const textOnly = contextMessages.map((m) => ({
       ...m,
       attachments: [],
       links: [],
     })) as unknown as Message[];
     const history = await toAiMessages(textOnly, { includeNames: false });
-    return [...history, withContextBlock(current, block)];
+    const tail = block + (searchContext ? `\n\n[Web search results]\n${searchContext}` : "");
+    return [...history, withContextBlock(current, tail)];
   }
 
-  return [withContextBlock(current, block)];
+  const tail = block + (searchContext ? `\n\n[Web search results]\n${searchContext}` : "");
+  return [withContextBlock(current, tail)];
+}
+
+/** Append search context as a trailing text part on a user message. */
+function withSearchContext(
+  message: AiUserMessage,
+  searchContext: string | undefined,
+): AiUserMessage {
+  if (!searchContext) return message;
+  return withContextBlock(message, `\n\n[Web search results]\n${searchContext}`);
 }

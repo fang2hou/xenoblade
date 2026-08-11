@@ -258,18 +258,15 @@ export async function handleAiTrigger(
           message,
           linkedContent,
           audioTranscription,
+          searchContext,
         );
-
-        // Inject search results as a system addendum if available.
-        const systemPrompt = searchContext
-          ? composeSystemPrompt({ safety: SAFETY_SYSTEM, base: runtime.defaultSystemPrompt }) +
-            "\n\n[Web search results]\n" +
-            searchContext
-          : composeSystemPrompt({ safety: SAFETY_SYSTEM, base: runtime.defaultSystemPrompt });
 
         const result = streamText({
           model: selectModel(env, { sessionId: `xenoblade:${containerId}` }),
-          system: systemPrompt,
+          system: composeSystemPrompt({
+            safety: SAFETY_SYSTEM,
+            base: runtime.defaultSystemPrompt,
+          }),
           messages: aiMessages,
           maxOutputTokens: GENERATION_LIMITS.maxOutputTokens,
           timeout: GENERATION_LIMITS.timeout,
