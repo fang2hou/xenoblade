@@ -57,7 +57,7 @@ export const RESERVATION_TOKENS = 1024 as const;
 export const BUDGET_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /** Maximum reserved tokens allowed within the rolling window. */
-export const BUDGET_MAX_TOKENS = 40_000;
+export const BUDGET_MAX_TOKENS = 200_000;
 
 /** Active-session window for per-user context. Interactions older than this
  * are treated as inactive (no forced context). */

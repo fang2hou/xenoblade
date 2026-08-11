@@ -1,5 +1,5 @@
 import type { Message, Thread } from "chat";
-import { isStepCount, streamText } from "ai";
+import { streamText } from "ai";
 
 import { GENERATION_LIMITS, composeSystemPrompt, selectModel } from "@xenoblade/ai";
 import {
@@ -21,7 +21,6 @@ import {
 import { fetchRecentMessages, type HistoryThread } from "./history";
 import { buildContext, postToConversation } from "./context";
 import { SAFETY_SYSTEM, buildGenerationMessages } from "./prompt";
-import { createSearchTools } from "./tools";
 import { parseDiscordMessageLinks, fetchLinkedMessages } from "./discord-links";
 import { transcribeAudio } from "./transcribe";
 
@@ -237,7 +236,14 @@ export async function handleAiTrigger(
       }
     }
 
-    const searchTools = createSearchTools(env.BRAVE_SEARCH_API_KEY);
+    // Pre-search: if the message looks like a search query and Brave API is
+    // available, fetch results BEFORE the model call and inject as context.
+    // This replaces fragile multi-step AI SDK tool execution with a single
+    // reliable model call.
+    let searchContext: string | undefined;
+    if (env.BRAVE_SEARCH_API_KEY && looksLikeSearch(message.text)) {
+      searchContext = await braveSearch(message.text, env.BRAVE_SEARCH_API_KEY);
+    }
 
     let genUsage: {
       completionTokens: number | null;
@@ -256,16 +262,19 @@ export async function handleAiTrigger(
           audioTranscription,
         );
 
+        // Inject search results as a system addendum if available.
+        const systemPrompt = searchContext
+          ? composeSystemPrompt({ safety: SAFETY_SYSTEM, base: runtime.defaultSystemPrompt }) +
+            "\n\n[Web search results]\n" +
+            searchContext
+          : composeSystemPrompt({ safety: SAFETY_SYSTEM, base: runtime.defaultSystemPrompt });
+
         const result = streamText({
           model: selectModel(env, { sessionId: `xenoblade:${containerId}` }),
-          system: composeSystemPrompt({
-            safety: SAFETY_SYSTEM,
-            base: runtime.defaultSystemPrompt,
-          }),
+          system: systemPrompt,
           messages: aiMessages,
           maxOutputTokens: GENERATION_LIMITS.maxOutputTokens,
           timeout: GENERATION_LIMITS.timeout,
-          ...(searchTools ? { tools: searchTools, stopWhen: isStepCount(3) } : {}),
         });
 
         const text = await result.text;
@@ -413,6 +422,66 @@ export function interactionRow(args: {
     cacheReadTokens: args.cacheReadTokens ?? null,
     cacheWriteTokens: args.cacheWriteTokens ?? null,
   } as const;
+}
+
+/** Detect if a message looks like it needs web search. */
+function looksLikeSearch(text: string): boolean {
+  const lower = text.toLowerCase();
+  const keywords = [
+    "查一下",
+    "搜索",
+    "搜一下",
+    "最新",
+    "新闻",
+    "排名",
+    "search",
+    "google",
+    "latest",
+    "news",
+    "rank",
+    "today",
+    "2024",
+    "2025",
+    "2026",
+    "什么是",
+    "怎么回事",
+    "怎么办",
+    "为什么",
+    "如何",
+    "what is",
+    "how to",
+    "why",
+    "who is",
+    "when",
+  ];
+  return keywords.some((k) => lower.includes(k));
+}
+
+/** Call Brave Search API and return formatted results. */
+async function braveSearch(query: string, apiKey: string): Promise<string | undefined> {
+  const cleanQuery = query
+    .replace(/<@!?\d+>/g, "")
+    .trim()
+    .slice(0, 200);
+  if (!cleanQuery) return undefined;
+  try {
+    const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(cleanQuery)}&count=5`;
+    const response = await fetch(url, {
+      headers: { Accept: "application/json", "X-Subscription-Token": apiKey },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) return undefined;
+    const data = (await response.json()) as {
+      web?: { results?: Array<{ title?: string; url?: string; description?: string }> };
+    };
+    const results = (data?.web?.results ?? []).slice(0, 5);
+    if (results.length === 0) return undefined;
+    return results
+      .map((r, i) => `${i + 1}. ${r.title ?? ""}\n   ${r.url ?? ""}\n   ${r.description ?? ""}`)
+      .join("\n\n");
+  } catch {
+    return undefined;
+  }
 }
 
 export async function safePost(thread: Thread, text: string): Promise<void> {
