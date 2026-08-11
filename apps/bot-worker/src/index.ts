@@ -25,10 +25,10 @@ import {
   getScopeIdFromDiscordMessage,
   resolveReplyToBot,
 } from "./scope";
-import { fetchRecentMessages, isRealDiscordThread, type HistoryThread } from "./history";
-import { buildContext, postToConversation, type ContextDecision } from "./context";
+import { fetchRecentMessages, type HistoryThread } from "./history";
+import { buildContext, postToConversation } from "./context";
 import { SAFETY_SYSTEM, buildGenerationMessages } from "./prompt";
-import { parseOneShotDirective } from "./context-policy";
+
 import { createSearchTools } from "./tools";
 import { parseDiscordMessageLinks, fetchLinkedMessages } from "./discord-links";
 import { transcribeAudio } from "./transcribe";
@@ -203,6 +203,15 @@ function registerHandlers(bot: Chat, env: Env): void {
   // --- Message triggers ---
 
   bot.onNewMention(async (thread, message) => {
+    console.log(
+      JSON.stringify({
+        event: "handler",
+        type: "onNewMention",
+        messageId: message.id,
+        isMention: message.isMention,
+        textLen: message.text.length,
+      }),
+    );
     if (await tryBareMentionFallback(env, thread, message)) return;
 
     const isReply = await resolveReplyToBot(
@@ -218,6 +227,16 @@ function registerHandlers(bot: Chat, env: Env): void {
   });
 
   bot.onNewMessage(/[\s\S]+/, async (thread, message) => {
+    console.log(
+      JSON.stringify({
+        event: "handler",
+        type: "onNewMessage",
+        messageId: message.id,
+        isMention: message.isMention,
+        isMe: message.author.isMe,
+        textLen: message.text.length,
+      }),
+    );
     if (message.author.isMe) {
       return;
     }
@@ -243,6 +262,16 @@ function registerHandlers(bot: Chat, env: Env): void {
   // deliver messages here. Keep the stop/结束 behavior, route qualifying
   // messages through the same pipeline, but never create new subscriptions.
   bot.onSubscribedMessage(async (thread, message, context) => {
+    console.log(
+      JSON.stringify({
+        event: "handler",
+        type: "onSubscribedMessage",
+        messageId: message.id,
+        isMention: message.isMention,
+        isMe: message.author.isMe,
+        textLen: message.text.length,
+      }),
+    );
     if (message.author.isMe) {
       return;
     }
@@ -289,7 +318,7 @@ async function handleAiTrigger(
   message: Message,
   params: TriggerParams,
 ): Promise<void> {
-  const { kind, isReplyToBot, unsubscribeOnError } = params;
+  const { kind, unsubscribeOnError } = params;
   const now = Date.now();
 
   // 1. De-duplicate delivery.
@@ -336,16 +365,12 @@ async function handleAiTrigger(
     userId: message.author.userId,
   });
 
-  // 6. One-shot directive: skip all history for this turn only.
-  const noContext = parseOneShotDirective(message.text);
+  // 6. Always force full context — every mention/reply is an intentional
+  //    request. The LLM decides whether to use the history (system prompt
+  //    guides it to ignore context when the user asks for a fresh answer).
+  const forceContext = true;
 
-  // 7. Determine whether to force full context or use relevance scoring.
-  //    Reply-to-bot, real threads, and active sessions always force context.
-  const isThread = isRealDiscordThread(containerId);
-  const forceContext =
-    params.forceContext || (!noContext && (isReplyToBot || isThread || state.active));
-
-  // 8. Budget reservation (before any AI call).
+  // 7. Budget reservation (before any AI call).
   let reservationId: number;
   try {
     reservationId = (await reserveGeneration(env.DB, containerId, now)).reservationId;
@@ -361,18 +386,13 @@ async function handleAiTrigger(
   await thread.startTyping();
 
   // 10. Build context decision.
-  let contextDecision: ContextDecision;
-  if (noContext) {
-    contextDecision = { mode: "none", forced: false, reason: "directive", messages: [] };
-  } else {
-    contextDecision = await buildContext({
-      thread,
-      message,
-      forceContext,
-      resetAt: state.resetAt,
-      now,
-    });
-  }
+  const contextDecision = await buildContext({
+    thread,
+    message,
+    forceContext,
+    resetAt: state.resetAt,
+    now,
+  });
 
   // 11. Generation + telemetry.
   const startedAt = now;
@@ -413,38 +433,77 @@ async function handleAiTrigger(
       }
     }
 
-    const aiMessages = await buildGenerationMessages(
-      contextDecision,
-      message,
-      linkedContent,
-      audioTranscription,
-    );
     const searchTools = createSearchTools(env.BRAVE_SEARCH_API_KEY);
 
-    const result = streamText({
-      model: selectModel(env, { sessionId: `xenoblade:${containerId}` }),
-      system: composeSystemPrompt({
-        safety: SAFETY_SYSTEM,
-        base: runtime.defaultSystemPrompt,
-      }),
-      messages: aiMessages,
-      maxOutputTokens: GENERATION_LIMITS.maxOutputTokens,
-      timeout: GENERATION_LIMITS.timeout,
-      ...(searchTools ? { tools: searchTools, stopWhen: isStepCount(3) } : {}),
-    });
+    // Generation with retry (max 3 attempts, exponential backoff).
+    let genUsage: {
+      completionTokens: number | null;
+      inputTokens: number | null;
+      cacheReadTokens: number | null;
+      cacheWriteTokens: number | null;
+    } | null = null;
+    let lastError: unknown;
 
-    await postToConversation(thread, result.textStream);
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const aiMessages = await buildGenerationMessages(
+          contextDecision,
+          message,
+          linkedContent,
+          audioTranscription,
+        );
 
-    // Extract usage including cache metrics (best-effort).
-    try {
-      const usage = await result.usage;
-      completionTokens = usage.outputTokens ?? null;
-      inputTokens = usage.inputTokens ?? null;
-      const details = usage.inputTokenDetails;
-      cacheReadTokens = details?.cacheReadTokens ?? null;
-      cacheWriteTokens = details?.cacheWriteTokens ?? null;
-    } catch {
-      // Provider did not report usage.
+        const result = streamText({
+          model: selectModel(env, { sessionId: `xenoblade:${containerId}` }),
+          system: composeSystemPrompt({
+            safety: SAFETY_SYSTEM,
+            base: runtime.defaultSystemPrompt,
+          }),
+          messages: aiMessages,
+          maxOutputTokens: GENERATION_LIMITS.maxOutputTokens,
+          timeout: GENERATION_LIMITS.timeout,
+          ...(searchTools ? { tools: searchTools, stopWhen: isStepCount(3) } : {}),
+        });
+
+        const text = await result.text;
+        await postToConversation(thread, text);
+
+        // Extract usage (best-effort).
+        try {
+          const usage = await result.usage;
+          completionTokens = usage.outputTokens ?? null;
+          inputTokens = usage.inputTokens ?? null;
+          const details = usage.inputTokenDetails;
+          cacheReadTokens = details?.cacheReadTokens ?? null;
+          cacheWriteTokens = details?.cacheWriteTokens ?? null;
+        } catch {
+          // Provider did not report usage.
+        }
+
+        genUsage = { completionTokens, inputTokens, cacheReadTokens, cacheWriteTokens };
+        break;
+      } catch (error) {
+        lastError = error;
+        console.log(
+          JSON.stringify({
+            event: "gen_error",
+            attempt,
+            messageId: message.id,
+            containerId,
+            error: String(error),
+            errorCode: error instanceof Error ? error.name : "UNKNOWN",
+          }),
+        );
+        if (attempt < 3) {
+          const { promise, resolve } = Promise.withResolvers<void>();
+          setTimeout(resolve, 1000 * attempt);
+          await promise;
+        }
+      }
+    }
+
+    if (!genUsage) {
+      throw lastError;
     }
 
     if (cacheReadTokens !== null || cacheWriteTokens !== null) {
@@ -490,6 +549,15 @@ async function handleAiTrigger(
     }
   } catch (error) {
     const errorCode = error instanceof Error ? error.name : "UNKNOWN";
+    console.log(
+      JSON.stringify({
+        event: "generation_failed",
+        messageId: message.id,
+        containerId,
+        error: String(error),
+        errorCode,
+      }),
+    );
     await safeFinish(env.DB, reservationId);
     await safeRecord(
       env.DB,
@@ -583,6 +651,13 @@ async function safeRecord(
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    console.log(
+      JSON.stringify({
+        event: "fetch",
+        method: request.method,
+        path: new URL(request.url).pathname,
+      }),
+    );
     const gatewayResponse = await handleGatewayRequest(request, env);
     if (gatewayResponse !== null) {
       return gatewayResponse;
