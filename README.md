@@ -82,15 +82,15 @@ curl -X POST -H "Authorization: Bearer $GATEWAY_CONTROL_TOKEN" \
 
 Secrets are injected via `wrangler secret put` (remote) or `.dev.vars` (local):
 
-| Secret | Required | Description |
-|--------|----------|-------------|
-| `DISCORD_BOT_TOKEN` | Yes | Discord bot token |
-| `DISCORD_PUBLIC_KEY` | Yes | Discord application public key |
-| `DISCORD_APPLICATION_ID` | Yes | Discord application ID |
-| `OPENROUTER_API_KEY` | Yes | OpenRouter API key |
-| `GATEWAY_CONTROL_TOKEN` | Yes | Auth token for gateway connect/disconnect |
-| `GATEWAY_STATUS_TOKEN` | Yes | Auth token for gateway status |
-| `BRAVE_SEARCH_API_KEY` | No | Brave Search API key (enables web search) |
+| Secret                   | Required | Description                               |
+| ------------------------ | -------- | ----------------------------------------- |
+| `DISCORD_BOT_TOKEN`      | Yes      | Discord bot token                         |
+| `DISCORD_PUBLIC_KEY`     | Yes      | Discord application public key            |
+| `DISCORD_APPLICATION_ID` | Yes      | Discord application ID                    |
+| `OPENROUTER_API_KEY`     | Yes      | OpenRouter API key                        |
+| `GATEWAY_CONTROL_TOKEN`  | Yes      | Auth token for gateway connect/disconnect |
+| `GATEWAY_STATUS_TOKEN`   | Yes      | Auth token for gateway status             |
+| `BRAVE_SEARCH_API_KEY`   | No       | Brave Search API key (enables web search) |
 
 Model and provider are configured in `wrangler.jsonc`:
 
@@ -103,12 +103,12 @@ Model and provider are configured in `wrangler.jsonc`:
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `/status` | Check gateway status |
+| Command          | Description                                            |
+| ---------------- | ------------------------------------------------------ |
+| `/status`        | Check gateway status                                   |
 | `/clear-context` | Clear your conversation context in the current channel |
-| `@bot` (bare) | Read and respond to your most recent message |
-| `不用参考之前的` | One-shot: skip history for this turn only |
+| `@bot` (bare)    | Read and respond to your most recent message           |
+| `不用参考之前的` | One-shot: skip history for this turn only              |
 
 ## Development
 
