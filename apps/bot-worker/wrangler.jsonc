@@ -27,14 +27,14 @@
       },
       {
         "name": "DISCORD_GATEWAY",
-        "class_name": "DiscordGatewayDO",
+        "class_name": "XenobladeGatewayDO",
       },
     ],
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["ChatStateDO", "DiscordGatewayDO"],
+      "new_sqlite_classes": ["ChatStateDO", "XenobladeGatewayDO"],
     },
   ],
 }

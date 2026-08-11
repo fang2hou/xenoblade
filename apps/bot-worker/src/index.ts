@@ -28,7 +28,7 @@ import { handleGatewayRequest, notFound } from "./gateway-routes";
 
 // Re-export the Durable Object classes so Wrangler can instantiate them.
 export { ChatStateDO } from "chat-state-cloudflare-do";
-export { DiscordGatewayDO } from "discord-gateway-cloudflare-do";
+export { XenobladeGatewayDO } from "./gateway-do";
 
 const SAFETY_SYSTEM = [
   "You are Xenoblade, a concise and helpful Discord assistant.",

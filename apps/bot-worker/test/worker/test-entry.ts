@@ -8,7 +8,7 @@
 // owned by @chat-adapter/discord and validated via the deployed canary, not in
 // the in-process pool.
 export { ChatStateDO } from "chat-state-cloudflare-do";
-export { DiscordGatewayDO } from "discord-gateway-cloudflare-do";
+export { XenobladeGatewayDO } from "../../src/gateway-do";
 
 import { handleGatewayRequest, notFound } from "../../src/gateway-routes";
 
