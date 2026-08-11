@@ -78,11 +78,11 @@ function createBot(env: Env): Chat {
 }
 
 function registerHandlers(bot: Chat, env: Env): void {
-  // Stage 0: ephemeral liveness probe. No D1, no AI.
+  // Stage 0: liveness probe. No D1, no AI. Uses post() so the deferred
+  // interaction reply completes via the interaction webhook (@chat-adapter/discord
+  // has no postEphemeral; post() routes through tryPostSlashResponse -> PATCH @original).
   bot.onSlashCommand(["/status"], async (event) => {
-    await event.channel.postEphemeral(event.user, "Xenoblade Gateway MVP OK", {
-      fallbackToDM: false,
-    });
+    await event.channel.post("Xenoblade Gateway MVP OK");
   });
 
   bot.onNewMention(async (thread, message) => {
