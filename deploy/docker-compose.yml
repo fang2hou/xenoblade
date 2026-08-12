@@ -26,9 +26,9 @@ services:
     # Bind health endpoint to localhost only — not exposed to the public
     # internet. All real traffic is outbound (Gateway WebSocket + Worker HTTPS).
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:8397:8397"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:3000/health || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:8397/health || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
