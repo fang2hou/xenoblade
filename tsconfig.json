@@ -16,5 +16,5 @@
     "noEmit": true
   },
   "include": ["apps/**/*.ts", "packages/**/*.ts"],
-  "exclude": ["node_modules", ".wrangler"]
+  "exclude": ["node_modules", ".wrangler", "apps/bot-worker"]
 }
