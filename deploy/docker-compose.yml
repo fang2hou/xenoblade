@@ -1,12 +1,12 @@
 # Docker Compose for the Discord Runtime.
 #
-# This file lives on the self-hosted host at $RUNTIME_DEPLOY_PATH.
+# This file lives on the self-hosted host at $GATEWAY_DEPLOY_PATH.
 # It is also kept in the repository for version control.
 #
 # Usage on the host:
-#   1. Clone the repo (or copy this file) to $RUNTIME_DEPLOY_PATH.
+#   1. Clone the repo (or copy this file) to $GATEWAY_DEPLOY_PATH.
 #   2. Create a .env file with the secrets listed below.
-#   3. docker login $REGISTRY_URL (one-time).
+#   3. docker login $DOCKER_REGISTRY_URL (one-time).
 #   4. docker compose pull && docker compose up -d
 
 # Required environment variables in .env:
@@ -18,7 +18,7 @@
 #
 services:
   discord-runtime:
-    image: ${REGISTRY_URL}/xenoblade/discord-runtime:latest
+    image: ${DOCKER_REGISTRY_URL}/xenoblade/discord-runtime:latest
     restart: unless-stopped
     env_file: .env
     environment:

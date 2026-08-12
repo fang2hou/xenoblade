@@ -4,7 +4,7 @@
 #
 # Usage:
 #   ./scripts/deploy.sh             # deploy everything (default)
-#   ./scripts/deploy.sh runtime     # deploy Discord Runtime only
+#   ./scripts/deploy.sh gateway     # deploy Discord Gateway only
 #   ./scripts/deploy.sh worker      # deploy Platform Worker only
 #   ./scripts/deploy.sh all         # deploy everything
 #
@@ -21,13 +21,13 @@ set +o allexport
 TARGET="${1:-all}"
 
 # Required variables
-: "${RUNTIME_HOST:?Set RUNTIME_HOST in .env.deploy}"
-: "${RUNTIME_USER:?Set RUNTIME_USER in .env.deploy}"
-: "${REGISTRY_URL:?Set REGISTRY_URL in .env.deploy}"
+: "${GATEWAY_HOST:?Set GATEWAY_HOST in .env.deploy}"
+: "${GATEWAY_USER:?Set GATEWAY_USER in .env.deploy}"
+: "${DOCKER_REGISTRY_URL:?Set DOCKER_REGISTRY_URL in .env.deploy}"
 
 # Optional defaults
-RUNTIME_SSH_PORT="${RUNTIME_SSH_PORT:-22}"
-RUNTIME_DEPLOY_PATH="${RUNTIME_DEPLOY_PATH:-/opt/xenoblade}"
+GATEWAY_SSH_PORT="${GATEWAY_SSH_PORT:-22}"
+GATEWAY_DEPLOY_PATH="${GATEWAY_DEPLOY_PATH:-/opt/xenoblade}"
 IMAGE_NAME="${IMAGE_NAME:-xenoblade/discord-runtime}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
 HEALTH_CHECK_URL="${HEALTH_CHECK_URL:-http://localhost:3000/health}"
@@ -44,20 +44,20 @@ err() { echo "ERROR: $*" >&2; exit 1; }
 # Registry login (if credentials are provided)
 # ---------------------------------------------------------------------------
 registry_login() {
-  if [[ -n "${REGISTRY_USER:-}" && -n "${REGISTRY_PASS:-}" ]]; then
-    log "Logging in to registry: ${REGISTRY_URL}"
-    echo "${REGISTRY_PASS}" | docker login "${REGISTRY_URL}" \
-      -u "${REGISTRY_USER}" --password-stdin
+  if [[ -n "${DOCKER_REGISTRY_USER:-}" && -n "${DOCKER_REGISTRY_PASS:-}" ]]; then
+    log "Logging in to registry: ${DOCKER_REGISTRY_URL}"
+    echo "${DOCKER_REGISTRY_PASS}" | docker login "${DOCKER_REGISTRY_URL}" \
+      -u "${DOCKER_REGISTRY_USER}" --password-stdin
   fi
 }
 
 # ---------------------------------------------------------------------------
 # Discord Runtime (self-hosted host)
 # ---------------------------------------------------------------------------
-deploy_runtime() {
+deploy_gateway() {
   registry_login
 
-  log "Building linux/arm64 image: ${REGISTRY_URL}/${IMAGE_NAME}:${IMAGE_TAG}"
+  log "Building linux/arm64 image: ${DOCKER_REGISTRY_URL}/${IMAGE_NAME}:${IMAGE_TAG}"
 
   cd "$PROJECT_ROOT"
 
@@ -65,17 +65,17 @@ deploy_runtime() {
   # Requires: docker buildx, qemu-user-static (for x86 hosts).
   docker buildx build \
     --platform linux/arm64 \
-    --tag "${REGISTRY_URL}/${IMAGE_NAME}:${IMAGE_TAG}" \
+    --tag "${DOCKER_REGISTRY_URL}/${IMAGE_NAME}:${IMAGE_TAG}" \
     --push \
     apps/discord-runtime/
 
-  log "Deploying to ${RUNTIME_USER}@${RUNTIME_HOST}:${RUNTIME_DEPLOY_PATH}"
+  log "Deploying to ${GATEWAY_USER}@${GATEWAY_HOST}:${GATEWAY_DEPLOY_PATH}"
 
   # Pull new image and restart.
   # docker compose down sends SIGTERM; the container's handler closes the
   # Discord Gateway gracefully before docker compose up starts the new one.
-  ssh -p "$RUNTIME_SSH_PORT" "${RUNTIME_USER}@${RUNTIME_HOST}" \
-    "cd '${RUNTIME_DEPLOY_PATH}' \
+  ssh -p "$GATEWAY_SSH_PORT" "${GATEWAY_USER}@${GATEWAY_HOST}" \
+    "cd '${GATEWAY_DEPLOY_PATH}' \
      && docker compose pull \
      && docker compose down \
      && docker compose up -d"
@@ -83,7 +83,7 @@ deploy_runtime() {
   log "Waiting for health check..."
   local i
   for i in $(seq 1 "$HEALTH_CHECK_RETRIES"); do
-    if ssh -p "$RUNTIME_SSH_PORT" "${RUNTIME_USER}@${RUNTIME_HOST}" \
+    if ssh -p "$GATEWAY_SSH_PORT" "${GATEWAY_USER}@${GATEWAY_HOST}" \
          "curl -sf '${HEALTH_CHECK_URL}'" >/dev/null 2>&1; then
       log "Runtime is healthy."
       return 0
@@ -111,14 +111,14 @@ deploy_worker() {
 # Main
 # ---------------------------------------------------------------------------
 case "$TARGET" in
-  runtime) deploy_runtime ;;
+  gateway) deploy_gateway ;;
   worker)  deploy_worker ;;
   all)
-    deploy_runtime
+    deploy_gateway
     deploy_worker
     ;;
   *)
-    err "Usage: $0 [all|runtime|worker]"
+    err "Usage: $0 [all|gateway|worker]"
     ;;
 esac
 

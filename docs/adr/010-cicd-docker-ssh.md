@@ -28,7 +28,7 @@ The self-hosted host runs a Docker Registry. The deployment flow:
 
 ### Single deploy script
 
-A single `scripts/deploy.sh` handles both local and CI deployment. It accepts a target argument (`all`, `worker`, `runtime`) and reads configuration from environment variables or `.env.deploy`.
+A single `scripts/deploy.sh` handles both local and CI deployment. It accepts a target argument (`all`, `worker`, `gateway`) and reads configuration from environment variables or `.env.deploy`.
 
 ### GitHub Actions workflow
 
@@ -61,7 +61,7 @@ After deployment, the script polls the Runtime's `/health` endpoint (over SSH tu
 - Identical deployment path for local and CI — no environment drift.
 - Self-hosted registry keeps images on-network; pulls are fast and dependency-free.
 - SSH-based deployment requires no agent, daemon, or orchestration platform on the host.
-- Single script with clear targets (`worker`, `runtime`, `all`) is easy to operate.
+- Single script with clear targets (`worker`, `gateway`, `all`) is easy to operate.
 - Graceful Gateway handoff prevents session invalidation.
 
 **Negative:**
