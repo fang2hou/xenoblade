@@ -10,6 +10,12 @@ const DEFAULT_ROLE_MODELS: Record<ModelRole, string> = {
   transcription: "openai/gpt-transcribe",
 };
 
+const FALLBACK_MODELS: Record<ModelRole, string | undefined> = {
+  generation: "deepseek/deepseek-v4-flash-0731",
+  summarization: undefined,
+  transcription: undefined,
+};
+
 export const GENERATION_LIMITS = {
   maxOutputTokens: 1024,
   timeout: { totalMs: 60_000, firstChunkMs: 15_000, chunkMs: 5_000 },
@@ -19,6 +25,7 @@ export interface AiEnv {
   /** Legacy single-model var; still read for the generation role. */
   AI_MODEL?: string;
   GENERATION_MODEL?: string;
+  GENERATION_FALLBACK_MODEL?: string;
   SUMMARIZATION_MODEL?: string;
   TRANSCRIPTION_MODEL?: string;
   OPENROUTER_API_KEY?: string;
@@ -38,18 +45,15 @@ function resolveModelId(env: AiEnv, role: ModelRole): string {
 /**
  * Select an AI model for a given role via OpenRouter.
  *
- * All roles go through the AI SDK standard interface, preserving the option
- * to switch providers in the future.
- *
- * `options.sessionId` is forwarded to OpenRouter for sticky routing (prefix
- * cache). The caller keeps it stable per container (e.g. `xenoblade:${containerId}`).
+ * Pass `modelId` to override role-based resolution (used for fallback).
+ * `sessionId` forwards to OpenRouter for sticky routing (prefix cache).
  */
 export function selectModel(
   env: AiEnv,
-  options?: { sessionId?: string; role?: ModelRole },
+  options?: { sessionId?: string; role?: ModelRole; modelId?: string },
 ) {
   const role = options?.role ?? "generation";
-  const modelId = resolveModelId(env, role);
+  const id = options?.modelId ?? resolveModelId(env, role);
 
   if (!env.OPENROUTER_API_KEY) {
     throw new Error("OPENROUTER_API_KEY is not configured");
@@ -59,9 +63,20 @@ export function selectModel(
     return createOpenRouter({
       apiKey: env.OPENROUTER_API_KEY,
       extraBody: { session_id: options.sessionId },
-    }).chat(modelId);
+    }).chat(id);
   }
-  return createOpenRouter({ apiKey: env.OPENROUTER_API_KEY }).chat(modelId);
+  return createOpenRouter({ apiKey: env.OPENROUTER_API_KEY }).chat(id);
+}
+
+/** Get the fallback model ID for a role, or undefined if no fallback. */
+export function getFallbackModelId(
+  env: AiEnv,
+  role: ModelRole = "generation",
+): string | undefined {
+  if (role === "generation") {
+    return env.GENERATION_FALLBACK_MODEL ?? FALLBACK_MODELS.generation;
+  }
+  return FALLBACK_MODELS[role];
 }
 
 export function composeSystemPrompt(parts: {
