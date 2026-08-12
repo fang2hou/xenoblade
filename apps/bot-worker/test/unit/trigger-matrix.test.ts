@@ -233,8 +233,7 @@ describe("[Matrix] Reply-to-Bot Detection", () => {
 
 describe("[Matrix] Bare Mention Detection", () => {
   it("only user mention <@ID> → true (triggers fallback)", () => {
-    const msg = stub({}) as unknown as Message & { text: string };
-    (msg as Record<string, unknown>).text = `<@${APP_ID}>`;
+    const msg = { text: `<@${APP_ID}>` } as unknown as Message;
     expect(isBareMention(msg)).toBe(true);
   });
 
