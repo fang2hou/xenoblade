@@ -1,96 +1,100 @@
-name: Deploy
+name: CI
 
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
     inputs:
       target:
-        description: "Deploy target"
+        description: "Deploy target (main pushes only)"
         required: true
         default: all
         type: choice
-        options:
-          - all
-          - gateway
-          - worker
+        options: [all, worker, runtime]
 
 concurrency:
-  group: deploy-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  DOCKER_REGISTRY: ${{ secrets.DOCKER_REGISTRY_URL }}
+
 jobs:
-  test:
+  # ── Stage 1: Check ──────────────────────────────────────────────────
+  check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: pnpm/action-setup@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
         with:
-          node-version-file: .nvmrc
-          cache: pnpm
+          fetch-depth: 0
+
+      - uses: jdx/mise-action@v4
 
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm test
 
-  deploy:
-    needs: test
+      - name: Secret scan
+        run: gitleaks detect --source . --no-banner --redact --verbose
+
+  # ── Stage 2a: Deploy Worker (Cloudflare) ────────────────────────────
+  deploy-worker:
+    needs: check
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    env:
-      TARGET: ${{ github.event.inputs.target || 'all' }}
+    if: github.ref == 'refs/heads/main' && (github.event.inputs.target != 'runtime' || github.event_name == 'push')
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
+      - uses: jdx/mise-action@v4
 
       - run: pnpm install --frozen-lockfile
 
-      # ---------------------------------------------------------------
-      # Deploy Platform Worker (Cloudflare)
-      # ---------------------------------------------------------------
-      - name: Deploy Worker
-        if: env.TARGET != 'gateway'
+      - name: Deploy Platform Worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         working-directory: apps/platform-worker
         run: pnpm exec wrangler deploy
 
-      # ---------------------------------------------------------------
-      # Build & push Docker image (Discord Runtime)
-      # ---------------------------------------------------------------
-      - name: Set up QEMU
-        if: env.TARGET != 'worker'
-        uses: docker/setup-qemu-action@v4
+      - name: Verify health
+        env:
+          INTERNAL_API_TOKEN: ${{ secrets.INTERNAL_API_TOKEN }}
+        run: |
+          STATUS=$(curl -sf -H "Authorization: Bearer $INTERNAL_API_TOKEN" \
+            https://xenoblade-platform.fang2hou.workers.dev/internal/v1/health | \
+            python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
+          echo "Worker status: $STATUS"
+          [ "$STATUS" = "ok" ] || exit 1
 
-      - name: Set up Docker Buildx
-        if: env.TARGET != 'worker'
-        uses: docker/setup-buildx-action@v4
+  # ── Stage 2b: Deploy Runtime (Gateway host) ─────────────────────────
+  deploy-runtime:
+    needs: check
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && (github.event.inputs.target != 'worker' || github.event_name == 'push')
+    steps:
+      - uses: actions/checkout@v7
 
-      - name: Log in to registry
-        if: env.TARGET != 'worker'
+      - uses: jdx/mise-action@v4
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Bundle discord-runtime
+        run: pnpm --filter @xenoblade/discord-runtime build
+
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Registry login
         uses: docker/login-action@v4
         with:
           registry: ${{ secrets.DOCKER_REGISTRY_URL }}
           username: ${{ secrets.DOCKER_REGISTRY_USER }}
           password: ${{ secrets.DOCKER_REGISTRY_PASS }}
 
-      - name: Bundle discord-runtime
-        if: env.TARGET != 'worker'
-        run: pnpm --filter @xenoblade/discord-runtime build
-
       - name: Build and push image
-        if: env.TARGET != 'worker'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: apps/discord-runtime
           platforms: linux/arm64
@@ -101,11 +105,7 @@ jobs:
           cache-from: type=registry,ref=${{ secrets.DOCKER_REGISTRY_URL }}/xenoblade/discord-runtime:buildcache
           cache-to: type=registry,ref=${{ secrets.DOCKER_REGISTRY_URL }}/xenoblade/discord-runtime:buildcache,mode=max
 
-      # ---------------------------------------------------------------
-      # SSH into host: pull, stop old, start new, health check
-      # ---------------------------------------------------------------
-      - name: Deploy Runtime via SSH
-        if: env.TARGET != 'worker'
+      - name: Deploy via SSH
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.GATEWAY_HOST }}
@@ -118,13 +118,13 @@ jobs:
             docker compose down
             docker compose up -d
 
-            # Health check (local to the host)
+            # Health check
             for i in $(seq 1 15); do
               if curl -sf http://localhost:8397/health; then
-                echo "Runtime is healthy."
+                echo "Runtime healthy on :8397"
                 exit 0
               fi
               sleep 2
             done
-            echo "Runtime failed health check." >&2
+            echo "Health check failed" >&2
             exit 1
