@@ -163,7 +163,6 @@ export async function generate(
         usedFallback = i > 1;
         break;
       } catch (error) {
-        lastError = error;
         const rateLimited = isRateLimited(error);
 
         console.log(
