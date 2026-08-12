@@ -101,6 +101,7 @@ export type GenerationResult =
       status: "error";
       requestId: string;
       code: string;
+      message: string;
       retryable: boolean;
     };
 

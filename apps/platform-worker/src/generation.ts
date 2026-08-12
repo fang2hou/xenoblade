@@ -164,7 +164,8 @@ export async function generate(
       totalDurationMs: Date.now() - startedAt,
       createdAt: Date.now(),
     });
-    return { status: "error", requestId, code, retryable: false };
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return { status: "error", requestId, code, message: errorMsg, retryable: false };
   }
 
   // 8. Extract usage.
