@@ -11,10 +11,7 @@
     "binding": "BROWSER"
   },
   "vars": {
-    "GENERATION_MODEL": "openai/gpt-5.6-luna",
-    "GENERATION_FALLBACK_MODEL": "deepseek/deepseek-v4-flash-0731",
-    "SUMMARIZATION_MODEL": "openai/gpt-5.6-luna",
-    "VISION_MODEL": "xiaomi/mimo-v2.5"
+    "MODEL_CONFIG": "{\"generation\":[{\"id\":\"openai/gpt-5.6-luna\",\"temperature\":0.7},{\"id\":\"deepseek/deepseek-v4-flash-0731\",\"providers\":[\"DeepSeek\",\"NovitaAI\",\"SiliconFlow\"]}],\"summarization\":[{\"id\":\"openai/gpt-5.6-luna\"},{\"id\":\"deepseek/deepseek-v4-flash-0731\",\"providers\":[\"DeepSeek\",\"NovitaAI\",\"SiliconFlow\"]}],\"vision\":[{\"id\":\"xiaomi/mimo-v2.5\",\"providers\":[\"Xiaomi\",\"NovitaAI\"]}]}"
   },
   "d1_databases": [
     {

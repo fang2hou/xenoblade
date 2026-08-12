@@ -127,7 +127,7 @@ export async function generate(
   const messagesTextOnly = buildGenerationMessages(req, contextDecision, false);
 
   // 7. Model chain — try each model until one produces a response
-  const chain = getModelChain("generation", env.GENERATION_MODEL, env.GENERATION_FALLBACK_MODEL);
+  const chain = getModelChain(env, "generation");
   const sessionId = `xenoblade:${req.containerId}`;
 
   let result: Awaited<ReturnType<typeof generateText>> | undefined;

@@ -4,21 +4,17 @@ import type { LanguageModel } from "ai";
 // ── Model Configuration ───────────────────────────────────────────────────
 
 export interface ModelConfig {
-  /** OpenRouter model ID, e.g. "openai/gpt-5.6-luna". */
   id: string;
-  /** Provider routing order. OpenRouter tries each in sequence. */
   providers?: string[];
-  /** Temperature override (0–2). Omit for provider default. */
   temperature?: number;
-  /** Max output tokens override. */
   maxOutputTokens?: number;
-  /** Thinking/reasoning intensity (0–1) for models that support it. */
   thinking?: number;
 }
 
 export type ModelRole = "generation" | "summarization" | "transcription" | "vision";
 
-const MODEL_CHAINS: Record<ModelRole, ModelConfig[]> = {
+/** Default chains used when MODEL_CONFIG env var is absent. */
+const DEFAULT_CHAINS: Record<ModelRole, ModelConfig[]> = {
   generation: [
     { id: "openai/gpt-5.6-luna", temperature: 0.7 },
     { id: "deepseek/deepseek-v4-flash-0731", providers: ["DeepSeek", "NovitaAI", "SiliconFlow"] },
@@ -38,26 +34,28 @@ export const GENERATION_LIMITS = {
 
 export interface AiEnv {
   OPENROUTER_API_KEY?: string;
+  /** JSON string of Record<ModelRole, ModelConfig[]>. Overrides defaults. */
+  MODEL_CONFIG?: string;
 }
 
-/** Resolve the model chain for a role, with optional env overrides. */
-export function getModelChain(
-  role: ModelRole,
-  primaryOverride?: string,
-  fallbackOverride?: string,
-): ModelConfig[] {
-  const defaults = MODEL_CHAINS[role] ?? [];
-  const chain = defaults.map((c) => ({ ...c }));
-  if (primaryOverride && chain.length > 0) {
-    chain[0] = { ...chain[0], id: primaryOverride };
+/** Parse MODEL_CONFIG env var, fall back to DEFAULT_CHAINS. */
+function loadChains(env: AiEnv): Record<ModelRole, ModelConfig[]> {
+  if (!env.MODEL_CONFIG) return DEFAULT_CHAINS;
+  try {
+    const parsed = JSON.parse(env.MODEL_CONFIG) as Partial<Record<ModelRole, ModelConfig[]>>;
+    return { ...DEFAULT_CHAINS, ...parsed };
+  } catch {
+    console.log(JSON.stringify({ event: "model_config_parse_error" }));
+    return DEFAULT_CHAINS;
   }
-  if (fallbackOverride && chain.length > 1) {
-    chain[1] = { ...chain[1], id: fallbackOverride };
-  }
-  return chain;
 }
 
-/** Create a LanguageModel from a ModelConfig via OpenRouter. */
+/** Get the model chain for a role (from env or defaults). */
+export function getModelChain(env: AiEnv, role: ModelRole): ModelConfig[] {
+  return loadChains(env)[role] ?? [];
+}
+
+/** Create a LanguageModel from a config via OpenRouter. */
 export function createModel(env: AiEnv, config: ModelConfig, sessionId?: string): LanguageModel {
   if (!env.OPENROUTER_API_KEY) {
     throw new Error("OPENROUTER_API_KEY is not configured");
@@ -73,15 +71,14 @@ export function createModel(env: AiEnv, config: ModelConfig, sessionId?: string)
   return createOpenRouter({ apiKey: env.OPENROUTER_API_KEY, extraBody }).chat(config.id);
 }
 
-/** Simple single-model selection (for non-generation roles like vision). */
+/** Pick the first model in the chain for the given role. */
 export function selectModel(
   env: AiEnv,
-  options?: { sessionId?: string; role?: ModelRole; modelId?: string },
+  options?: { sessionId?: string; role?: ModelRole },
 ): LanguageModel {
   const role = options?.role ?? "generation";
-  const config: ModelConfig = options?.modelId
-    ? { id: options.modelId }
-    : MODEL_CHAINS[role]?.[0] ?? { id: "openai/gpt-5.6-luna" };
+  const chain = getModelChain(env, role);
+  const config = chain[0] ?? { id: "openai/gpt-5.6-luna" };
   return createModel(env, config, options?.sessionId);
 }
 
