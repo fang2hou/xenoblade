@@ -1,0 +1,28 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "xenoblade-platform",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-12",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true
+  },
+  "browser": {
+    "binding": "BROWSER"
+  },
+  "vars": {
+    "GENERATION_MODEL": "openai/gpt-5.6-luna",
+    "SUMMARIZATION_MODEL": "openai/gpt-5.6-luna"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "xenoblade",
+      "database_id": "25d6331b-459a-4ea0-8d51-1904405191a3",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "limits": {
+    "cpu_ms": 30000
+  }
+}

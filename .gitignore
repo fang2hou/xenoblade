@@ -17,3 +17,4 @@ coverage/
 # Generated types
 apps/bot-worker/worker-configuration.d.ts
 .deploy-keys/
+apps/discord-runtime/dist/

@@ -1,0 +1,21 @@
+{
+  "name": "@xenoblade/discord-runtime",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --sourcemap --banner:js=\"import {createRequire} from 'module';const require=createRequire(import.meta.url);\"",
+    "start": "node --enable-source-maps dist/index.js",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "@xenoblade/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1",
+    "tsx": "^4.20.5",
+    "@types/node": "^26.1.2"
+  }
+}
