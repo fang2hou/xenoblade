@@ -12,7 +12,7 @@ on:
         type: choice
         options:
           - all
-          - runtime
+          - gateway
           - worker
 
 concurrency:
@@ -59,7 +59,7 @@ jobs:
       # Deploy Platform Worker (Cloudflare)
       # ---------------------------------------------------------------
       - name: Deploy Worker
-        if: env.TARGET != 'runtime'
+        if: env.TARGET != 'gateway'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         working-directory: apps/platform-worker
@@ -80,9 +80,9 @@ jobs:
         if: env.TARGET != 'worker'
         uses: docker/login-action@v4
         with:
-          registry: ${{ secrets.REGISTRY_URL }}
-          username: ${{ secrets.REGISTRY_USER }}
-          password: ${{ secrets.REGISTRY_PASS }}
+          registry: ${{ secrets.DOCKER_REGISTRY_URL }}
+          username: ${{ secrets.DOCKER_REGISTRY_USER }}
+          password: ${{ secrets.DOCKER_REGISTRY_PASS }}
 
       - name: Build and push image
         if: env.TARGET != 'worker'
@@ -92,10 +92,10 @@ jobs:
           platforms: linux/arm64
           push: true
           tags: |
-            ${{ secrets.REGISTRY_URL }}/xenoblade/discord-runtime:latest
-            ${{ secrets.REGISTRY_URL }}/xenoblade/discord-runtime:${{ github.sha }}
-          cache-from: type=registry,ref=${{ secrets.REGISTRY_URL }}/xenoblade/discord-runtime:buildcache
-          cache-to: type=registry,ref=${{ secrets.REGISTRY_URL }}/xenoblade/discord-runtime:buildcache,mode=max
+            ${{ secrets.DOCKER_REGISTRY_URL }}/xenoblade/discord-runtime:latest
+            ${{ secrets.DOCKER_REGISTRY_URL }}/xenoblade/discord-runtime:${{ github.sha }}
+          cache-from: type=registry,ref=${{ secrets.DOCKER_REGISTRY_URL }}/xenoblade/discord-runtime:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKER_REGISTRY_URL }}/xenoblade/discord-runtime:buildcache,mode=max
 
       # ---------------------------------------------------------------
       # SSH into host: pull, stop old, start new, health check
@@ -104,12 +104,12 @@ jobs:
         if: env.TARGET != 'worker'
         uses: appleboy/ssh-action@v1
         with:
-          host: ${{ secrets.RUNTIME_HOST }}
-          username: ${{ secrets.RUNTIME_USER }}
-          key: ${{ secrets.RUNTIME_SSH_KEY }}
-          port: ${{ secrets.RUNTIME_SSH_PORT }}
+          host: ${{ secrets.GATEWAY_HOST }}
+          username: ${{ secrets.GATEWAY_USER }}
+          key: ${{ secrets.GATEWAY_SSH_KEY }}
+          port: ${{ secrets.GATEWAY_SSH_PORT }}
           script: |
-            cd ${{ secrets.RUNTIME_DEPLOY_PATH }}
+            cd ${{ secrets.GATEWAY_DEPLOY_PATH }}
             docker compose pull
             docker compose down
             docker compose up -d
