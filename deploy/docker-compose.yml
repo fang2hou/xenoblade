@@ -8,6 +8,13 @@
 #   2. Create a .env file with the secrets listed below.
 #   3. docker login $REGISTRY_URL (one-time).
 #   4. docker compose pull && docker compose up -d
+
+# Required environment variables in .env:
+#   DISCORD_BOT_TOKEN=
+#   DISCORD_APPLICATION_ID=
+#   DISCORD_PUBLIC_KEY=
+#   WORKER_URL=https://your-worker.workers.dev
+#   INTERNAL_API_TOKEN=
 #
 services:
   discord-runtime:
@@ -16,11 +23,10 @@ services:
     env_file: .env
     environment:
       - NODE_ENV=production
-    # No published ports: the container communicates entirely via outbound
-    # connections (Discord Gateway WebSocket + Worker HTTPS). The health
-    # endpoint is accessible only from the host's localhost for monitoring.
-    expose:
-      - "3000"
+    # Bind health endpoint to localhost only — not exposed to the public
+    # internet. All real traffic is outbound (Gateway WebSocket + Worker HTTPS).
+    ports:
+      - "127.0.0.1:3000:3000"
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:3000/health || exit 1"]
       interval: 30s
