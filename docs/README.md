@@ -12,7 +12,7 @@ ADRs capture significant architectural decisions, their context, and consequence
 | [004](adr/004-two-tier-model.md) | Two-Tier Model Architecture | Accepted |
 | [005](adr/005-dm-control-plane-memory.md) | DM Control Plane and Per-User Memory | Accepted |
 | [006](adr/006-smart-url-reader.md) | Smart URL Reader Pipeline | Accepted |
-| [007](adr/007-multi-backend-search.md) | Brave Search and Answer Integration | Accepted |
+| [007](adr/007-brave-search-integration.md) | Brave Search and Answer Integration | Accepted |
 | [008](adr/008-mcp-integration.md) | MCP Integration Scope | Accepted |
 | [009](adr/009-fresh-database.md) | Fresh D1 Database | Accepted |
 | [010](adr/010-cicd-docker-ssh.md) | CI/CD with Docker Registry and SSH | Accepted |
