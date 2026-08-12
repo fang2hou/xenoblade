@@ -1,27 +1,34 @@
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
+import type { LanguageModel } from "ai";
+
+// ── Model Configuration ───────────────────────────────────────────────────
+
+export interface ModelConfig {
+  /** OpenRouter model ID, e.g. "openai/gpt-5.6-luna". */
+  id: string;
+  /** Provider routing order. OpenRouter tries each in sequence. */
+  providers?: string[];
+  /** Temperature override (0–2). Omit for provider default. */
+  temperature?: number;
+  /** Max output tokens override. */
+  maxOutputTokens?: number;
+  /** Thinking/reasoning intensity (0–1) for models that support it. */
+  thinking?: number;
+}
 
 export type ModelRole = "generation" | "summarization" | "transcription" | "vision";
 
-// Primary: Luna (native multimodal — can see images directly).
-// Fallback: DeepSeek V4 Flash (text-only — uses vision_describe tool instead).
-const DEFAULT_ROLE_MODELS: Record<ModelRole, string> = {
-  generation: "openai/gpt-5.6-luna",
-  summarization: "openai/gpt-5.6-luna",
-  transcription: "openai/gpt-transcribe",
-  vision: "xiaomi/mimo-v2.5",
-};
-
-const FALLBACK_MODELS: Record<ModelRole, string | undefined> = {
-  generation: "deepseek/deepseek-v4-flash-0731",
-  summarization: undefined,
-  transcription: undefined,
-  vision: undefined,
-};
-
-// Provider routing: try the source provider first, then alternates.
-const PROVIDER_ORDER: Record<string, string[]> = {
-  "deepseek/deepseek-v4-flash-0731": ["DeepSeek", "NovitaAI", "SiliconFlow"],
-  "xiaomi/mimo-v2.5": ["Xiaomi", "NovitaAI"],
+const MODEL_CHAINS: Record<ModelRole, ModelConfig[]> = {
+  generation: [
+    { id: "openai/gpt-5.6-luna", temperature: 0.7 },
+    { id: "deepseek/deepseek-v4-flash-0731", providers: ["DeepSeek", "NovitaAI", "SiliconFlow"] },
+  ],
+  summarization: [
+    { id: "openai/gpt-5.6-luna" },
+    { id: "deepseek/deepseek-v4-flash-0731", providers: ["DeepSeek", "NovitaAI", "SiliconFlow"] },
+  ],
+  transcription: [{ id: "openai/gpt-transcribe" }],
+  vision: [{ id: "xiaomi/mimo-v2.5", providers: ["Xiaomi", "NovitaAI"] }],
 };
 
 export const GENERATION_LIMITS = {
@@ -30,61 +37,52 @@ export const GENERATION_LIMITS = {
 } as const;
 
 export interface AiEnv {
-  AI_MODEL?: string;
-  GENERATION_MODEL?: string;
-  GENERATION_FALLBACK_MODEL?: string;
-  SUMMARIZATION_MODEL?: string;
-  TRANSCRIPTION_MODEL?: string;
-  VISION_MODEL?: string;
   OPENROUTER_API_KEY?: string;
 }
 
-function resolveModelId(env: AiEnv, role: ModelRole): string {
-  switch (role) {
-    case "generation":
-      return env.GENERATION_MODEL ?? env.AI_MODEL ?? DEFAULT_ROLE_MODELS.generation;
-    case "summarization":
-      return env.SUMMARIZATION_MODEL ?? DEFAULT_ROLE_MODELS.summarization;
-    case "transcription":
-      return env.TRANSCRIPTION_MODEL ?? DEFAULT_ROLE_MODELS.transcription;
-    case "vision":
-      return env.VISION_MODEL ?? DEFAULT_ROLE_MODELS.vision;
+/** Resolve the model chain for a role, with optional env overrides. */
+export function getModelChain(
+  role: ModelRole,
+  primaryOverride?: string,
+  fallbackOverride?: string,
+): ModelConfig[] {
+  const defaults = MODEL_CHAINS[role] ?? [];
+  const chain = defaults.map((c) => ({ ...c }));
+  if (primaryOverride && chain.length > 0) {
+    chain[0] = { ...chain[0], id: primaryOverride };
   }
+  if (fallbackOverride && chain.length > 1) {
+    chain[1] = { ...chain[1], id: fallbackOverride };
+  }
+  return chain;
 }
 
-export function selectModel(
-  env: AiEnv,
-  options?: { sessionId?: string; role?: ModelRole; modelId?: string },
-) {
-  const role = options?.role ?? "generation";
-  const id = options?.modelId ?? resolveModelId(env, role);
-
+/** Create a LanguageModel from a ModelConfig via OpenRouter. */
+export function createModel(env: AiEnv, config: ModelConfig, sessionId?: string): LanguageModel {
   if (!env.OPENROUTER_API_KEY) {
     throw new Error("OPENROUTER_API_KEY is not configured");
   }
-
   const extraBody: Record<string, unknown> = {};
-  if (options?.sessionId) extraBody.session_id = options.sessionId;
-
-  const providers = PROVIDER_ORDER[id];
-  if (providers) {
-    extraBody.provider = { order: providers, allow_fallbacks: true };
+  if (sessionId) extraBody.session_id = sessionId;
+  if (config.providers) {
+    extraBody.provider = { order: config.providers, allow_fallbacks: true };
   }
-
-  if (Object.keys(extraBody).length > 0) {
-    return createOpenRouter({ apiKey: env.OPENROUTER_API_KEY, extraBody }).chat(id);
+  if (config.thinking !== undefined) {
+    extraBody.reasoning = { effort: config.thinking };
   }
-  return createOpenRouter({ apiKey: env.OPENROUTER_API_KEY }).chat(id);
+  return createOpenRouter({ apiKey: env.OPENROUTER_API_KEY, extraBody }).chat(config.id);
 }
 
-export function getFallbackModelId(
+/** Simple single-model selection (for non-generation roles like vision). */
+export function selectModel(
   env: AiEnv,
-  role: ModelRole = "generation",
-): string | undefined {
-  if (role === "generation") {
-    return env.GENERATION_FALLBACK_MODEL ?? FALLBACK_MODELS.generation;
-  }
-  return FALLBACK_MODELS[role];
+  options?: { sessionId?: string; role?: ModelRole; modelId?: string },
+): LanguageModel {
+  const role = options?.role ?? "generation";
+  const config: ModelConfig = options?.modelId
+    ? { id: options.modelId }
+    : MODEL_CHAINS[role]?.[0] ?? { id: "openai/gpt-5.6-luna" };
+  return createModel(env, config, options?.sessionId);
 }
 
 export function composeSystemPrompt(parts: {
@@ -94,9 +92,7 @@ export function composeSystemPrompt(parts: {
 }): string {
   const segments: string[] = [];
   for (const part of [parts.safety, parts.base, parts.persona]) {
-    if (part !== undefined && part.trim() !== "") {
-      segments.push(part);
-    }
+    if (part !== undefined && part.trim() !== "") segments.push(part);
   }
   return segments.join("\n\n");
 }

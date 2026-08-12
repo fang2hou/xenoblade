@@ -2,9 +2,9 @@ import { generateText, isStepCount } from "ai";
 
 import {
   composeSystemPrompt,
+  createModel,
   GENERATION_LIMITS,
-  getFallbackModelId,
-  selectModel,
+  getModelChain,
 } from "@xenoblade/ai";
 import type {
   GenerationRequest,
@@ -102,15 +102,12 @@ export async function generate(
     return { status: "error", requestId, code: "reserve_failed", message: String(error), retryable: true };
   }
 
-  // 4. Context
+  // 4. Context + prompt
   const state = await getUserContextState(env.DB, {
-    scopeId: req.scopeId,
-    containerId: req.containerId,
-    userId: req.userId,
+    scopeId: req.scopeId, containerId: req.containerId, userId: req.userId,
   });
   const contextDecision = buildContext(req, state.resetAt);
 
-  // 5. Prompt (with user memory)
   let persona: string | undefined;
   try {
     const memories = await getUserMemory(env.DB, req.userId);
@@ -120,69 +117,53 @@ export async function generate(
   }
   const system = composeSystemPrompt({ safety: SAFETY_SYSTEM, persona });
 
-  // 6. Tools — ALL models get ALL tools (MCP + first-party + vision)
+  // 5. Tools — ALL models get ALL tools (MCP + first-party + vision)
   const firstPartyTools = createFirstPartyTools(env);
   const mcpResult = await connectMcpServers(env);
   const allTools = { ...firstPartyTools, ...mcpResult.tools };
 
-  // 7. Messages — two variants for multimodal vs text-only models
-  //    Primary (Luna): images as native content parts
-  //    Fallback (DeepSeek): images as text refs, uses vision_describe tool
+  // 6. Messages — primary gets images natively, fallback uses text refs + vision tool
   const messagesWithImages = buildGenerationMessages(req, contextDecision, true);
   const messagesTextOnly = buildGenerationMessages(req, contextDecision, false);
 
-  // 8. Generate: primary (×2) → fallback (×1)
+  // 7. Model chain — try each model until one produces a response
+  const chain = getModelChain("generation", env.GENERATION_MODEL, env.GENERATION_FALLBACK_MODEL);
   const sessionId = `xenoblade:${req.containerId}`;
-  const fallbackId = getFallbackModelId(env, "generation");
-  const primaryId = env.GENERATION_MODEL ?? "openai/gpt-5.6-luna";
-
-  type Attempt = { label: string; isFallback: boolean; modelId: string };
-  const chain: Attempt[] = [
-    { label: "primary", isFallback: false, modelId: primaryId },
-    { label: "primary-retry", isFallback: false, modelId: primaryId },
-  ];
-  if (fallbackId) {
-    chain.push({ label: "fallback", isFallback: true, modelId: fallbackId });
-  }
 
   let result: Awaited<ReturnType<typeof generateText>> | undefined;
-  let usedModel = primaryId;
+  let usedModel = chain[0]?.id ?? "unknown";
 
   GENERATION_LOOP:
   try {
     for (let i = 0; i < chain.length; i++) {
-      const att = chain[i];
+      const config = chain[i];
+      const isPrimary = i === 0;
       try {
-        const model = att.isFallback
-          ? selectModel(env, { role: "generation", sessionId, modelId: att.modelId })
-          : selectModel(env, { role: "generation", sessionId });
+        const model = createModel(env, config, sessionId);
 
         result = await generateText({
           model,
           system,
-          messages: att.isFallback ? messagesTextOnly : messagesWithImages,
+          messages: isPrimary ? messagesWithImages : messagesTextOnly,
           tools: allTools,
           stopWhen: isStepCount(5),
           maxRetries: 1,
           timeout: GENERATION_LIMITS.timeout.totalMs,
         });
 
-        if (att.isFallback) usedModel = att.modelId;
+        usedModel = config.id;
 
-        // Empty text → try next attempt
         if (!result.text || result.text.trim() === "") {
-          console.log(JSON.stringify({
-            event: "empty_generation", messageId: req.messageId, model: att.label,
-          }));
+          console.log(JSON.stringify({ event: "empty_generation", messageId: req.messageId, model: config.id }));
           if (i < chain.length - 1) continue;
-          throw new Error(`${att.label} returned empty text`);
+          throw new Error(`${config.id} returned empty text`);
         }
         break GENERATION_LOOP;
 
       } catch (error) {
         console.log(JSON.stringify({
           event: "attempt_failed", messageId: req.messageId,
-          attempt: att.label, retryable: isRetryable(error),
+          model: config.id, retryable: isRetryable(error),
           error: error instanceof Error ? error.message : String(error),
         }));
         if (i === chain.length - 1) throw error;
@@ -205,7 +186,7 @@ export async function generate(
 
   if (!result) throw new Error("unreachable: no generation result");
 
-  // 9. Telemetry
+  // 8. Telemetry
   const usage: GenerationUsage = {
     model: usedModel,
     inputTokens: result.usage.inputTokens ?? 0,
@@ -235,7 +216,7 @@ export async function generate(
     console.log(JSON.stringify({ event: "mark_interaction_error", error: String(error) }));
   }
 
-  // 10. Tool audit
+  // 9. Tool audit
   try {
     for (const tr of result.toolResults ?? []) {
       const output = tr.output as Record<string, unknown> | null;

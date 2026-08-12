@@ -18,3 +18,5 @@ coverage/
 apps/bot-worker/worker-configuration.d.ts
 .deploy-keys/
 apps/discord-runtime/dist/
+apps/platform-worker/worker-configuration.d.ts
+apps/platform-worker/tsconfig.json
