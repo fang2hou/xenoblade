@@ -25,7 +25,7 @@ export function isThreadContainer(containerId: string): boolean {
 
 /** Rough token estimate (~4 Unicode chars/token) for context budgeting only. */
 function estimateTokens(text: string): number {
-  return Math.ceil([...text].length / 4);
+  return Math.ceil(Array.from(text).length / 4);
 }
 
 /**
@@ -40,7 +40,7 @@ function enforceLimits(messages: HistoryMessage[]): HistoryMessage[] {
   let totalTokens = 0;
   for (let i = messages.length - 1; i >= 0; i--) {
     if (result.length >= MAX_CONTEXT_MESSAGES) break;
-    const chars = [...messages[i].text].length;
+    const chars = Array.from(messages[i].text).length;
     const tokens = estimateTokens(messages[i].text);
     if (totalChars + chars > MAX_CONTEXT_CHARS) break;
     if (totalTokens + tokens > MAX_CONTEXT_TOKENS) break;
