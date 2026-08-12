@@ -1,19 +1,18 @@
 node_modules/
 .wrangler/
 .dev.vars
-.env.deploy
 .env
+.env.deploy
 
-# Test artifacts
+# Build artifacts
 coverage/
 *.lcov
+apps/discord-runtime/dist/
+apps/platform-worker/worker-configuration.d.ts
+apps/platform-worker/tsconfig.json
 
-# Local D1 / wrangler state
-.wrangler/
+# Secrets / keys
+.deploy-keys/
 
 # OS files
 .DS_Store
-
-# Generated types
-apps/platform-worker/worker-configuration.d.ts
-apps/discord-runtime/dist/
