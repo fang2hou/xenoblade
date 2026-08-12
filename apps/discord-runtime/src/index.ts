@@ -227,13 +227,66 @@ async function applyGenerationResult(
   );
 
   switch (result.status) {
-    case "completed":
-      await postReply(channel, result.reply).catch(() => undefined);
+    case "completed": {
+      const replyLength = result.reply.length;
+      const replyPreview = result.reply.slice(0, 100);
+      console.log(
+        JSON.stringify({
+          event: "reply_posting",
+          messageId,
+          replyLength,
+          replyPreview,
+        }),
+      );
+      if (replyLength === 0 || result.reply.trim() === "") {
+        console.log(
+          JSON.stringify({ event: "empty_reply", messageId }),
+        );
+        await postReply(channel, FAILURE_REPLY).catch((e) => {
+          console.log(
+            JSON.stringify({
+              event: "post_reply_error",
+              messageId,
+              error: String(e),
+            }),
+          );
+        });
+        return;
+      }
+      await postReply(channel, result.reply)
+        .then(() => {
+          console.log(
+            JSON.stringify({
+              event: "reply_sent",
+              messageId,
+              length: replyLength,
+            }),
+          );
+        })
+        .catch((e) => {
+          console.log(
+            JSON.stringify({
+              event: "post_reply_error",
+              messageId,
+              error: String(e),
+              replyLength,
+            }),
+          );
+        });
       return;
+    }
     case "rejected":
       // duplicate / disabled → silent; budget_exceeded → courteous notice.
       if (result.code === "budget_exceeded") {
-        await postReply(channel, RATE_LIMIT_REPLY).catch(() => undefined);
+        await postReply(channel, RATE_LIMIT_REPLY).catch((e) => {
+          console.log(
+            JSON.stringify({
+              event: "post_reply_error",
+              messageId,
+              error: String(e),
+            }),
+          );
+        });
       }
       console.log(
         JSON.stringify({
@@ -252,7 +305,15 @@ async function applyGenerationResult(
           retryable: result.retryable,
         }),
       );
-      await postReply(channel, FAILURE_REPLY).catch(() => undefined);
+      await postReply(channel, FAILURE_REPLY).catch((e) => {
+        console.log(
+          JSON.stringify({
+            event: "post_reply_error",
+            messageId,
+            error: String(e),
+          }),
+        );
+      });
       return;
   }
 }

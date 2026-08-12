@@ -29,7 +29,9 @@ export async function postReply(
   target: SendableChannels,
   content: string,
 ): Promise<void> {
-  if (content.trim() === "") return;
+  if (content.trim() === "") {
+    throw new Error("postReply: content is empty after trim");
+  }
   const chunks = sliceIntoChunks(content, MAX_MESSAGE_LENGTH);
   for (const chunk of chunks) {
     await target.send(chunk);
