@@ -84,6 +84,10 @@ jobs:
           username: ${{ secrets.DOCKER_REGISTRY_USER }}
           password: ${{ secrets.DOCKER_REGISTRY_PASS }}
 
+      - name: Bundle discord-runtime
+        if: env.TARGET != 'worker'
+        run: pnpm --filter @xenoblade/discord-runtime build
+
       - name: Build and push image
         if: env.TARGET != 'worker'
         uses: docker/build-push-action@v6

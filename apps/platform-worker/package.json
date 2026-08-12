@@ -1,0 +1,21 @@
+{
+  "name": "@xenoblade/platform-worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:migrate:local": "wrangler d1 migrations apply xenoblade --local",
+    "db:migrate": "wrangler d1 migrations apply xenoblade --remote",
+    "typecheck": "tsc -p ../../tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@xenoblade/ai": "workspace:*",
+    "@xenoblade/contracts": "workspace:*",
+    "ai": "7.0.55"
+  },
+  "devDependencies": {
+    "wrangler": "4.119.0"
+  }
+}

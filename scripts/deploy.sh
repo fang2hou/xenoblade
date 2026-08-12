@@ -61,7 +61,11 @@ deploy_gateway() {
 
   cd "$PROJECT_ROOT"
 
-  # Build and push in one step.
+  # Bundle discord-runtime with esbuild before Docker build.
+  log "Bundling discord-runtime..."
+  pnpm --filter @xenoblade/discord-runtime build
+
+  # Build and push Docker image (pre-built dist/ already in context).
   # Requires: docker buildx, qemu-user-static (for x86 hosts).
   docker buildx build \
     --platform linux/arm64 \
