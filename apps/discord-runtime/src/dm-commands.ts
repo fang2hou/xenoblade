@@ -28,10 +28,7 @@ const MEMORY_ERROR_REPLY = "读取记忆失败，请稍后重试。";
  * Route a DM message to the control-plane command handler. DMs NEVER reach the
  * AI generation pipeline. Unknown commands and plain DM text reply with help.
  */
-export async function handleDmMessage(
-  message: Message,
-  env: EnvConfig,
-): Promise<void> {
+export async function handleDmMessage(message: Message, env: EnvConfig): Promise<void> {
   if (message.author.bot) return;
 
   // Only sendable channels can receive replies; bail silently otherwise.
@@ -86,11 +83,7 @@ async function handleCategoryCommand(
   const label = categoryLabel(category);
 
   if (sub === "show" || sub === "list") {
-    const response = await memoryOp(
-      { op: "get", userId },
-      env.workerUrl,
-      env.internalApiToken,
-    );
+    const response = await memoryOp({ op: "get", userId }, env.workerUrl, env.internalApiToken);
     const memories = filterMemories(response, category);
     await postReply(channel, formatMemories(label, memories));
     return;
@@ -110,9 +103,7 @@ async function handleCategoryCommand(
     );
     await safeReply(
       message,
-      response.status === "ok"
-        ? `已设置${label}记忆：${key}`
-        : MEMORY_ERROR_REPLY,
+      response.status === "ok" ? `已设置${label}记忆：${key}` : MEMORY_ERROR_REPLY,
     );
     return;
   }
@@ -130,10 +121,7 @@ async function handleCategoryCommand(
     return;
   }
 
-  await safeReply(
-    message,
-    `未知子命令。用法：/${category} show|set|clear`,
-  );
+  await safeReply(message, `未知子命令。用法：/${category} show|set|clear`);
 }
 
 /** Handle `/memory show` and `/memory clear` (all categories). */
@@ -147,26 +135,15 @@ async function handleMemoryCommand(
   const sub = (tokens[1] ?? "").toLowerCase();
 
   if (sub === "show") {
-    const response = await memoryOp(
-      { op: "get", userId },
-      env.workerUrl,
-      env.internalApiToken,
-    );
+    const response = await memoryOp({ op: "get", userId }, env.workerUrl, env.internalApiToken);
     const memories = response.status === "ok" ? response.memories : [];
     await postReply(channel, formatAllMemories(memories));
     return;
   }
 
   if (sub === "clear") {
-    const response = await memoryOp(
-      { op: "clear", userId },
-      env.workerUrl,
-      env.internalApiToken,
-    );
-    await safeReply(
-      message,
-      response.status === "ok" ? "已清除全部记忆。" : MEMORY_ERROR_REPLY,
-    );
+    const response = await memoryOp({ op: "clear", userId }, env.workerUrl, env.internalApiToken);
+    await safeReply(message, response.status === "ok" ? "已清除全部记忆。" : MEMORY_ERROR_REPLY);
     return;
   }
 
@@ -174,10 +151,7 @@ async function handleMemoryCommand(
 }
 
 /** Filter a get-response to a single category; empty on error. */
-function filterMemories(
-  response: MemoryResponse,
-  category: MemoryCategory,
-): UserMemory[] {
+function filterMemories(response: MemoryResponse, category: MemoryCategory): UserMemory[] {
   return response.status === "ok"
     ? response.memories.filter((memory) => memory.category === category)
     : [];
@@ -191,9 +165,7 @@ function formatMemories(label: string, memories: UserMemory[]): string {
 
 function formatAllMemories(memories: UserMemory[]): string {
   if (memories.length === 0) return "没有任何记忆。";
-  const lines = memories.map(
-    (memory) => `- [${memory.category}] ${memory.key}: ${memory.value}`,
-  );
+  const lines = memories.map((memory) => `- [${memory.category}] ${memory.key}: ${memory.value}`);
   return `全部记忆：\n${lines.join("\n")}`;
 }
 

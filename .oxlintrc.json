@@ -30,11 +30,14 @@
     "no-console": "off",
 
     "no-unused-vars": "off",
-    "typescript/no-unused-vars": ["error", {
-      "argsIgnorePattern": "^_",
-      "varsIgnorePattern": "^_",
-      "caughtErrorsIgnorePattern": "^_"
-    }],
+    "typescript/no-unused-vars": [
+      "error",
+      {
+        "argsIgnorePattern": "^_",
+        "varsIgnorePattern": "^_",
+        "caughtErrorsIgnorePattern": "^_"
+      }
+    ],
 
     "typescript/consistent-type-imports": ["warn", { "prefer": "type-imports" }],
     "typescript/no-floating-promises": ["error", { "ignoreVoid": true }],
@@ -50,10 +53,7 @@
 
   "overrides": [
     {
-      "files": [
-        "apps/platform-worker/**/*.ts",
-        "apps/bot-worker/src/**/*.ts"
-      ],
+      "files": ["apps/platform-worker/**/*.ts", "apps/bot-worker/src/**/*.ts"],
       "env": {
         "worker": true,
         "serviceworker": true
@@ -84,10 +84,7 @@
     },
 
     {
-      "files": [
-        "**/*.test.ts",
-        "**/test/**/*.ts"
-      ],
+      "files": ["**/*.test.ts", "**/test/**/*.ts"],
       "plugins": ["eslint", "typescript", "oxc", "unicorn", "import", "vitest"],
       "env": {
         "vitest": true,

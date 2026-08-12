@@ -44,16 +44,19 @@ If the summarization model fails or times out, the tool falls back to truncating
 ## Consequences
 
 **Positive:**
+
 - Generation model sees only compressed summaries (≤ 512 tokens), not raw pages. Token consumption drops by 1–2 orders of magnitude for web-heavy tasks.
 - Browser Rendering is already a Cloudflare binding — no external API dependency for fetching.
 - Cache API can cache compressed results, avoiding re-summarization on repeated reads of the same URL.
 
 **Negative:**
+
 - Browser Rendering is slower than a lightweight reader API (2–4 seconds per page including network idle wait).
 - Summarization adds 1–3 seconds latency per `read_url` call.
 - One additional failure mode (summarization timeout/error) to handle.
 - Browser sessions must be carefully closed in `finally` blocks to prevent resource leaks.
 
 **Neutral:**
+
 - The threshold and max tokens are configurable via environment variables.
 - Browser Rendering handles JavaScript-rendered content natively (no need for a separate reader API).

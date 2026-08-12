@@ -22,7 +22,7 @@ export async function fetchHistory(
   const recent = [...fetched.values()]
     .filter((msg) => msg.content.trim() !== "")
     .slice(0, RETURN_LIMIT)
-    .reverse();
+    .toReversed();
 
   return recent.map(toHistoryMessage);
 }
@@ -33,9 +33,7 @@ function toHistoryMessage(message: Message): HistoryMessage {
     text: message.content,
     authorId: message.author.id,
     authorName:
-      message.member?.displayName ||
-      message.author.displayName ||
-      message.author.username,
+      message.member?.displayName || message.author.displayName || message.author.username,
     isBot: message.author.bot,
     createdAt: message.createdTimestamp,
   };

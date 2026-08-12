@@ -26,8 +26,7 @@ export function createVisionTool(env: Env) {
           },
           question: {
             type: "string",
-            description:
-              "Specific question about the image (default: describe everything you see)",
+            description: "Specific question about the image (default: describe everything you see)",
           },
         },
         required: ["url"],

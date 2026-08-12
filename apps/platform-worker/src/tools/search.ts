@@ -18,6 +18,15 @@ interface BraveAnswerResponse {
   choices?: Array<{ message?: { content?: string } }>;
 }
 
+// All response fields are optional, so any non-null object is a valid instance.
+function isBraveSearchResponse(v: unknown): v is BraveSearchResponse {
+  return v !== null && typeof v === "object";
+}
+
+function isBraveAnswerResponse(v: unknown): v is BraveAnswerResponse {
+  return v !== null && typeof v === "object";
+}
+
 // ── Tool factory ───────────────────────────────────────────────────────────
 
 /**
@@ -64,13 +73,12 @@ export function createSearchTools(env: Env) {
           });
 
           if (!response.ok) {
-            console.log(
-              JSON.stringify({ event: "brave_search_error", status: response.status }),
-            );
+            console.log(JSON.stringify({ event: "brave_search_error", status: response.status }));
             return { results: [], error: `Search returned HTTP ${response.status}` };
           }
 
-          const data = (await response.json()) as BraveSearchResponse;
+          const json: unknown = await response.json();
+          const data: BraveSearchResponse = isBraveSearchResponse(json) ? json : {};
           const results = (data?.web?.results ?? []).slice(0, 5).map((r) => ({
             title: r.title ?? "",
             url: r.url ?? "",
@@ -79,9 +87,7 @@ export function createSearchTools(env: Env) {
 
           return { results };
         } catch (error) {
-          console.log(
-            JSON.stringify({ event: "brave_search_exception", error: String(error) }),
-          );
+          console.log(JSON.stringify({ event: "brave_search_exception", error: String(error) }));
           return { results: [], error: "Search request failed" };
         }
       },
@@ -123,22 +129,19 @@ export function createSearchTools(env: Env) {
           });
 
           if (!response.ok) {
-            console.log(
-              JSON.stringify({ event: "brave_answer_error", status: response.status }),
-            );
+            console.log(JSON.stringify({ event: "brave_answer_error", status: response.status }));
             return { answer: null, error: `Answer returned HTTP ${response.status}` };
           }
 
-          const data = (await response.json()) as BraveAnswerResponse;
+          const json: unknown = await response.json();
+          const data: BraveAnswerResponse = isBraveAnswerResponse(json) ? json : {};
           const answer = data?.choices?.[0]?.message?.content;
           if (answer && answer.trim()) {
             return { answer: answer.trim() };
           }
           return { answer: null, error: "Empty answer" };
         } catch (error) {
-          console.log(
-            JSON.stringify({ event: "brave_answer_exception", error: String(error) }),
-          );
+          console.log(JSON.stringify({ event: "brave_answer_exception", error: String(error) }));
           return { answer: null, error: "Answer request failed" };
         }
       },

@@ -6,11 +6,10 @@
   "scripts": {
     "dev": "pnpm --filter @xenoblade/platform-worker dev",
     "dev:runtime": "pnpm --filter @xenoblade/discord-runtime dev",
-    "typecheck": "pnpm --filter @xenoblade/platform-worker typecheck",
-    "test": "pnpm vitest run packages/ai/test/",
+    "test": "vitest run",
     "lint": "oxlint .",
-    "format:check": "oxfmt --check --ignore-path .oxfmtignore .",
-    "format": "oxfmt --ignore-path .oxfmtignore .",
+    "format": "oxfmt .",
+    "format:check": "oxfmt --check .",
     "deploy": "bash scripts/deploy.sh"
   },
   "devDependencies": {

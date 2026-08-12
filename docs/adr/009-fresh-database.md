@@ -23,28 +23,31 @@ Create a **new D1 database** with a clean schema designed for the target archite
 
 **Key differences from the old schema:**
 
-| Area | Old | New |
-|------|-----|-----|
-| `interactions.kind` | `CHECK (kind IN ('mention', 'subscribed'))` | `summon_kind TEXT NOT NULL` (no CHECK; validated in application layer) |
-| Session tracking | `last_interaction_at`, `active` (implicit subscription) | Removed; `reset_at` retained for context clearing |
-| User customization | Not supported | `user_memory` table (`persona`, `preference`, `fact`) |
-| Tool audit | Not supported | `tool_invocations` table |
-| Context clearing | Single mode (user × container) | Multiple modes (user, channel-wide, user-wide, time-filtered) |
+| Area                | Old                                                     | New                                                                    |
+| ------------------- | ------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `interactions.kind` | `CHECK (kind IN ('mention', 'subscribed'))`             | `summon_kind TEXT NOT NULL` (no CHECK; validated in application layer) |
+| Session tracking    | `last_interaction_at`, `active` (implicit subscription) | Removed; `reset_at` retained for context clearing                      |
+| User customization  | Not supported                                           | `user_memory` table (`persona`, `preference`, `fact`)                  |
+| Tool audit          | Not supported                                           | `tool_invocations` table                                               |
+| Context clearing    | Single mode (user × container)                          | Multiple modes (user, channel-wide, user-wide, time-filtered)          |
 
 **Migration strategy:** No data migration. The new database starts empty. The old database is preserved as a rollback data source. Cutover occurs at production deployment (Phase D) when the old bot stops and the new system becomes the sole data source.
 
 ## Consequences
 
 **Positive:**
+
 - Clean schema with no legacy constraints or dormant columns.
 - Old bot is completely unaffected during development — both systems can run in parallel on different databases.
 - No risky in-place migrations on a live database.
 - Table design is driven by current requirements, not historical accidents.
 
 **Negative:**
+
 - No data continuity. Historical interactions, context reset points, and processed message IDs from the old database are lost. The new bot starts with no memory of past conversations.
 - Two databases to manage during the transition period.
 
 **Neutral:**
+
 - The old database can be queried for historical analysis if needed, but it is not wired to the new system.
 - Wrangler configuration references the new database ID; the old database ID is removed at cutover.

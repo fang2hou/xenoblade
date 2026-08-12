@@ -25,10 +25,7 @@ export async function sendTyping(channel: SendableChannels): Promise<void> {
  * No streaming, no edit loop — one typing indicator earlier, then a single
  * complete post here.
  */
-export async function postReply(
-  target: SendableChannels,
-  content: string,
-): Promise<void> {
+export async function postReply(target: SendableChannels, content: string): Promise<void> {
   if (content.trim() === "") {
     throw new Error("postReply: content is empty after trim");
   }

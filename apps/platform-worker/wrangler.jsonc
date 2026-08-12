@@ -5,23 +5,23 @@
   "compatibility_date": "2026-08-12",
   "compatibility_flags": ["nodejs_compat"],
   "observability": {
-    "enabled": true
+    "enabled": true,
   },
   "browser": {
-    "binding": "BROWSER"
+    "binding": "BROWSER",
   },
   "vars": {
-    "MODEL_CONFIG": "{\"generation\":[{\"id\":\"openai/gpt-5.6-luna\",\"temperature\":0.7},{\"id\":\"deepseek/deepseek-v4-flash-0731\",\"providers\":[\"DeepSeek\",\"NovitaAI\",\"SiliconFlow\"]}],\"summarization\":[{\"id\":\"openai/gpt-5.6-luna\"},{\"id\":\"deepseek/deepseek-v4-flash-0731\",\"providers\":[\"DeepSeek\",\"NovitaAI\",\"SiliconFlow\"]}],\"vision\":[{\"id\":\"xiaomi/mimo-v2.5\",\"providers\":[\"Xiaomi\",\"NovitaAI\"]}]}"
+    "MODEL_CONFIG": "{\"generation\":[{\"id\":\"openai/gpt-5.6-luna\",\"temperature\":0.7},{\"id\":\"deepseek/deepseek-v4-flash-0731\",\"providers\":[\"DeepSeek\",\"NovitaAI\",\"SiliconFlow\"]}],\"summarization\":[{\"id\":\"openai/gpt-5.6-luna\"},{\"id\":\"deepseek/deepseek-v4-flash-0731\",\"providers\":[\"DeepSeek\",\"NovitaAI\",\"SiliconFlow\"]}],\"vision\":[{\"id\":\"xiaomi/mimo-v2.5\",\"providers\":[\"Xiaomi\",\"NovitaAI\"]}]}",
   },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "xenoblade",
       "database_id": "25d6331b-459a-4ea0-8d51-1904405191a3",
-      "migrations_dir": "migrations"
-    }
+      "migrations_dir": "migrations",
+    },
   ],
   "limits": {
-    "cpu_ms": 30000
-  }
+    "cpu_ms": 30000,
+  },
 }

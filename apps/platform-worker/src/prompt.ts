@@ -40,9 +40,7 @@ export const SAFETY_SYSTEM = [
  */
 function historyToModelMessages(history: readonly HistoryMessage[]): ModelMessage[] {
   return history.map((m): ModelMessage =>
-    m.isBot
-      ? { role: "assistant", content: m.text }
-      : { role: "user", content: m.text },
+    m.isBot ? { role: "assistant", content: m.text } : { role: "user", content: m.text },
   );
 }
 
@@ -63,9 +61,8 @@ function currentToUserMessage(
   if (!includeImages || images.length === 0) {
     // For text-only models: convert image attachments to text references
     // so the model knows to call the vision_describe tool.
-    const imageRefs = images.length > 0
-      ? images.map((img) => `[Image: ${img.url}]`).join("\n")
-      : "";
+    const imageRefs =
+      images.length > 0 ? images.map((img) => `[Image: ${img.url}]`).join("\n") : "";
     const combined = imageRefs ? `${text}\n\n${imageRefs}` : text;
     return { role: "user", content: combined };
   }

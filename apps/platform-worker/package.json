@@ -8,7 +8,7 @@
     "deploy": "wrangler deploy",
     "db:migrate:local": "wrangler d1 migrations apply xenoblade --local",
     "db:migrate": "wrangler d1 migrations apply xenoblade --remote",
-    "typecheck": "tsc -p ../../tsconfig.json --noEmit"
+    "types": "wrangler types"
   },
   "dependencies": {
     "@ai-sdk/mcp": "^2.0.30",

@@ -37,12 +37,12 @@ export function clearContext(
   workerUrl: string,
   token: string,
 ): Promise<ContextClearResult> {
-  return postJson(
+  return postJson<ContextClearResult>(
     `${workerUrl}/internal/v1/context/clear`,
     req,
     token,
     CONTROL_TIMEOUT_MS,
-  ) as Promise<ContextClearResult>;
+  );
 }
 
 /** Perform a user-memory operation on the Worker. */
@@ -51,24 +51,24 @@ export function memoryOp(
   workerUrl: string,
   token: string,
 ): Promise<MemoryResponse> {
-  return postJson(
+  return postJson<MemoryResponse>(
     `${workerUrl}/internal/v1/memory`,
     req,
     token,
     CONTROL_TIMEOUT_MS,
-  ) as Promise<MemoryResponse>;
+  );
 }
 
 /**
  * POST a JSON body to the Worker with Bearer auth and a timeout. Throws after
  * structured logging on any network, non-2xx, or JSON-parse failure.
  */
-async function postJson(
+async function postJson<T = unknown>(
   url: string,
   body: unknown,
   token: string,
   timeoutMs: number,
-): Promise<unknown> {
+): Promise<T> {
   let response: Response;
   try {
     response = await fetch(url, {
@@ -105,7 +105,9 @@ async function postJson(
   }
 
   try {
-    return await response.json();
+    const json: unknown = await response.json();
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- JSON boundary: caller validates via type guard
+    return json as T;
   } catch (error) {
     console.log(
       JSON.stringify({
@@ -118,14 +120,20 @@ async function postJson(
   }
 }
 
+/** Type guard: does this value look like a GenerationResult? */
+function isGenerationResult(value: unknown): value is GenerationResult {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    "status" in value &&
+    typeof value.status === "string"
+  );
+}
+
 /** Validate the Worker generation response shape before handing it back. */
 function assertGenerationResult(value: unknown): GenerationResult {
-  // Boundary check: the Worker is authoritative for the union shape once the
-  // discriminator parses; narrow with `in` so no member shape is fabricated.
-  if (value !== null && typeof value === "object" && "status" in value) {
-    if (typeof value.status === "string") {
-      return value as GenerationResult;
-    }
+  if (isGenerationResult(value)) {
+    return value;
   }
   console.log(JSON.stringify({ event: "worker_malformed_generation_result" }));
   throw new Error("Worker returned a malformed generation result");
