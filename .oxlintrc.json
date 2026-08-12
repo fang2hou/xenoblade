@@ -1,22 +1,110 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["typescript"],
-  "categories": {},
-  "ignorePatterns": ["node_modules/**", ".wrangler/**"],
-  "rules": {
-    "no-unused-vars": "error",
-    "@typescript-eslint/no-unused-vars": "error",
-    "eqeqeq": ["error", "smart"],
-    "require-await": "error",
-    "no-console": "warn",
-    "no-debugger": "error"
+
+  "options": {
+    "typeAware": true,
+    "typeCheck": true
   },
+
+  "plugins": ["eslint", "typescript", "oxc", "unicorn", "import"],
+
+  "categories": {
+    "correctness": "error",
+    "suspicious": "warn"
+  },
+
+  "env": {
+    "es2024": true
+  },
+
+  "ignorePatterns": [
+    "node_modules/**",
+    ".wrangler/**",
+    "**/dist/**",
+    "**/worker-configuration.d.ts"
+  ],
+
+  "rules": {
+    "eqeqeq": ["error", "smart"],
+    "no-debugger": "error",
+    "no-console": "off",
+
+    "no-unused-vars": "off",
+    "typescript/no-unused-vars": ["error", {
+      "argsIgnorePattern": "^_",
+      "varsIgnorePattern": "^_",
+      "caughtErrorsIgnorePattern": "^_"
+    }],
+
+    "typescript/consistent-type-imports": ["warn", { "prefer": "type-imports" }],
+    "typescript/no-floating-promises": ["error", { "ignoreVoid": true }],
+    "typescript/no-misused-promises": "warn",
+    "typescript/no-explicit-any": "warn",
+    "typescript/no-misused-spread": ["error", { "allow": [{ "from": "lib", "name": "String" }] }],
+
+    "eslint/preserve-caught-error": "off",
+
+    "import/no-cycle": "warn",
+    "import/no-duplicates": "warn"
+  },
+
   "overrides": [
     {
-      "files": ["**/test/**/*.ts", "**/*.test.ts"],
+      "files": [
+        "apps/platform-worker/**/*.ts",
+        "apps/bot-worker/src/**/*.ts"
+      ],
+      "env": {
+        "worker": true,
+        "serviceworker": true
+      },
+      "globals": {
+        "caches": "readonly",
+        "HTMLRewriter": "readonly"
+      },
+      "rules": {
+        "unicorn/prefer-top-level-await": "off",
+        "unicorn/no-await-expression-member": "off"
+      }
+    },
+
+    {
+      "files": ["apps/discord-runtime/**/*.ts"],
+      "plugins": ["eslint", "typescript", "oxc", "unicorn", "import", "node"],
+      "env": {
+        "node": true
+      }
+    },
+
+    {
+      "files": ["packages/**/*.ts"],
+      "rules": {
+        "no-console": "off"
+      }
+    },
+
+    {
+      "files": [
+        "**/*.test.ts",
+        "**/test/**/*.ts"
+      ],
+      "plugins": ["eslint", "typescript", "oxc", "unicorn", "import", "vitest"],
+      "env": {
+        "vitest": true,
+        "node": true
+      },
       "rules": {
         "no-console": "off",
-        "require-await": "off"
+        "typescript/no-floating-promises": "off",
+        "typescript/no-explicit-any": "off",
+        "typescript/no-non-null-assertion": "off",
+        "typescript/no-unsafe-type-assertion": "off",
+        "typescript/no-unnecessary-type-assertion": "off",
+        "typescript/no-base-to-string": "off",
+        "typescript/no-misused-spread": "off",
+        "unicorn/no-null": "off",
+        "vitest/no-focused-tests": "error",
+        "vitest/no-disabled-tests": "warn"
       }
     }
   ]

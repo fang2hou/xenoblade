@@ -33,9 +33,6 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
-      - name: Generate Workers types
-        working-directory: apps/platform-worker
-        run: pnpm exec wrangler types
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm test

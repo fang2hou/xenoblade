@@ -88,7 +88,7 @@ async function postJson(
         error: String(error),
       }),
     );
-    throw new Error(`Worker request failed: ${url}`);
+    throw new Error(`Worker request failed: ${url}`, { cause: error });
   }
 
   if (!response.ok) {
@@ -114,7 +114,7 @@ async function postJson(
         error: String(error),
       }),
     );
-    throw new Error(`Worker returned invalid JSON for ${url}`);
+    throw new Error(`Worker returned invalid JSON for ${url}`, { cause: error });
   }
 }
 
