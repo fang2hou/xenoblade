@@ -1,52 +1,60 @@
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 
-export const ALLOWED_MODELS = {
-  openrouter: new Set(["openai/gpt-5.6-luna", "deepseek/deepseek-chat"]),
-} as const;
+// ── Model roles (ADR-004: Two-Tier Model Architecture) ────────────────────
 
-export const DEFAULT_MODELS = {
-  openrouter: "openai/gpt-5.6-luna",
-} as const;
+export type ModelRole = "generation" | "summarization" | "transcription";
+
+const DEFAULT_ROLE_MODELS: Record<ModelRole, string> = {
+  generation: "openai/gpt-5.6-luna",
+  summarization: "openai/gpt-5.6-luna",
+  transcription: "openai/gpt-transcribe",
+};
 
 export const GENERATION_LIMITS = {
   maxOutputTokens: 1024,
   timeout: { totalMs: 60_000, firstChunkMs: 15_000, chunkMs: 5_000 },
 } as const;
 
-export function selectModelId(provider: string, requested?: string): string {
-  if (provider !== "openrouter") {
-    throw new Error(`Unknown AI provider: ${provider}`);
+export interface AiEnv {
+  /** Legacy single-model var; still read for the generation role. */
+  AI_MODEL?: string;
+  GENERATION_MODEL?: string;
+  SUMMARIZATION_MODEL?: string;
+  TRANSCRIPTION_MODEL?: string;
+  OPENROUTER_API_KEY?: string;
+}
+
+function resolveModelId(env: AiEnv, role: ModelRole): string {
+  switch (role) {
+    case "generation":
+      return env.GENERATION_MODEL ?? env.AI_MODEL ?? DEFAULT_ROLE_MODELS.generation;
+    case "summarization":
+      return env.SUMMARIZATION_MODEL ?? DEFAULT_ROLE_MODELS.summarization;
+    case "transcription":
+      return env.TRANSCRIPTION_MODEL ?? DEFAULT_ROLE_MODELS.transcription;
   }
-  if (requested === undefined) {
-    return DEFAULT_MODELS.openrouter;
-  }
-  if (!ALLOWED_MODELS.openrouter.has(requested)) {
-    throw new Error(`Model not allowed: ${requested}`);
-  }
-  return requested;
 }
 
 /**
- * Selects an AI model for the configured provider.
+ * Select an AI model for a given role via OpenRouter.
  *
- * When `options.sessionId` is provided, it is forwarded to OpenRouter via
- * `extraBody.session_id` to enable provider sticky routing, which improves
- * DeepSeek automatic prefix-cache hit rates across turns for the same
- * conversation container. The caller is responsible for keeping the session
- * id stable (e.g. `xenoblade:${containerId}`) and under 256 characters.
+ * All roles go through the AI SDK standard interface, preserving the option
+ * to switch providers in the future.
+ *
+ * `options.sessionId` is forwarded to OpenRouter for sticky routing (prefix
+ * cache). The caller keeps it stable per container (e.g. `xenoblade:${containerId}`).
  */
 export function selectModel(
-  env: {
-    AI_PROVIDER: string;
-    AI_MODEL?: string;
-    OPENROUTER_API_KEY?: string;
-  },
-  options?: { sessionId?: string },
+  env: AiEnv,
+  options?: { sessionId?: string; role?: ModelRole },
 ) {
-  const modelId = selectModelId(env.AI_PROVIDER, env.AI_MODEL);
+  const role = options?.role ?? "generation";
+  const modelId = resolveModelId(env, role);
+
   if (!env.OPENROUTER_API_KEY) {
     throw new Error("OPENROUTER_API_KEY is not configured");
   }
+
   if (options?.sessionId) {
     return createOpenRouter({
       apiKey: env.OPENROUTER_API_KEY,
