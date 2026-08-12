@@ -145,8 +145,10 @@ async function runGeneration(
   const containerId = containerIdFromMessage(message);
   const effective = decision.fallbackMessage ?? message;
 
-  // One typing indicator per generation, then wait for the full result.
+  // Keep typing indicator alive during generation. Discord's typing
+  // indicator expires after ~10s; refresh every 8s until done.
   await sendTyping(channel);
+  const typingInterval = setInterval(() => sendTyping(channel), 8000);
 
   let history: HistoryMessage[] = [];
   try {
@@ -198,6 +200,7 @@ async function runGeneration(
   try {
     result = await generate(request, env.workerUrl, env.internalApiToken);
   } catch (error) {
+    clearInterval(typingInterval);
     console.log(
       JSON.stringify({
         event: "generation_call_failed",
@@ -205,10 +208,13 @@ async function runGeneration(
         error: String(error),
       }),
     );
-    await postReply(channel, FAILURE_REPLY).catch(() => undefined);
+    await postReply(channel, FAILURE_REPLY).catch((e) => {
+      console.log(JSON.stringify({ event: "post_reply_error", messageId: message.id, error: String(e) }));
+    });
     return;
   }
 
+  clearInterval(typingInterval);
   await applyGenerationResult(channel, result, message.id);
 }
 
