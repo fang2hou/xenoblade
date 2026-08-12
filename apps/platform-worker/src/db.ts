@@ -222,6 +222,49 @@ export async function recordInteraction(db: D1Database, row: InteractionRecord):
     .run();
 }
 
+// ── Tool invocation telemetry ─────────────────────────────────────────────
+
+export interface ToolInvocationRecord {
+  id: string;
+  interactionId: string;
+  toolName: string;
+  /** MCP server name or "builtin" for first-party tools. */
+  server: string;
+  status: "ok" | "error" | "timeout";
+  durationMs?: number | null;
+  inputSize?: number | null;
+  outputSize?: number | null;
+  errorCode?: string | null;
+  createdAt: number;
+}
+
+/** Persist one tool invocation audit row. */
+export async function recordToolInvocation(
+  db: D1Database,
+  row: ToolInvocationRecord,
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO tool_invocations
+        (id, interaction_id, tool_name, server, status,
+         duration_ms, input_size, output_size, error_code, created_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`,
+    )
+    .bind(
+      row.id,
+      row.interactionId,
+      row.toolName,
+      row.server,
+      row.status,
+      row.durationMs ?? null,
+      row.inputSize ?? null,
+      row.outputSize ?? null,
+      row.errorCode ?? null,
+      row.createdAt,
+    )
+    .run();
+}
+
 // ── Per-user context state ────────────────────────────────────────────────
 
 export interface UserContextState {

@@ -1,4 +1,4 @@
-import { generateText } from "ai";
+import { generateText, isStepCount } from "ai";
 
 import { composeSystemPrompt, GENERATION_LIMITS, selectModel } from "@xenoblade/ai";
 import type {
@@ -17,11 +17,13 @@ import {
   getUserMemory,
   markUserInteraction,
   recordInteraction,
+  recordToolInvocation,
   reserveGeneration,
   type InteractionRecord,
 } from "./db";
 import { buildContext } from "./context";
 import { buildGenerationMessages, SAFETY_SYSTEM } from "./prompt";
+import { createAllTools } from "./tools";
 
 /**
  * Format persona/preference memories as a private system-prompt block so the
@@ -144,6 +146,8 @@ export async function generate(
       model: selectModel(env, { role: "generation", sessionId: `xenoblade:${req.containerId}` }),
       system,
       messages,
+      tools: createAllTools(env),
+      stopWhen: isStepCount(5),
       maxOutputTokens: GENERATION_LIMITS.maxOutputTokens,
       maxRetries: 2,
       timeout: GENERATION_LIMITS.timeout.totalMs,
@@ -211,6 +215,29 @@ export async function generate(
     });
   } catch (error) {
     console.log(JSON.stringify({ event: "mark_interaction_error", error: String(error) }));
+  }
+
+  // 9. Record tool invocations (best-effort, non-fatal).
+  try {
+    for (const tr of result.toolResults) {
+      const output = tr.output as Record<string, unknown> | null;
+      const isError =
+        output != null && typeof output === "object" && "error" in output;
+      await recordToolInvocation(env.DB, {
+        id: crypto.randomUUID(),
+        interactionId: requestId,
+        toolName: tr.toolName,
+        server: "builtin",
+        status: isError ? "error" : "ok",
+        inputSize: JSON.stringify(tr.input).length,
+        outputSize: JSON.stringify(tr.output).length,
+        createdAt: Date.now(),
+      });
+    }
+  } catch (error) {
+    console.log(
+      JSON.stringify({ event: "record_tool_invocations_error", error: String(error) }),
+    );
   }
 
   return {
