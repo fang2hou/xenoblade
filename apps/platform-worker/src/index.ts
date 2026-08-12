@@ -66,6 +66,7 @@ export default {
             status: "error",
             requestId: crypto.randomUUID(),
             code: "invalid_body",
+            message: "Invalid request body",
             retryable: false,
           },
           400,
