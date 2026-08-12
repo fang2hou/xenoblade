@@ -230,6 +230,17 @@ export async function generate(
   // 11. Close MCP clients.
   await closeMcpClients(mcpResult.clients);
 
+  console.log(
+    JSON.stringify({
+      event: "generation_completed",
+      messageId: req.messageId,
+      replyLength: result.text.length,
+      replyPreview: result.text.slice(0, 100),
+      toolCalls: (result.toolResults ?? []).length,
+      steps: result.steps.length,
+    }),
+  );
+
   return {
     status: "completed",
     requestId,
