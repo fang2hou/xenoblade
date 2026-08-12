@@ -32,7 +32,7 @@ export async function generate(
 }
 
 /** Clear conversation context for a user/container on the Worker. */
-export async function clearContext(
+export function clearContext(
   req: ContextClearRequest,
   workerUrl: string,
   token: string,
@@ -46,7 +46,7 @@ export async function clearContext(
 }
 
 /** Perform a user-memory operation on the Worker. */
-export async function memoryOp(
+export function memoryOp(
   req: MemoryRequest,
   workerUrl: string,
   token: string,
