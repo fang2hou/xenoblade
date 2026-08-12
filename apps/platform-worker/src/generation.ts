@@ -23,13 +23,8 @@ import {
 } from "./db";
 import { buildContext } from "./context";
 import { buildGenerationMessages, SAFETY_SYSTEM } from "./prompt";
-import { createAllTools } from "./tools";
+import { createFirstPartyTools, connectMcpServers, closeMcpClients } from "./tools";
 
-/**
- * Format persona/preference memories as a private system-prompt block so the
- * model can weave the user's known context in naturally. Fact memories are
- * excluded (they are reference data, not style guidance).
- */
 function formatMemoryBlock(displayName: string, memories: readonly UserMemory[]): string {
   const relevant = memories.filter(
     (m) => m.category === "persona" || m.category === "preference",
@@ -44,7 +39,6 @@ function formatMemoryBlock(displayName: string, memories: readonly UserMemory[])
   ].join("\n");
 }
 
-/** Mark a reservation finalized; telemetry must never mask the real result. */
 async function safeFinish(db: D1Database, reservationId: number): Promise<void> {
   try {
     await finishGeneration(db, reservationId, Date.now());
@@ -53,7 +47,6 @@ async function safeFinish(db: D1Database, reservationId: number): Promise<void> 
   }
 }
 
-/** Record an interaction row; a telemetry failure is logged, not fatal. */
 async function safeRecord(db: D1Database, row: InteractionRecord): Promise<void> {
   try {
     await recordInteraction(db, row);
@@ -62,14 +55,6 @@ async function safeRecord(db: D1Database, row: InteractionRecord): Promise<void>
   }
 }
 
-/**
- * Run the full generation pipeline for one request.
- *
- * claim → runtime gate → budget → context → prompt → generateText → telemetry
- *
- * Every terminal path returns a {@link GenerationResult}; the Worker never
- * throws to the caller.
- */
 export async function generate(
   env: Env,
   req: GenerationRequest,
@@ -116,7 +101,7 @@ export async function generate(
     return { status: "error", requestId, code: "reserve_failed", retryable: true };
   }
 
-  // 4. User-isolated context state (fail-closed to current-message-only).
+  // 4. User-isolated context state.
   const state = await getUserContextState(env.DB, {
     scopeId: req.scopeId,
     containerId: req.containerId,
@@ -127,7 +112,6 @@ export async function generate(
   const contextDecision = buildContext(req, state.resetAt);
   const messages = buildGenerationMessages(req, contextDecision);
 
-  // Inject persona/preference memory into the system prompt.
   let persona: string | undefined;
   try {
     const memories = await getUserMemory(env.DB, req.userId);
@@ -138,7 +122,12 @@ export async function generate(
 
   const system = composeSystemPrompt({ safety: SAFETY_SYSTEM, persona });
 
-  // 6. Generate (non-streaming). Provider-level retries are delegated to the SDK.
+  // 6. Connect MCP servers + build combined tool set.
+  const firstPartyTools = createFirstPartyTools(env);
+  const mcpResult = await connectMcpServers(env);
+  const allTools = { ...firstPartyTools, ...mcpResult.tools };
+
+  // 7. Generate.
   const startedAt = now;
   let result;
   try {
@@ -146,13 +135,13 @@ export async function generate(
       model: selectModel(env, { role: "generation", sessionId: `xenoblade:${req.containerId}` }),
       system,
       messages,
-      tools: createAllTools(env),
+      tools: allTools,
       stopWhen: isStepCount(5),
-      maxOutputTokens: GENERATION_LIMITS.maxOutputTokens,
       maxRetries: 2,
       timeout: GENERATION_LIMITS.timeout.totalMs,
     });
   } catch (error) {
+    await closeMcpClients(mcpResult.clients);
     const code = error instanceof Error ? error.name : "GENERATION_FAILED";
     console.log(
       JSON.stringify({
@@ -175,11 +164,10 @@ export async function generate(
       totalDurationMs: Date.now() - startedAt,
       createdAt: Date.now(),
     });
-    // Already retried at the SDK level; a Runtime retry would hit dedup.
     return { status: "error", requestId, code, retryable: false };
   }
 
-  // 7. Extract usage (synchronous for generateText).
+  // 8. Extract usage.
   const usage: GenerationUsage = {
     model: env.GENERATION_MODEL,
     inputTokens: result.usage.inputTokens ?? 0,
@@ -189,7 +177,7 @@ export async function generate(
     durationMs: Date.now() - startedAt,
   };
 
-  // 8. Telemetry (best-effort).
+  // 9. Telemetry.
   await safeFinish(env.DB, reservationId);
   await safeRecord(env.DB, {
     id: requestId,
@@ -217,17 +205,16 @@ export async function generate(
     console.log(JSON.stringify({ event: "mark_interaction_error", error: String(error) }));
   }
 
-  // 9. Record tool invocations (best-effort, non-fatal).
+  // 10. Record tool invocations (best-effort).
   try {
-    for (const tr of result.toolResults) {
+    for (const tr of result.toolResults ?? []) {
       const output = tr.output as Record<string, unknown> | null;
-      const isError =
-        output != null && typeof output === "object" && "error" in output;
+      const isError = output != null && typeof output === "object" && "error" in output;
       await recordToolInvocation(env.DB, {
         id: crypto.randomUUID(),
         interactionId: requestId,
         toolName: tr.toolName,
-        server: "builtin",
+        server: tr.toolName.includes("_") ? tr.toolName.split("_")[0] : "builtin",
         status: isError ? "error" : "ok",
         inputSize: JSON.stringify(tr.input).length,
         outputSize: JSON.stringify(tr.output).length,
@@ -239,6 +226,9 @@ export async function generate(
       JSON.stringify({ event: "record_tool_invocations_error", error: String(error) }),
     );
   }
+
+  // 11. Close MCP clients.
+  await closeMcpClients(mcpResult.clients);
 
   return {
     status: "completed",

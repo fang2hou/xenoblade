@@ -2,21 +2,22 @@ import type { ToolSet } from "ai";
 
 import { createReadUrlTool } from "./read-url";
 import { createSearchTools } from "./search";
+import { createModelInfoTools } from "./model-info";
 
 export { isUrlSafe } from "./ssrf";
 export { createReadUrlTool } from "./read-url";
 export { createSearchTools } from "./search";
+export { createModelInfoTools } from "./model-info";
+export { connectMcpServers, closeMcpClients } from "./mcp-clients";
 
 /**
- * Build the full tool map for the generation pipeline.
- *
- * Returns `{ web_search, web_answer, read_url }` as an AI SDK `ToolSet`
- * suitable for `generateText`. All tools degrade gracefully — they return
- * structured errors rather than throwing.
+ * Build first-party tool map (non-MCP) for the generation pipeline.
+ * MCP tools are added separately in generation.ts via connectMcpServers().
  */
-export function createAllTools(env: Env): ToolSet {
+export function createFirstPartyTools(env: Env): ToolSet {
   return {
     ...createSearchTools(env),
     read_url: createReadUrlTool(env),
+    ...createModelInfoTools(env),
   };
 }
