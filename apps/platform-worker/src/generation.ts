@@ -202,6 +202,7 @@ export async function generate(
     return { status: "error", requestId, code, message: errorMsg, retryable: isRetryable(error) };
   }
 
+  if (!result) throw new Error("Generation produced no result after all attempts");
   // 7. Usage.
   const usage: GenerationUsage = {
     model: usedModel,
