@@ -302,6 +302,7 @@ async function applyGenerationResult(
           event: "generation_error",
           messageId,
           code: result.code,
+          message: result.message,
           retryable: result.retryable,
         }),
       );
