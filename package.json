@@ -6,8 +6,8 @@
   "scripts": {
     "dev": "pnpm --filter @xenoblade/platform-worker dev",
     "dev:runtime": "pnpm --filter @xenoblade/discord-runtime dev",
-    "typecheck": "oxlint .",
-    "test": "pnpm --filter @xenoblade/ai test",
+    "typecheck": "pnpm --filter @xenoblade/platform-worker typecheck",
+    "test": "pnpm vitest run packages/ai/test/",
     "lint": "oxlint .",
     "format:check": "oxfmt --check --ignore-path .oxfmtignore .",
     "format": "oxfmt --ignore-path .oxfmtignore .",
