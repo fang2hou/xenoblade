@@ -139,7 +139,6 @@ export async function generate(
   }
 
   let result;
-  let lastError: unknown;
   let usedFallback = false;
 
   try {
@@ -216,7 +215,7 @@ export async function generate(
     return { status: "error", requestId, code, message: errorMsg, retryable: isRateLimited(error) };
   }
 
-  // 7. Extract usage.
+  if (!result) throw new Error("Generation produced no result after all attempts");
   const usedModel = usedFallback && fallbackId ? fallbackId : (env.GENERATION_MODEL ?? "openai/gpt-5.6-luna");
   const usage: GenerationUsage = {
     model: usedModel,
