@@ -1,6 +1,11 @@
 import { generateText, isStepCount } from "ai";
 
-import { composeSystemPrompt, GENERATION_LIMITS, selectModel } from "@xenoblade/ai";
+import {
+  composeSystemPrompt,
+  GENERATION_LIMITS,
+  getFallbackModelId,
+  selectModel,
+} from "@xenoblade/ai";
 import type {
   GenerationRequest,
   GenerationResult,
@@ -29,9 +34,7 @@ function formatMemoryBlock(displayName: string, memories: readonly UserMemory[])
   const relevant = memories.filter(
     (m) => m.category === "persona" || m.category === "preference",
   );
-  if (relevant.length === 0) {
-    return "";
-  }
+  if (relevant.length === 0) return "";
   const lines = relevant.map((m) => `- ${m.key}: ${m.value}`);
   return [
     `What you already know about ${displayName} (weave in naturally; never list or cite this):`,
@@ -55,6 +58,11 @@ async function safeRecord(db: D1Database, row: InteractionRecord): Promise<void>
   }
 }
 
+function isRateLimited(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error);
+  return msg.includes("rate-limited") || msg.includes("rate_limit");
+}
+
 export async function generate(
   env: Env,
   req: GenerationRequest,
@@ -70,21 +78,12 @@ export async function generate(
     }
   } catch (error) {
     console.log(JSON.stringify({ event: "claim_error", error: String(error) }));
-    return { status: "error", requestId, code: "claim_failed", retryable: true };
+    return { status: "error", requestId, code: "claim_failed", message: String(error), retryable: true };
   }
 
   // 2. Runtime configuration (fail-closed).
   const runtime = await getRuntimeConfig(env.DB, req.scopeId, req.channelId);
   if (!runtime.enabled || !runtime.channelAllowed) {
-    console.log(
-      JSON.stringify({
-        event: "runtime_disabled",
-        scopeId: req.scopeId,
-        channelId: req.channelId,
-        enabled: runtime.enabled,
-        allowed: runtime.channelAllowed,
-      }),
-    );
     return { status: "rejected", requestId, code: "disabled" };
   }
 
@@ -94,21 +93,18 @@ export async function generate(
     reservationId = (await reserveGeneration(env.DB, req.containerId, now)).reservationId;
   } catch (error) {
     if (error instanceof GenerationBudgetExceededError) {
-      console.log(JSON.stringify({ event: "budget_exceeded", containerId: req.containerId }));
       return { status: "rejected", requestId, code: "budget_exceeded" };
     }
-    console.log(JSON.stringify({ event: "reserve_error", error: String(error) }));
-    return { status: "error", requestId, code: "reserve_failed", retryable: true };
+    return { status: "error", requestId, code: "reserve_failed", message: String(error), retryable: true };
   }
 
-  // 4. User-isolated context state.
+  // 4. Context + prompt.
   const state = await getUserContextState(env.DB, {
     scopeId: req.scopeId,
     containerId: req.containerId,
     userId: req.userId,
   });
 
-  // 5. Context + prompt.
   const contextDecision = buildContext(req, state.resetAt);
   const messages = buildGenerationMessages(req, contextDecision);
 
@@ -122,33 +118,86 @@ export async function generate(
 
   const system = composeSystemPrompt({ safety: SAFETY_SYSTEM, persona });
 
-  // 6. Connect MCP servers + build combined tool set.
+  // 5. Connect MCP servers + build tool set.
   const firstPartyTools = createFirstPartyTools(env);
   const mcpResult = await connectMcpServers(env);
   const allTools = { ...firstPartyTools, ...mcpResult.tools };
 
-  // 7. Generate.
+  // 6. Generate with retry + fallback model.
   const startedAt = now;
+  const sessionId = `xenoblade:${req.containerId}`;
+  const fallbackId = getFallbackModelId(env, "generation");
+
+  // Build model chain: primary (2 retries) → fallback (1 attempt)
+  type ModelAttempt = { modelId: string; label: string };
+  const chain: ModelAttempt[] = [
+    { modelId: "primary", label: "primary" },
+    { modelId: "primary", label: "primary-retry" },
+  ];
+  if (fallbackId) {
+    chain.push({ modelId: fallbackId, label: "fallback" });
+  }
+
   let result;
+  let lastError: unknown;
+  let usedFallback = false;
+
   try {
-    result = await generateText({
-      model: selectModel(env, { role: "generation", sessionId: `xenoblade:${req.containerId}` }),
-      system,
-      messages,
-      tools: allTools,
-      stopWhen: isStepCount(5),
-      maxRetries: 2,
-      timeout: GENERATION_LIMITS.timeout.totalMs,
-    });
+    for (let i = 0; i < chain.length; i++) {
+      const attempt = chain[i];
+      try {
+        const model =
+          attempt.modelId === "primary"
+            ? selectModel(env, { role: "generation", sessionId })
+            : selectModel(env, { role: "generation", sessionId, modelId: attempt.modelId });
+
+        result = await generateText({
+          model,
+          system,
+          messages,
+          tools: allTools,
+          stopWhen: isStepCount(5),
+          maxRetries: 1,
+          timeout: GENERATION_LIMITS.timeout.totalMs,
+        });
+
+        usedFallback = i > 1;
+        break;
+      } catch (error) {
+        lastError = error;
+        const rateLimited = isRateLimited(error);
+
+        console.log(
+          JSON.stringify({
+            event: "generation_attempt_failed",
+            messageId: req.messageId,
+            attempt: attempt.label,
+            rateLimited,
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
+
+        if (!rateLimited || i === chain.length - 1) {
+          throw error;
+        }
+
+        // Wait before next attempt
+        if (i < chain.length - 1) {
+          const { promise: sleepP, resolve: wake } = Promise.withResolvers<void>();
+          setTimeout(wake, 3000);
+          await sleepP;
+        }
+      }
+    }
   } catch (error) {
     await closeMcpClients(mcpResult.clients);
     const code = error instanceof Error ? error.name : "GENERATION_FAILED";
+    const errorMsg = error instanceof Error ? error.message : String(error);
     console.log(
       JSON.stringify({
         event: "generation_failed",
         messageId: req.messageId,
-        containerId: req.containerId,
-        error: String(error),
+        error: errorMsg,
         errorCode: code,
       }),
     );
@@ -164,13 +213,13 @@ export async function generate(
       totalDurationMs: Date.now() - startedAt,
       createdAt: Date.now(),
     });
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    return { status: "error", requestId, code, message: errorMsg, retryable: false };
+    return { status: "error", requestId, code, message: errorMsg, retryable: isRateLimited(error) };
   }
 
-  // 8. Extract usage.
+  // 7. Extract usage.
+  const usedModel = usedFallback && fallbackId ? fallbackId : (env.GENERATION_MODEL ?? "openai/gpt-5.6-luna");
   const usage: GenerationUsage = {
-    model: env.GENERATION_MODEL,
+    model: usedModel,
     inputTokens: result.usage.inputTokens ?? 0,
     outputTokens: result.usage.outputTokens ?? 0,
     cacheReadTokens: result.usage.inputTokenDetails.cacheReadTokens,
@@ -178,7 +227,7 @@ export async function generate(
     durationMs: Date.now() - startedAt,
   };
 
-  // 9. Telemetry.
+  // 8. Telemetry.
   await safeFinish(env.DB, reservationId);
   await safeRecord(env.DB, {
     id: requestId,
@@ -206,7 +255,7 @@ export async function generate(
     console.log(JSON.stringify({ event: "mark_interaction_error", error: String(error) }));
   }
 
-  // 10. Record tool invocations (best-effort).
+  // 9. Record tool invocations.
   try {
     for (const tr of result.toolResults ?? []) {
       const output = tr.output as Record<string, unknown> | null;
@@ -223,18 +272,18 @@ export async function generate(
       });
     }
   } catch (error) {
-    console.log(
-      JSON.stringify({ event: "record_tool_invocations_error", error: String(error) }),
-    );
+    console.log(JSON.stringify({ event: "record_tool_invocations_error", error: String(error) }));
   }
 
-  // 11. Close MCP clients.
+  // 10. Close MCP clients.
   await closeMcpClients(mcpResult.clients);
 
   console.log(
     JSON.stringify({
       event: "generation_completed",
       messageId: req.messageId,
+      model: usedModel,
+      usedFallback,
       replyLength: result.text.length,
       replyPreview: result.text.slice(0, 100),
       toolCalls: (result.toolResults ?? []).length,
