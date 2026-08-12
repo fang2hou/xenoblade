@@ -41,9 +41,22 @@ log() { echo "==> $*" >&2; }
 err() { echo "ERROR: $*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
+# Registry login (if credentials are provided)
+# ---------------------------------------------------------------------------
+registry_login() {
+  if [[ -n "${REGISTRY_USER:-}" && -n "${REGISTRY_PASS:-}" ]]; then
+    log "Logging in to registry: ${REGISTRY_URL}"
+    echo "${REGISTRY_PASS}" | docker login "${REGISTRY_URL}" \
+      -u "${REGISTRY_USER}" --password-stdin
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Discord Runtime (self-hosted host)
 # ---------------------------------------------------------------------------
 deploy_runtime() {
+  registry_login
+
   log "Building linux/arm64 image: ${REGISTRY_URL}/${IMAGE_NAME}:${IMAGE_TAG}"
 
   cd "$PROJECT_ROOT"
