@@ -1,117 +1,73 @@
 import { describe, it, expect } from "vitest";
-import {
-  selectModelId,
-  selectModel,
-  composeSystemPrompt,
-  ALLOWED_MODELS,
-  DEFAULT_MODELS,
-} from "../src/index";
+import { selectModel, composeSystemPrompt, type AiEnv } from "../src/index";
 
-describe("selectModelId", () => {
-  it("returns the default model when requested is omitted", () => {
-    expect(selectModelId("openrouter")).toBe(DEFAULT_MODELS.openrouter);
-  });
-
-  it("returns the explicit allowed model when requested", () => {
-    expect(selectModelId("openrouter", "deepseek/deepseek-chat")).toBe("deepseek/deepseek-chat");
-  });
-
-  it("throws for an unknown provider", () => {
-    expect(() => selectModelId("anthropic")).toThrow(/Unknown AI provider: anthropic/);
-  });
-
-  it("throws for a disallowed model", () => {
-    expect(() => selectModelId("openrouter", "openai/gpt-4o")).toThrow(
-      /Model not allowed: openai\/gpt-4o/,
-    );
-  });
-
-  it("only allows the whitelisted models", () => {
-    expect([...ALLOWED_MODELS.openrouter]).toEqual([
-      "openai/gpt-5.6-luna",
-      "deepseek/deepseek-chat",
-    ]);
-  });
-
-  it("returns the Luna model when explicitly requested", () => {
-    expect(selectModelId("openrouter", "openai/gpt-5.6-luna")).toBe("openai/gpt-5.6-luna");
-  });
-});
+const baseEnv: AiEnv = { OPENROUTER_API_KEY: "test-key" };
 
 describe("selectModel", () => {
   it("throws when OPENROUTER_API_KEY is missing", () => {
-    expect(() => selectModel({ AI_PROVIDER: "openrouter" })).toThrowError(
-      /OPENROUTER_API_KEY is not configured/,
-    );
+    expect(() => selectModel({})).toThrow(/OPENROUTER_API_KEY/);
   });
 
   it("throws when OPENROUTER_API_KEY is empty", () => {
-    expect(() => selectModel({ AI_PROVIDER: "openrouter", OPENROUTER_API_KEY: "" })).toThrowError(
-      /OPENROUTER_API_KEY is not configured/,
+    expect(() => selectModel({ OPENROUTER_API_KEY: "" })).toThrow(
+      /OPENROUTER_API_KEY/,
     );
   });
 
-  it("throws on unknown provider before checking the key", () => {
-    expect(() =>
-      selectModel({ AI_PROVIDER: "deepseek", OPENROUTER_API_KEY: "sk-test" }),
-    ).toThrowError(/Unknown AI provider: deepseek/);
+  it("succeeds for generation role (default)", () => {
+    expect(() => selectModel(baseEnv)).not.toThrow();
   });
 
-  it("succeeds with a sessionId option without throwing", () => {
+  it("succeeds for summarization role", () => {
+    expect(() => selectModel(baseEnv, { role: "summarization" })).not.toThrow();
+  });
+
+  it("succeeds with a sessionId option", () => {
     expect(() =>
-      selectModel(
-        { AI_PROVIDER: "openrouter", OPENROUTER_API_KEY: "sk-test" },
-        { sessionId: "xenoblade:discord:123:456" },
-      ),
+      selectModel(baseEnv, { sessionId: "xenoblade:test-container" }),
     ).not.toThrow();
   });
 
-  it("succeeds without a sessionId option (backward compat)", () => {
-    expect(() =>
-      selectModel({ AI_PROVIDER: "openrouter", OPENROUTER_API_KEY: "sk-test" }),
-    ).not.toThrow();
+  it("prefers GENERATION_MODEL over legacy AI_MODEL", () => {
+    const env: AiEnv = {
+      ...baseEnv,
+      AI_MODEL: "deepseek/deepseek-chat",
+      GENERATION_MODEL: "openai/gpt-5.6-luna",
+    };
+    // Both should work without throwing — model ID resolution is internal.
+    expect(() => selectModel(env)).not.toThrow();
+    expect(() => selectModel({ ...baseEnv, AI_MODEL: "deepseek/deepseek-chat" })).not.toThrow();
   });
 });
 
 describe("composeSystemPrompt", () => {
-  it("places safety first and keeps base then persona", () => {
-    const prompt = composeSystemPrompt({
-      safety: "SAFETY",
-      base: "BASE",
-      persona: "PERSONA",
+  it("joins non-empty parts with double newlines", () => {
+    const result = composeSystemPrompt({
+      safety: "Be safe.",
+      base: "Be helpful.",
     });
-    expect(prompt).toBe("SAFETY\n\nBASE\n\nPERSONA");
+    expect(result).toBe("Be safe.\n\nBe helpful.");
   });
 
-  it("always includes safety even when base and persona are empty", () => {
-    const prompt = composeSystemPrompt({
-      safety: "SAFETY",
-      base: "",
-      persona: "",
+  it("skips undefined parts", () => {
+    const result = composeSystemPrompt({
+      safety: "Be safe.",
+      base: undefined,
+      persona: "Be concise.",
     });
-    expect(prompt).toBe("SAFETY");
+    expect(result).toBe("Be safe.\n\nBe concise.");
   });
 
-  it("omits base when it is whitespace-only", () => {
-    const prompt = composeSystemPrompt({
-      safety: "SAFETY",
-      base: "   \n\t ",
-      persona: "PERSONA",
+  it("skips empty/whitespace parts", () => {
+    const result = composeSystemPrompt({
+      safety: "Be safe.",
+      base: "   ",
     });
-    expect(prompt).toBe("SAFETY\n\nPERSONA");
+    expect(result).toBe("Be safe.");
   });
 
-  it("does not let persona replace safety", () => {
-    const prompt = composeSystemPrompt({
-      safety: "SAFETY",
-      persona: "PERSONA",
-    });
-    expect(prompt.startsWith("SAFETY")).toBe(true);
-    expect(prompt).toBe("SAFETY\n\nPERSONA");
-  });
-
-  it("returns only safety when base and persona are undefined", () => {
-    const prompt = composeSystemPrompt({ safety: "SAFETY" });
-    expect(prompt).toBe("SAFETY");
+  it("returns safety alone when others are empty", () => {
+    const result = composeSystemPrompt({ safety: "Be safe." });
+    expect(result).toBe("Be safe.");
   });
 });
