@@ -11,9 +11,7 @@ Sending raw page content directly to the generation model has two problems:
 
 1. **Context window pollution.** A single 30,000-character page consumes ~15,000 tokens — a large fraction of the model's context window. Multi-source investigations (3–5 pages) can exhaust the window entirely, crowding out conversation history and user memory.
 
-2. **Cost.** The generation model is the most expensive per token. Paying generation-model rates for boilerplate HTML, navigation menus, cookie banners, and ad scripts is wasteful.
-
-A naive truncation (first 2,000 characters) loses critical information that may appear later in the page — conclusions, data tables, code examples.
+2. **Cost.** The generation model is the most expensive per token. Paying generation-model rates for boilerplate HTML, navigation menus, cookie banners, and irrelevant sections is wasteful.
 
 ## Decision
 
@@ -21,8 +19,10 @@ A naive truncation (first 2,000 characters) loses critical information that may 
 
 ```text
 Stage 1: Fetch
-  Primary: Jina Reader (r.jina.ai) → plain text
-  Fallback: Cloudflare Browser Rendering → innerText
+  Cloudflare Browser Rendering → innerText
+  Block image/font/media/stylesheet requests for speed
+  Strip script/style/nav/header/footer/aside tags
+  Truncate to a safe maximum (e.g. 50,000 chars) before summarization
 
 Stage 2: Compress (only if content > READ_URL_CONTENT_THRESHOLD)
   Call: SUMMARIZATION_MODEL (small, fast, cheap)
@@ -45,16 +45,15 @@ If the summarization model fails or times out, the tool falls back to truncating
 
 **Positive:**
 - Generation model sees only compressed summaries (≤ 512 tokens), not raw pages. Token consumption drops by 1–2 orders of magnitude for web-heavy tasks.
-- Summarization model handles extraction at minimal cost (small model, single call).
-- The generation model's context window is preserved for reasoning and multi-step investigation.
-- Structured summaries are easier for the generation model to cite accurately than raw HTML.
+- Browser Rendering is already a Cloudflare binding — no external API dependency for fetching.
 - Cache API can cache compressed results, avoiding re-summarization on repeated reads of the same URL.
 
 **Negative:**
-- Two model calls per `read_url` (fetch + summarize), adding 1–3 seconds latency.
-- Summarization quality determines what the generation model "knows" — critical details dropped by the summarizer are invisible.
+- Browser Rendering is slower than a lightweight reader API (2–4 seconds per page including network idle wait).
+- Summarization adds 1–3 seconds latency per `read_url` call.
 - One additional failure mode (summarization timeout/error) to handle.
+- Browser sessions must be carefully closed in `finally` blocks to prevent resource leaks.
 
 **Neutral:**
-- The threshold and max tokens are configurable via environment variables, allowing tuning per deployment.
-- Jina Reader remains the primary fetch mechanism; Browser Rendering is fallback for JavaScript-rendered content.
+- The threshold and max tokens are configurable via environment variables.
+- Browser Rendering handles JavaScript-rendered content natively (no need for a separate reader API).
