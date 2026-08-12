@@ -32,7 +32,6 @@ const FALLBACK_MODELS: Record<ModelRole, string | undefined> = {
  */
 const PROVIDER_ORDER: Record<string, string[]> = {
   "deepseek/deepseek-v4-flash-0731": ["DeepSeek", "NovitaAI", "SiliconFlow"],
-  "deepseek/deepseek-v4-flash": ["DeepSeek", "NovitaAI", "SiliconFlow"],
 };
 
 export const GENERATION_LIMITS = {
