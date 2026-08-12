@@ -54,12 +54,13 @@ export interface McpResult {
  * Returns a combined ToolSet and the clients for later cleanup.
  *
  * Connection failures are non-fatal — a failed server contributes no tools
- * but does not prevent other servers or the generation from proceeding.
- */
-export async function connectMcpServers(env: Env): Promise<McpResult> {
-  const configs = getMcpServers(env);
-  const clients: MCPClient[] = [];
-  const allTools: ToolSet = {};
+export function getMcpServers(env: Env): McpServerConfig[] {
+  // MCP disabled in Workers pending transport compatibility fix.
+  // The @modelcontextprotocol/sdk uses redirect:"error" which Workers
+  // rejects. Re-enable when the SDK supports Workers-compatible fetch.
+  return [];
+
+  // eslint-disable-next-line no-unreachable
 
   for (const config of configs) {
     const started = Date.now();
@@ -69,6 +70,10 @@ export async function connectMcpServers(env: Env): Promise<McpResult> {
           type: "http",
           url: config.url,
           headers: config.headers,
+          // Workers-compatible fetch: force redirect:"follow" (Workers
+          // rejects redirect:"error" which the MCP SDK uses by default)
+          fetch: ((input: RequestInfo | URL, init?: RequestInit) =>
+            fetch(input, { ...init, redirect: "follow" })) as typeof fetch,
         },
       });
 
