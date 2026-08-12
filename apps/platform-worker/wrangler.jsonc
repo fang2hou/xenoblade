@@ -11,9 +11,10 @@
     "binding": "BROWSER"
   },
   "vars": {
-    "GENERATION_MODEL": "deepseek/deepseek-v4-flash-0731",
-    "GENERATION_FALLBACK_MODEL": "openai/gpt-5.6-luna",
-    "SUMMARIZATION_MODEL": "deepseek/deepseek-v4-flash-0731"
+    "GENERATION_MODEL": "openai/gpt-5.6-luna",
+    "GENERATION_FALLBACK_MODEL": "deepseek/deepseek-v4-flash-0731",
+    "SUMMARIZATION_MODEL": "openai/gpt-5.6-luna",
+    "VISION_MODEL": "xiaomi/mimo-v2.5"
   },
   "d1_databases": [
     {

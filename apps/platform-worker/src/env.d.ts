@@ -14,5 +14,5 @@ interface Env {
   BRAVE_SEARCH_API_KEY: string;
   BRAVE_ANSWER_API_KEY: string;
   GITHUB_MCP_TOKEN: string;
-  ARTIFICIAL_ANALYSIS_API_KEY: string;
+  VISION_MODEL: string;
 }

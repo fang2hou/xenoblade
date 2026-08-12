@@ -50,15 +50,26 @@ function historyToModelMessages(history: readonly HistoryMessage[]): ModelMessag
  * image attachments as URL-based image parts. Discord CDN URLs are public, so
  * the model provider fetches them directly — no worker-side download needed.
  */
-function currentToUserMessage(req: GenerationRequest): UserModelMessage {
+function currentToUserMessage(
+  req: GenerationRequest,
+  includeImages: boolean = true,
+): UserModelMessage {
   const text = req.content.trim();
   const images = (req.attachments ?? []).filter(
     (a) => a.contentType !== null && a.contentType.startsWith("image/"),
   );
-  if (images.length === 0) {
-    return { role: "user", content: text };
+
+  if (!includeImages || images.length === 0) {
+    // For text-only models: convert image attachments to text references
+    // so the model knows to call the vision_describe tool.
+    const imageRefs = images.length > 0
+      ? images.map((img) => `[Image: ${img.url}]`).join("\n")
+      : "";
+    const combined = imageRefs ? `${text}\n\n${imageRefs}` : text;
+    return { role: "user", content: combined };
   }
 
+  // Multimodal path: images as native content parts.
   const parts: Array<TextPart | ImagePart> = [];
   if (text.length > 0) {
     parts.push({ type: "text", text });
@@ -95,8 +106,9 @@ function withTail(message: UserModelMessage, tail: string): UserModelMessage {
 export function buildGenerationMessages(
   req: GenerationRequest,
   context: ContextDecision,
+  includeImages: boolean = true,
 ): ModelMessage[] {
-  const current = currentToUserMessage(req);
+  const current = currentToUserMessage(req, includeImages);
 
   if (context.mode === "none") {
     return [current];
