@@ -23,7 +23,7 @@ const REQUIRED_VARS = [
   "INTERNAL_API_TOKEN",
 ] as const;
 
-const DEFAULT_HEALTH_PORT = 3000;
+const DEFAULT_HEALTH_PORT = 8397;
 
 /**
  * Load and validate the runtime environment. Throws when a required variable
