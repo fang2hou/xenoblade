@@ -3,9 +3,6 @@
  *
  * The official MCP server is stdio-only (npx artificial-analysis-mcp), which
  * cannot run in a Cloudflare Worker. These tools call the same API directly.
- *
- * Provides LLM model pricing, speed metrics, and benchmark scores from
- * artificialanalysis.ai.
  */
 import { jsonSchema, tool } from "ai";
 
@@ -28,7 +25,7 @@ async function aaFetch(path: string, apiKey: string): Promise<unknown> {
 
 export function createModelInfoTools(env: Env) {
   if (!env.ARTIFICIAL_ANALYSIS_API_KEY) {
-    return {};
+    return {} as Record<string, never>;
   }
 
   const apiKey = env.ARTIFICIAL_ANALYSIS_API_KEY;
@@ -36,45 +33,31 @@ export function createModelInfoTools(env: Env) {
   return {
     model_list: tool({
       description:
-        "List LLM models with pricing, speed metrics, and benchmark scores. " +
+        "List LLM models with pricing, speed metrics, and benchmark scores from Artificial Analysis. " +
         "Filter by creator (e.g. 'OpenAI', 'Anthropic') and sort by any metric. " +
         "Sort fields: price_input, price_output, price_blended, speed, ttft, " +
         "intelligence_index, coding_index, math_index, mmlu_pro, gpqa, release_date.",
-      inputSchema: jsonSchema({
-        type: "object",
-        properties: {
-          creator: {
-            type: "string",
-            description: "Filter by model creator (e.g. 'OpenAI', 'Anthropic')",
-          },
-          sort_by: {
-            type: "string",
-            description: "Sort field (price_input, speed, intelligence_index, etc.)",
-          },
-          sort_order: {
-            type: "string",
-            enum: ["asc", "desc"],
-            description: "Sort direction (default: desc)",
-          },
-          limit: {
-            type: "number",
-            description: "Maximum results (default: 10)",
-          },
-        },
-      }),
-      execute: async (args: {
+      inputSchema: jsonSchema<{
         creator?: string;
         sort_by?: string;
         sort_order?: string;
         limit?: number;
-      }) => {
+      }>({
+        type: "object",
+        properties: {
+          creator: { type: "string", description: "Filter by model creator" },
+          sort_by: { type: "string", description: "Sort field" },
+          sort_order: { type: "string", enum: ["asc", "desc"] },
+          limit: { type: "number" },
+        },
+      }),
+      execute: async (args) => {
         try {
           const params = new URLSearchParams();
           if (args.creator) params.set("creator", args.creator);
           if (args.sort_by) params.set("sort_by", args.sort_by);
           params.set("sort_order", args.sort_order ?? "desc");
           params.set("limit", String(args.limit ?? 10));
-
           const data = await aaFetch(`/models?${params}`, apiKey);
           return { models: data };
         } catch (error) {
@@ -86,18 +69,15 @@ export function createModelInfoTools(env: Env) {
     model_info: tool({
       description:
         "Get detailed pricing, speed, and benchmark data for a specific LLM model. " +
-        "Example models: 'gpt-4o', 'claude-4.5-sonnet', 'gemini-2.0-flash'.",
-      inputSchema: jsonSchema({
+        "Example: 'gpt-4o', 'claude-4.5-sonnet', 'gemini-2.0-flash'.",
+      inputSchema: jsonSchema<{ model: string }>({
         type: "object",
         properties: {
-          model: {
-            type: "string",
-            description: "Model name or slug (e.g. 'gpt-4o', 'claude-4.5-sonnet')",
-          },
+          model: { type: "string", description: "Model name or slug" },
         },
         required: ["model"],
       }),
-      execute: async (args: { model: string }) => {
+      execute: async (args) => {
         try {
           const data = await aaFetch(
             `/models/${encodeURIComponent(args.model)}`,

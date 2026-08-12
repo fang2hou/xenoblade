@@ -75,7 +75,7 @@ export async function connectMcpServers(env: Env): Promise<McpResult> {
       const serverTools = await client.tools();
       for (const [name, tool] of Object.entries(serverTools)) {
         // Namespace tools by server name to avoid collisions
-        allTools[`${config.name}_${name}`] = tool;
+        allTools[`${config.name}_${name}`] = tool as typeof allTools[string];
       }
       clients.push(client);
 
