@@ -35,10 +35,7 @@ export function createVisionTool(env: Env) {
       execute: async ({ url, question }) => {
         const started = Date.now();
         try {
-          const model = selectModel(env, {
-            role: "vision",
-            modelId: env.VISION_MODEL ?? "xiaomi/mimo-v2.5",
-          });
+          const model = selectModel(env, { role: "vision" });
 
           const result = await generateText({
             model,
