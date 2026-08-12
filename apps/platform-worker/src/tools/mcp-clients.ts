@@ -60,7 +60,8 @@ export async function connectMcpServers(env: Env): Promise<McpResult> {
 
       const serverTools = await client.tools();
       for (const [name, tool] of Object.entries(serverTools)) {
-        allTools[`${config.name}_${name}`] = tool as typeof allTools[string];
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- MCP Tool and AI SDK ToolSet are structurally compatible
+        allTools[`${config.name}_${name}`] = tool as unknown as (typeof allTools)[string];
       }
       clients.push(client);
 

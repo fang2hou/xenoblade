@@ -38,12 +38,20 @@ export interface AiEnv {
   MODEL_CONFIG?: string;
 }
 
+/** Type guard: is the parsed JSON a partial model-chain override? */
+function isChainsOverride(value: unknown): value is Partial<Record<ModelRole, ModelConfig[]>> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 /** Parse MODEL_CONFIG env var, fall back to DEFAULT_CHAINS. */
 function loadChains(env: AiEnv): Record<ModelRole, ModelConfig[]> {
   if (!env.MODEL_CONFIG) return DEFAULT_CHAINS;
   try {
-    const parsed = JSON.parse(env.MODEL_CONFIG) as Partial<Record<ModelRole, ModelConfig[]>>;
-    return { ...DEFAULT_CHAINS, ...parsed };
+    const parsed: unknown = JSON.parse(env.MODEL_CONFIG);
+    if (isChainsOverride(parsed)) {
+      return { ...DEFAULT_CHAINS, ...parsed };
+    }
+    return DEFAULT_CHAINS;
   } catch {
     console.log(JSON.stringify({ event: "model_config_parse_error" }));
     return DEFAULT_CHAINS;

@@ -79,10 +79,7 @@ export function createModelInfoTools(env: Env) {
       }),
       execute: async (args) => {
         try {
-          const data = await aaFetch(
-            `/models/${encodeURIComponent(args.model)}`,
-            apiKey,
-          );
+          const data = await aaFetch(`/models/${encodeURIComponent(args.model)}`, apiKey);
           return { model: data };
         } catch (error) {
           return { model: null, error: String(error) };

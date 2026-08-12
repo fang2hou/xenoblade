@@ -50,8 +50,5 @@ export function bearerToken(header: string | null): string | null {
  * the token is present and matches.
  */
 export function isInternalAuthorized(request: Request, expectedToken: string): boolean {
-  return timingSafeTokenMatch(
-    bearerToken(request.headers.get("Authorization")),
-    expectedToken,
-  );
+  return timingSafeTokenMatch(bearerToken(request.headers.get("Authorization")), expectedToken);
 }

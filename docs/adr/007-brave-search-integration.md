@@ -14,10 +14,12 @@ The previous design used a keyword-heuristic prefetch mechanism that guessed whe
 Expose Brave search as a first-class AI SDK tool that the model can call autonomously. Brave provides two complementary APIs, both configured:
 
 **Brave Search API** (`api.search.brave.com/res/v1/web/search`):
+
 - Returns structured web search results (title, URL, description).
 - Used for general queries: "latest Rust release notes", "Cloudflare Workers CPU limits".
 
 **Brave Answer API** (`api.search.brave.com/res/v1/chat/completions`):
+
 - Returns a synthesized natural-language answer with source citations.
 - Used for factual questions: "what is the capital of Brazil", "when did Discord add threads".
 
@@ -41,16 +43,19 @@ web_search(query: string, opts?: {
 ## Consequences
 
 **Positive:**
+
 - The model decides when and what to search — no keyword heuristics.
 - Two complementary Brave APIs cover both factual answers and general web search.
 - No external reader/search service dependency beyond Brave.
 - Results are structured and easy to cite.
 
 **Negative:**
+
 - Two Brave API keys to manage (search + answer subscriptions).
 - Brave-specific rate limits and pricing to monitor.
 - No search engine diversity — Brave outage means no search capability.
 
 **Neutral:**
+
 - The old keyword-based prefetch code and `tools.ts` dead code are deleted entirely. Search becomes a tool call, not a pipeline stage.
 - Additional search backends can be added later by implementing the normalized result interface.

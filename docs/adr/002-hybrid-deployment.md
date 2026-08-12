@@ -30,11 +30,13 @@ At the same time, the AI and data layer benefits strongly from Cloudflare's plat
 Split the system into two runtime tiers connected by a single outbound HTTPS path:
 
 **Discord Runtime (self-hosted host):**
+
 - Runs `discord.js` in a Docker container on a dedicated long-running host.
 - Owns the Discord bot token, Gateway WebSocket, all Interactions, REST calls, and future voice.
 - All network traffic is **outbound**: Gateway WebSocket to Discord, HTTPS to the Cloudflare Worker. No inbound ports required.
 
 **Platform Worker (Cloudflare):**
+
 - Pure AI/data backend. No Discord routes, no bot token.
 - Owns AI model credentials, D1, Browser Rendering, R2, Cache, and MCP clients.
 - Exposes authenticated internal endpoints (`/internal/v1/*`) called only by the Discord Runtime.
@@ -44,6 +46,7 @@ Split the system into two runtime tiers connected by a single outbound HTTPS pat
 ## Consequences
 
 **Positive:**
+
 - Discord voice becomes feasible (native UDP on a standard Linux host).
 - No community Gateway DO dependency.
 - Clean credential isolation: Discord token never leaves the Runtime; AI keys never leave the Worker.
@@ -52,11 +55,13 @@ Split the system into two runtime tiers connected by a single outbound HTTPS pat
 - Outbound-only network topology simplifies firewall rules and reduces attack surface.
 
 **Negative:**
+
 - Two deployment targets increase operational complexity.
 - The self-hosted host is a single point of failure (no global redundancy like Workers).
 - Every AI request traverses the public internet between the two tiers.
 - Docker process lifecycle, health monitoring, and disk management become the team's responsibility.
 
 **Neutral:**
+
 - CPU billing differs between tiers: Workers bill per CPU millisecond; the host bills at fixed monthly cost regardless of utilization.
 - The internal API contract (`packages/contracts`) becomes a hard dependency — version mismatches cause silent failures and must be CI-gated.

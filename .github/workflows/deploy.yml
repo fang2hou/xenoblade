@@ -34,7 +34,9 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
       - run: prek run --all-files
-      - run: pnpm typecheck
+      - name: Generate Worker types
+        working-directory: apps/platform-worker
+        run: pnpm exec wrangler types
       - run: pnpm lint
       - run: pnpm test
 

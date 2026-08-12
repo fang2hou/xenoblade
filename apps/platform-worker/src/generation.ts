@@ -1,11 +1,6 @@
 import { generateText, isStepCount } from "ai";
 
-import {
-  composeSystemPrompt,
-  createModel,
-  GENERATION_LIMITS,
-  getModelChain,
-} from "@xenoblade/ai";
+import { composeSystemPrompt, createModel, GENERATION_LIMITS, getModelChain } from "@xenoblade/ai";
 import type {
   GenerationRequest,
   GenerationResult,
@@ -31,9 +26,7 @@ import { buildGenerationMessages, SAFETY_SYSTEM } from "./prompt";
 import { createFirstPartyTools, connectMcpServers, closeMcpClients } from "./tools";
 
 function formatMemoryBlock(displayName: string, memories: readonly UserMemory[]): string {
-  const relevant = memories.filter(
-    (m) => m.category === "persona" || m.category === "preference",
-  );
+  const relevant = memories.filter((m) => m.category === "persona" || m.category === "preference");
   if (relevant.length === 0) return "";
   const lines = relevant.map((m) => `- ${m.key}: ${m.value}`);
   return [
@@ -69,10 +62,7 @@ function sleep(ms: number): Promise<void> {
   return promise;
 }
 
-export async function generate(
-  env: Env,
-  req: GenerationRequest,
-): Promise<GenerationResult> {
+export async function generate(env: Env, req: GenerationRequest): Promise<GenerationResult> {
   const now = Date.now();
   const requestId = crypto.randomUUID();
 
@@ -82,7 +72,13 @@ export async function generate(
       return { status: "rejected", requestId, code: "duplicate" };
     }
   } catch (error) {
-    return { status: "error", requestId, code: "claim_failed", message: String(error), retryable: true };
+    return {
+      status: "error",
+      requestId,
+      code: "claim_failed",
+      message: String(error),
+      retryable: true,
+    };
   }
 
   // 2. Runtime gate
@@ -99,12 +95,20 @@ export async function generate(
     if (error instanceof GenerationBudgetExceededError) {
       return { status: "rejected", requestId, code: "budget_exceeded" };
     }
-    return { status: "error", requestId, code: "reserve_failed", message: String(error), retryable: true };
+    return {
+      status: "error",
+      requestId,
+      code: "reserve_failed",
+      message: String(error),
+      retryable: true,
+    };
   }
 
   // 4. Context + prompt
   const state = await getUserContextState(env.DB, {
-    scopeId: req.scopeId, containerId: req.containerId, userId: req.userId,
+    scopeId: req.scopeId,
+    containerId: req.containerId,
+    userId: req.userId,
   });
   const contextDecision = buildContext(req, state.resetAt);
 
@@ -133,8 +137,7 @@ export async function generate(
   let result: Awaited<ReturnType<typeof generateText>> | undefined;
   let usedModel = chain[0]?.id ?? "unknown";
 
-  GENERATION_LOOP:
-  try {
+  GENERATION_LOOP: try {
     for (let i = 0; i < chain.length; i++) {
       const config = chain[i];
       const isPrimary = i === 0;
@@ -154,18 +157,27 @@ export async function generate(
         usedModel = config.id;
 
         if (!result.text || result.text.trim() === "") {
-          console.log(JSON.stringify({ event: "empty_generation", messageId: req.messageId, model: config.id }));
+          console.log(
+            JSON.stringify({
+              event: "empty_generation",
+              messageId: req.messageId,
+              model: config.id,
+            }),
+          );
           if (i < chain.length - 1) continue;
           throw new Error(`${config.id} returned empty text`);
         }
         break GENERATION_LOOP;
-
       } catch (error) {
-        console.log(JSON.stringify({
-          event: "attempt_failed", messageId: req.messageId,
-          model: config.id, retryable: isRetryable(error),
-          error: error instanceof Error ? error.message : String(error),
-        }));
+        console.log(
+          JSON.stringify({
+            event: "attempt_failed",
+            messageId: req.messageId,
+            model: config.id,
+            retryable: isRetryable(error),
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
         if (i === chain.length - 1) throw error;
         await sleep(3000);
       }
@@ -176,10 +188,15 @@ export async function generate(
     const errorMsg = error instanceof Error ? error.message : String(error);
     await safeFinish(env.DB, reservationId);
     await safeRecord(env.DB, {
-      id: requestId, containerId: req.containerId, scopeId: req.scopeId,
-      userId: req.userId, summonKind: req.summonKind,
-      model: usedModel, status: "failed",
-      totalDurationMs: Date.now() - now, createdAt: Date.now(),
+      id: requestId,
+      containerId: req.containerId,
+      scopeId: req.scopeId,
+      userId: req.userId,
+      summonKind: req.summonKind,
+      model: usedModel,
+      status: "failed",
+      totalDurationMs: Date.now() - now,
+      createdAt: Date.now(),
     });
     return { status: "error", requestId, code, message: errorMsg, retryable: isRetryable(error) };
   }
@@ -198,19 +215,27 @@ export async function generate(
 
   await safeFinish(env.DB, reservationId);
   await safeRecord(env.DB, {
-    id: requestId, containerId: req.containerId, scopeId: req.scopeId,
-    userId: req.userId, summonKind: req.summonKind,
-    model: usedModel, status: "completed",
-    inputTokens: usage.inputTokens, outputTokens: usage.outputTokens,
+    id: requestId,
+    containerId: req.containerId,
+    scopeId: req.scopeId,
+    userId: req.userId,
+    summonKind: req.summonKind,
+    model: usedModel,
+    status: "completed",
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
     cacheReadTokens: usage.cacheReadTokens ?? null,
     cacheWriteTokens: usage.cacheWriteTokens ?? null,
-    totalDurationMs: usage.durationMs, createdAt: Date.now(),
+    totalDurationMs: usage.durationMs,
+    createdAt: Date.now(),
   });
 
   try {
     await markUserInteraction(env.DB, {
-      scopeId: req.scopeId, containerId: req.containerId,
-      userId: req.userId, now: Date.now(),
+      scopeId: req.scopeId,
+      containerId: req.containerId,
+      userId: req.userId,
+      now: Date.now(),
     });
   } catch (error) {
     console.log(JSON.stringify({ event: "mark_interaction_error", error: String(error) }));
@@ -219,10 +244,11 @@ export async function generate(
   // 9. Tool audit
   try {
     for (const tr of result.toolResults ?? []) {
-      const output = tr.output as Record<string, unknown> | null;
+      const output: unknown = tr.output;
       const isError = output != null && typeof output === "object" && "error" in output;
       await recordToolInvocation(env.DB, {
-        id: crypto.randomUUID(), interactionId: requestId,
+        id: crypto.randomUUID(),
+        interactionId: requestId,
         toolName: tr.toolName,
         server: tr.toolName.includes("_") ? tr.toolName.split("_")[0] : "builtin",
         status: isError ? "error" : "ok",
@@ -237,12 +263,17 @@ export async function generate(
 
   await closeMcpClients(mcpResult.clients);
 
-  console.log(JSON.stringify({
-    event: "generation_completed", messageId: req.messageId,
-    model: usedModel, replyLength: result.text.length,
-    replyPreview: result.text.slice(0, 100),
-    toolCalls: (result.toolResults ?? []).length, steps: result.steps.length,
-  }));
+  console.log(
+    JSON.stringify({
+      event: "generation_completed",
+      messageId: req.messageId,
+      model: usedModel,
+      replyLength: result.text.length,
+      replyPreview: result.text.slice(0, 100),
+      toolCalls: (result.toolResults ?? []).length,
+      steps: result.steps.length,
+    }),
+  );
 
   return { status: "completed", requestId, reply: result.text, usage };
 }

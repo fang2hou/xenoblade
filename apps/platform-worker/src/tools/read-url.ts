@@ -87,9 +87,7 @@ export function createReadUrlTool(env: Env) {
         }
         raw = stripHtml(await response.text());
       } catch (error) {
-        console.log(
-          JSON.stringify({ event: "read_url_fetch_error", url, error: String(error) }),
-        );
+        console.log(JSON.stringify({ event: "read_url_fetch_error", url, error: String(error) }));
         return {
           content: null,
           sourceUrl: url,

@@ -90,18 +90,12 @@ export function isBareMention(content: string): boolean {
  * Find the user's most recent prior message in the same channel, excluding the
  * current message. Returns `null` on fetch failure or when none exists.
  */
-export async function findLastUserMessage(
-  message: Message,
-): Promise<Message | null> {
+export async function findLastUserMessage(message: Message): Promise<Message | null> {
   try {
     const fetched = await message.channel?.messages.fetch({ limit: 20 });
     // discord.js returns newest-first; return the first prior match.
     for (const prior of fetched?.values() ?? []) {
-      if (
-        prior.id !== message.id &&
-        prior.author.id === message.author.id &&
-        !prior.author.bot
-      ) {
+      if (prior.id !== message.id && prior.author.id === message.author.id && !prior.author.bot) {
         return prior;
       }
     }
@@ -122,19 +116,14 @@ export async function findLastUserMessage(
  * `repliedUser` hint when present, otherwise fetches the referenced message via
  * REST once. Never throws — any fetch failure resolves to `false`.
  */
-export async function resolveReplyToBot(
-  message: Message,
-  botId: string,
-): Promise<boolean> {
+export async function resolveReplyToBot(message: Message, botId: string): Promise<boolean> {
   if (message.mentions.repliedUser?.id === botId) return true;
 
   const reference = message.reference;
   if (!reference?.messageId) return false;
 
   try {
-    const referenced = await message.channel?.messages.fetch(
-      reference.messageId,
-    );
+    const referenced = await message.channel?.messages.fetch(reference.messageId);
     return referenced?.author.id === botId;
   } catch (error) {
     console.log(

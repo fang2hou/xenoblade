@@ -7,14 +7,10 @@ import {
   Partials,
   REST,
   Routes,
-} from "discord.js";
-import type {
-  ChatInputCommandInteraction,
-  Message,
-  SendableChannels,
   TextChannel,
   ThreadChannel,
 } from "discord.js";
+import type { ChatInputCommandInteraction, Message, SendableChannels } from "discord.js";
 import type {
   DiscordAttachment,
   GenerationRequest,
@@ -23,10 +19,7 @@ import type {
 } from "@xenoblade/contracts";
 
 import { loadEnv, type EnvConfig } from "./env";
-import {
-  containerIdFromMessage,
-  scopeIdFromMessage,
-} from "./conversation-scope";
+import { containerIdFromMessage, scopeIdFromMessage } from "./conversation-scope";
 import { evaluateTrigger, type TriggerDecision } from "./trigger-policy";
 import { fetchHistory } from "./history";
 import { postReply, sendTyping } from "./output";
@@ -148,11 +141,13 @@ async function runGeneration(
   // Keep typing indicator alive during generation. Discord's typing
   // indicator expires after ~10s; refresh every 8s until done.
   await sendTyping(channel);
-  const typingInterval = setInterval(() => sendTyping(channel), 8000);
+  const typingInterval = setInterval(() => void sendTyping(channel), 8000);
 
   let history: HistoryMessage[] = [];
   try {
-    history = await fetchHistory(channel as TextChannel | ThreadChannel);
+    if (channel instanceof TextChannel || channel instanceof ThreadChannel) {
+      history = await fetchHistory(channel);
+    }
   } catch (error) {
     console.log(
       JSON.stringify({
@@ -174,9 +169,7 @@ async function runGeneration(
     channelId: message.channelId,
     userId: message.author.id,
     userDisplayName:
-      message.member?.displayName ||
-      message.author.displayName ||
-      message.author.username,
+      message.member?.displayName || message.author.displayName || message.author.username,
     summonKind: decision.kind,
     content: effective.content,
     history,
@@ -209,7 +202,9 @@ async function runGeneration(
       }),
     );
     await postReply(channel, FAILURE_REPLY).catch((e) => {
-      console.log(JSON.stringify({ event: "post_reply_error", messageId: message.id, error: String(e) }));
+      console.log(
+        JSON.stringify({ event: "post_reply_error", messageId: message.id, error: String(e) }),
+      );
     });
     return;
   }
@@ -245,9 +240,7 @@ async function applyGenerationResult(
         }),
       );
       if (replyLength === 0 || result.reply.trim() === "") {
-        console.log(
-          JSON.stringify({ event: "empty_reply", messageId }),
-        );
+        console.log(JSON.stringify({ event: "empty_reply", messageId }));
         await postReply(channel, FAILURE_REPLY).catch((e) => {
           console.log(
             JSON.stringify({
@@ -337,9 +330,7 @@ function buildReference(message: Message): GenerationRequest["reference"] {
 }
 
 /** Map discord.js attachments to the wire `DiscordAttachment` shape. */
-function mapAttachments(
-  attachments: Message["attachments"],
-): DiscordAttachment[] {
+function mapAttachments(attachments: Message["attachments"]): DiscordAttachment[] {
   return [...attachments.values()].map((attachment) => ({
     id: attachment.id,
     url: attachment.url,
@@ -400,9 +391,7 @@ async function handleClearContext(
       env.workerUrl,
       env.internalApiToken,
     );
-    await interaction.reply(
-      result.status === "ok" ? CLEAR_SUCCESS_REPLY : CLEAR_FAILURE_REPLY,
-    );
+    await interaction.reply(result.status === "ok" ? CLEAR_SUCCESS_REPLY : CLEAR_FAILURE_REPLY);
   } catch (error) {
     console.log(
       JSON.stringify({
@@ -434,9 +423,7 @@ async function registerSlashCommands(env: EnvConfig): Promise<void> {
     });
     console.log(JSON.stringify({ event: "slash_commands_registered" }));
   } catch (error) {
-    console.log(
-      JSON.stringify({ event: "slash_register_error", error: String(error) }),
-    );
+    console.log(JSON.stringify({ event: "slash_register_error", error: String(error) }));
   }
 }
 
@@ -446,9 +433,7 @@ function startHealthServer(port: number): Server {
     const path = (req.url ?? "/").split("?")[0];
     if (req.method === "GET" && path === "/health") {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(
-        JSON.stringify({ status: "ok", timestamp: Date.now() }),
-      );
+      res.end(JSON.stringify({ status: "ok", timestamp: Date.now() }));
       return;
     }
     res.writeHead(404, { "Content-Type": "application/json" });

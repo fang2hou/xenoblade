@@ -39,16 +39,19 @@ When side-effect tools are added in the future, they require a Discord Component
 ## Consequences
 
 **Positive:**
+
 - External data sources become accessible to the model via standardized MCP tools.
 - Read-only scope eliminates the risk of unintended side effects in the first version.
 - Server + tool dual allowlist provides defense in depth.
 - MCP unavailability degrades gracefully — core conversation works without MCP.
 
 **Negative:**
+
 - stdio-only MCP servers are inaccessible without additional bridge infrastructure.
 - Some useful read-only tools may be missed if the allowlist is too conservative.
 - Per-request client creation adds connection overhead (mitigated by keep-alive where supported).
 
 **Neutral:**
+
 - The AI SDK's `@ai-sdk/mcp` package provides `createMCPClient`, which integrates MCP tools into `generateText`'s tool loop natively.
 - The architecture supports adding side-effect tools later without structural changes — only the confirmation flow and allowlist policy need updating.

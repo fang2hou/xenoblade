@@ -49,7 +49,7 @@ export class ConversationQueue {
       const queue = this.queues.get(containerId);
       if (!queue) return;
       while (queue.length > 0) {
-        const task = queue.shift() as Task;
+        const task = queue.shift()!;
         try {
           await task();
         } catch (error) {

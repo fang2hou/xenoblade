@@ -29,6 +29,7 @@ Adopt a single-shot response protocol:
 ## Consequences
 
 **Positive:**
+
 - Minimal Worker CPU per generation: one `generateText` call, one JSON response.
 - Minimal Discord REST calls per generation: one typing + one message send.
 - No rate-limit risk from edit bursts.
@@ -36,8 +37,10 @@ Adopt a single-shot response protocol:
 - The Worker can use `generateText` (not `streamText`), which is simpler and supports tool loops natively.
 
 **Negative:**
+
 - No streaming UX. Users wait for the complete response with only a typing indicator.
 - Long generations (multi-step research) may take 10-30 seconds with no incremental feedback. The typing indicator expires after ~10 seconds and is not renewed.
 
 **Neutral:**
+
 - Future versions could add a single mid-generation "still working" typing refresh if latency exceeds a threshold, without adopting full streaming.

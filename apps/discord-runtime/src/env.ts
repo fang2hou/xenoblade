@@ -35,14 +35,12 @@ export function loadEnv(): EnvConfig {
     return value === undefined || value.trim() === "";
   });
   if (missing.length > 0) {
-    throw new Error(
-      `Missing required environment variables: ${missing.join(", ")}`,
-    );
+    throw new Error(`Missing required environment variables: ${missing.join(", ")}`);
   }
 
   // Normalize the Worker base URL by stripping any trailing slashes so endpoint
   // paths can be concatenated without producing `//`.
-  const workerUrl = (process.env.WORKER_URL as string).replace(/\/+$/, "");
+  const workerUrl = process.env.WORKER_URL!.replace(/\/+$/, "");
 
   const mentionRoleIds = (process.env.MENTION_ROLE_IDS ?? "")
     .split(",")
@@ -56,10 +54,10 @@ export function loadEnv(): EnvConfig {
   }
 
   return {
-    discordBotToken: process.env.DISCORD_BOT_TOKEN as string,
-    discordApplicationId: process.env.DISCORD_APPLICATION_ID as string,
+    discordBotToken: process.env.DISCORD_BOT_TOKEN!,
+    discordApplicationId: process.env.DISCORD_APPLICATION_ID!,
     workerUrl,
-    internalApiToken: process.env.INTERNAL_API_TOKEN as string,
+    internalApiToken: process.env.INTERNAL_API_TOKEN!,
     mentionRoleIds,
     healthPort,
   };

@@ -1,11 +1,8 @@
 import type {
   ContextClearRequest,
-  ContextClearResult,
   GenerationRequest,
-  GenerationResult,
   HealthResponse,
   MemoryRequest,
-  MemoryResponse,
 } from "@xenoblade/contracts";
 
 import { isInternalAuthorized } from "./auth";
@@ -15,8 +12,8 @@ import { handleMemory } from "./memory";
 
 const INTERNAL_PREFIX = "/internal/v1/";
 
-/** JSON response helper. The type argument validates the body's contract shape. */
-function json<T>(body: T, status = 200): Response {
+/** JSON response helper. */
+function json(body: unknown, status = 200): Response {
   return Response.json(body, { status });
 }
 
@@ -31,7 +28,9 @@ function unauthorized(): Response {
 /** Parse a JSON request body, or null when it is absent/malformed. */
 async function readJson<T>(request: Request): Promise<T | null> {
   try {
-    return (await request.json()) as T;
+    const body: unknown = await request.json();
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- JSON boundary: caller validates via generate()/clearUserContext()
+    return body as T;
   } catch {
     return null;
   }
@@ -61,7 +60,7 @@ export default {
     if (request.method === "POST" && path === "/internal/v1/generations") {
       const req = await readJson<GenerationRequest>(request);
       if (req === null) {
-        return json<GenerationResult>(
+        return json(
           {
             status: "error",
             requestId: crypto.randomUUID(),
@@ -79,14 +78,14 @@ export default {
     if (request.method === "POST" && path === "/internal/v1/context/clear") {
       const req = await readJson<ContextClearRequest>(request);
       if (req === null) {
-        return json<ContextClearResult>({ status: "error", code: "invalid_body" }, 400);
+        return json({ status: "error", code: "invalid_body" }, 400);
       }
       try {
         const cleared = await clearUserContext(env.DB, req);
-        return json<ContextClearResult>({ status: "ok", cleared });
+        return json({ status: "ok", cleared });
       } catch (error) {
         console.log(JSON.stringify({ event: "context_clear_failed", error: String(error) }));
-        return json<ContextClearResult>({ status: "error", code: "context_clear_failed" });
+        return json({ status: "error", code: "context_clear_failed" });
       }
     }
 
@@ -94,7 +93,7 @@ export default {
     if (request.method === "POST" && path === "/internal/v1/memory") {
       const req = await readJson<MemoryRequest>(request);
       if (req === null) {
-        return json<MemoryResponse>({ status: "error", code: "invalid_body" }, 400);
+        return json({ status: "error", code: "invalid_body" }, 400);
       }
       return json(await handleMemory(env.DB, req));
     }

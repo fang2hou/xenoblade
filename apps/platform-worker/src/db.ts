@@ -1,9 +1,9 @@
 import type {
   ContextClearRequest,
   MemoryCategory,
+  SummonKind,
   UserMemory,
 } from "@xenoblade/contracts";
-import type { SummonKind } from "@xenoblade/contracts";
 
 // ── Budget & session constants ────────────────────────────────────────────
 
@@ -320,10 +320,7 @@ export async function getUserContextState(
  * `beforeMs`, when set, clears only messages older than `now - beforeMs` by
  * using that cutoff as the threshold instead of `now`.
  */
-export async function clearUserContext(
-  db: D1Database,
-  req: ContextClearRequest,
-): Promise<number> {
+export async function clearUserContext(db: D1Database, req: ContextClearRequest): Promise<number> {
   const now = Date.now();
   const threshold = req.beforeMs !== undefined ? now - req.beforeMs : now;
 

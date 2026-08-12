@@ -30,6 +30,7 @@ discord.js is the canonical Discord library for Node.js. It provides direct, com
 ## Consequences
 
 **Positive:**
+
 - Full Discord API access, including voice (`@discordjs/voice`), components, threads, and all gateway events.
 - No abstraction mismatch — Discord concepts are first-class, not decoded from "unified" types.
 - No adapter patching needed; interaction model is controlled directly.
@@ -37,10 +38,12 @@ discord.js is the canonical Discord library for Node.js. It provides direct, com
 - Ability to delete dormant subscription/stop/relevance code that never reached production.
 
 **Negative:**
+
 - Self-hosted process lifecycle management required (restart, healthcheck, log rotation).
 - No longer serverless for the Discord layer — the process must stay running.
 - Single-process model replaces Cloudflare's distributed isolation.
 
 **Neutral:**
+
 - Discord bot token moves from Cloudflare Worker secrets to the self-hosted host's environment.
 - The Cloudflare Worker becomes a pure AI/data backend with no Discord-facing routes.

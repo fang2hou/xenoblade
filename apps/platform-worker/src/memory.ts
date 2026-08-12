@@ -9,10 +9,7 @@ import { clearUserMemory, getUserMemory, setUserMemory } from "./db";
  * caller can reconcile state without a follow-up `get`. Never throws — a
  * failure returns `{ status: "error", code }`.
  */
-export async function handleMemory(
-  db: D1Database,
-  req: MemoryRequest,
-): Promise<MemoryResponse> {
+export async function handleMemory(db: D1Database, req: MemoryRequest): Promise<MemoryResponse> {
   try {
     if (req.op === "get") {
       return { status: "ok", memories: await getUserMemory(db, req.userId) };

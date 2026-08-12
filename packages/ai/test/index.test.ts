@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { selectModel, composeSystemPrompt, getModelChain, createModel, type AiEnv } from "../src/index";
+import {
+  selectModel,
+  composeSystemPrompt,
+  getModelChain,
+  createModel,
+  type AiEnv,
+} from "../src/index";
 
 const baseEnv: AiEnv = { OPENROUTER_API_KEY: "test-key" };
 
@@ -50,12 +56,14 @@ describe("selectModel", () => {
 
 describe("composeSystemPrompt", () => {
   it("joins non-empty parts", () => {
-    expect(composeSystemPrompt({ safety: "Be safe.", base: "Be helpful." }))
-      .toBe("Be safe.\n\nBe helpful.");
+    expect(composeSystemPrompt({ safety: "Be safe.", base: "Be helpful." })).toBe(
+      "Be safe.\n\nBe helpful.",
+    );
   });
 
   it("skips undefined parts", () => {
-    expect(composeSystemPrompt({ safety: "Be safe.", persona: "Be concise." }))
-      .toBe("Be safe.\n\nBe concise.");
+    expect(composeSystemPrompt({ safety: "Be safe.", persona: "Be concise." })).toBe(
+      "Be safe.\n\nBe concise.",
+    );
   });
 });

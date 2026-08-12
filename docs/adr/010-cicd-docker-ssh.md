@@ -33,6 +33,7 @@ A single `scripts/deploy.sh` handles both local and CI deployment. It accepts a 
 ### GitHub Actions workflow
 
 CI triggers on push to `main`. The workflow:
+
 1. Run tests (typecheck, lint, unit, E2E with mock LLM).
 2. Build and push Docker image to the registry (using QEMU for ARM64 cross-compilation if the runner is x86).
 3. Deploy Worker via `wrangler deploy`.
@@ -58,6 +59,7 @@ After deployment, the script polls the Runtime's `/health` endpoint (over SSH tu
 ## Consequences
 
 **Positive:**
+
 - Identical deployment path for local and CI — no environment drift.
 - Self-hosted registry keeps images on-network; pulls are fast and dependency-free.
 - SSH-based deployment requires no agent, daemon, or orchestration platform on the host.
@@ -65,10 +67,12 @@ After deployment, the script polls the Runtime's `/health` endpoint (over SSH tu
 - Graceful Gateway handoff prevents session invalidation.
 
 **Negative:**
+
 - SSH key management: the private key must be securely stored in GitHub secrets and rotated if compromised.
 - QEMU-based ARM64 cross-compilation on x86 CI runners is slower than native builds. (If GitHub Actions ARM64 runners are available, they should be preferred.)
 - No automatic rollback: if the new container fails health checks, manual intervention is required to restart the previous image.
 
 **Neutral:**
+
 - `.env.deploy` (gitignored) holds host address, SSH user, registry URL, and image name. A `.env.deploy.example` template is committed.
 - The docker-compose file lives in the repository (`deploy/docker-compose.yml`) and is used on the host via a git checkout or direct copy.
