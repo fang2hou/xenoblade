@@ -4,16 +4,35 @@ import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 
 export type ModelRole = "generation" | "summarization" | "transcription";
 
+/**
+ * Primary generation model: DeepSeek V4 Flash.
+ * Fallback: OpenAI GPT-5.6 Luna (used when DeepSeek providers are all down).
+ *
+ * OpenRouter provider routing (via extraBody.provider.order) tells OpenRouter
+ * to try DeepSeek's own API first, then NovitaAI, then SiliconFlow — all
+ * serving the same DeepSeek model. This maximises availability without
+ * changing the model.
+ */
 const DEFAULT_ROLE_MODELS: Record<ModelRole, string> = {
-  generation: "openai/gpt-5.6-luna",
-  summarization: "openai/gpt-5.6-luna",
+  generation: "deepseek/deepseek-v4-flash-0731",
+  summarization: "deepseek/deepseek-v4-flash-0731",
   transcription: "openai/gpt-transcribe",
 };
 
 const FALLBACK_MODELS: Record<ModelRole, string | undefined> = {
-  generation: "deepseek/deepseek-v4-flash-0731",
+  generation: "openai/gpt-5.6-luna",
   summarization: undefined,
   transcription: undefined,
+};
+
+/**
+ * Provider preference order for DeepSeek models on OpenRouter.
+ * OpenRouter tries each provider in sequence; allow_fallbacks lets it
+ * fall through to any available provider if the listed ones are unavailable.
+ */
+const PROVIDER_ORDER: Record<string, string[]> = {
+  "deepseek/deepseek-v4-flash-0731": ["DeepSeek", "NovitaAI", "SiliconFlow"],
+  "deepseek/deepseek-v4-flash": ["DeepSeek", "NovitaAI", "SiliconFlow"],
 };
 
 export const GENERATION_LIMITS = {
@@ -22,7 +41,6 @@ export const GENERATION_LIMITS = {
 } as const;
 
 export interface AiEnv {
-  /** Legacy single-model var; still read for the generation role. */
   AI_MODEL?: string;
   GENERATION_MODEL?: string;
   GENERATION_FALLBACK_MODEL?: string;
@@ -45,8 +63,12 @@ function resolveModelId(env: AiEnv, role: ModelRole): string {
 /**
  * Select an AI model for a given role via OpenRouter.
  *
- * Pass `modelId` to override role-based resolution (used for fallback).
+ * Provider routing is automatically applied for DeepSeek models: OpenRouter
+ * tries DeepSeek's own API → NovitaAI → SiliconFlow in order, maximising
+ * availability without changing the model.
+ *
  * `sessionId` forwards to OpenRouter for sticky routing (prefix cache).
+ * `modelId` overrides role-based resolution (used for fallback).
  */
 export function selectModel(
   env: AiEnv,
@@ -59,12 +81,28 @@ export function selectModel(
     throw new Error("OPENROUTER_API_KEY is not configured");
   }
 
+  const extraBody: Record<string, unknown> = {};
+
   if (options?.sessionId) {
+    extraBody.session_id = options.sessionId;
+  }
+
+  // Apply provider routing for DeepSeek models
+  const providers = PROVIDER_ORDER[id];
+  if (providers) {
+    extraBody.provider = {
+      order: providers,
+      allow_fallbacks: true,
+    };
+  }
+
+  if (Object.keys(extraBody).length > 0) {
     return createOpenRouter({
       apiKey: env.OPENROUTER_API_KEY,
-      extraBody: { session_id: options.sessionId },
+      extraBody,
     }).chat(id);
   }
+
   return createOpenRouter({ apiKey: env.OPENROUTER_API_KEY }).chat(id);
 }
 

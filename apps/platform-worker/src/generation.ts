@@ -58,9 +58,9 @@ async function safeRecord(db: D1Database, row: InteractionRecord): Promise<void>
   }
 }
 
-function isRateLimited(error: unknown): boolean {
+function isRetryable(error: unknown): boolean {
   const msg = error instanceof Error ? error.message : String(error);
-  return msg.includes("rate-limited") || msg.includes("rate_limit");
+  return msg.includes("rate-limited") || msg.includes("rate_limit") || msg.includes("429");
 }
 
 export async function generate(
@@ -70,24 +70,22 @@ export async function generate(
   const now = Date.now();
   const requestId = crypto.randomUUID();
 
-  // 1. De-duplicate delivery.
+  // 1. De-duplicate.
   try {
     if (!(await claimMessage(env.DB, req.messageId, now))) {
-      console.log(JSON.stringify({ event: "duplicate", messageId: req.messageId }));
       return { status: "rejected", requestId, code: "duplicate" };
     }
   } catch (error) {
-    console.log(JSON.stringify({ event: "claim_error", error: String(error) }));
     return { status: "error", requestId, code: "claim_failed", message: String(error), retryable: true };
   }
 
-  // 2. Runtime configuration (fail-closed).
+  // 2. Runtime gate.
   const runtime = await getRuntimeConfig(env.DB, req.scopeId, req.channelId);
   if (!runtime.enabled || !runtime.channelAllowed) {
     return { status: "rejected", requestId, code: "disabled" };
   }
 
-  // 3. Budget reservation.
+  // 3. Budget.
   let reservationId: number;
   try {
     reservationId = (await reserveGeneration(env.DB, req.containerId, now)).reservationId;
@@ -118,37 +116,36 @@ export async function generate(
 
   const system = composeSystemPrompt({ safety: SAFETY_SYSTEM, persona });
 
-  // 5. Connect MCP servers + build tool set.
+  // 5. Tools (MCP + first-party). All models get all tools.
   const firstPartyTools = createFirstPartyTools(env);
   const mcpResult = await connectMcpServers(env);
   const allTools = { ...firstPartyTools, ...mcpResult.tools };
 
-  // 6. Generate with retry + fallback model.
+  // 6. Generate with retry + fallback. ALL models get ALL tools.
   const startedAt = now;
   const sessionId = `xenoblade:${req.containerId}`;
   const fallbackId = getFallbackModelId(env, "generation");
 
-  // Build model chain: primary (2 retries) → fallback (1 attempt)
-  type ModelAttempt = { modelId: string; label: string };
-  const chain: ModelAttempt[] = [
-    { modelId: "primary", label: "primary" },
-    { modelId: "primary", label: "primary-retry" },
+  // Build attempt chain: primary (×2 with delay) → fallback (×1)
+  const attempts: Array<{ label: string; modelId: string }> = [
+    { label: "primary", modelId: "primary" },
+    { label: "primary-retry", modelId: "primary" },
   ];
   if (fallbackId) {
-    chain.push({ modelId: fallbackId, label: "fallback" });
+    attempts.push({ label: "fallback", modelId: fallbackId });
   }
 
   let result;
-  let usedFallback = false;
+  let usedModel = env.GENERATION_MODEL ?? "deepseek/deepseek-v4-flash-0731";
 
   try {
-    for (let i = 0; i < chain.length; i++) {
-      const attempt = chain[i];
+    for (let i = 0; i < attempts.length; i++) {
+      const att = attempts[i];
       try {
         const model =
-          attempt.modelId === "primary"
+          att.modelId === "primary"
             ? selectModel(env, { role: "generation", sessionId })
-            : selectModel(env, { role: "generation", sessionId, modelId: attempt.modelId });
+            : selectModel(env, { role: "generation", sessionId, modelId: att.modelId });
 
         result = await generateText({
           model,
@@ -160,62 +157,52 @@ export async function generate(
           timeout: GENERATION_LIMITS.timeout.totalMs,
         });
 
-        usedFallback = i > 1;
-        break;
-      } catch (error) {
-        const rateLimited = isRateLimited(error);
+        if (att.modelId !== "primary") usedModel = att.modelId;
 
-        console.log(
-          JSON.stringify({
-            event: "generation_attempt_failed",
+        // Empty text = model failure, not success
+        if (!result.text || result.text.trim() === "") {
+          console.log(JSON.stringify({
+            event: "empty_generation",
             messageId: req.messageId,
-            attempt: attempt.label,
-            rateLimited,
-            error: error instanceof Error ? error.message : String(error),
-          }),
-        );
-
-        if (!rateLimited || i === chain.length - 1) {
-          throw error;
+            model: att.label,
+          }));
+          if (i < attempts.length - 1) continue;
+          throw new Error(`Model ${att.label} returned empty text`);
         }
+        break;
 
-        // Wait before next attempt
-        if (i < chain.length - 1) {
-          const { promise: sleepP, resolve: wake } = Promise.withResolvers<void>();
-          setTimeout(wake, 3000);
-          await sleepP;
-        }
+      } catch (error) {
+        console.log(JSON.stringify({
+          event: "generation_attempt_failed",
+          messageId: req.messageId,
+          attempt: att.label,
+          retryable: isRetryable(error),
+          error: error instanceof Error ? error.message : String(error),
+        }));
+
+        if (i === attempts.length - 1) throw error;
+
+        // Brief delay before next attempt
+        const { promise: sleepP, resolve: wake } = Promise.withResolvers<void>();
+        setTimeout(wake, 3000);
+        await sleepP;
       }
     }
   } catch (error) {
     await closeMcpClients(mcpResult.clients);
     const code = error instanceof Error ? error.name : "GENERATION_FAILED";
     const errorMsg = error instanceof Error ? error.message : String(error);
-    console.log(
-      JSON.stringify({
-        event: "generation_failed",
-        messageId: req.messageId,
-        error: errorMsg,
-        errorCode: code,
-      }),
-    );
     await safeFinish(env.DB, reservationId);
     await safeRecord(env.DB, {
-      id: requestId,
-      containerId: req.containerId,
-      scopeId: req.scopeId,
-      userId: req.userId,
-      summonKind: req.summonKind,
-      model: env.GENERATION_MODEL,
-      status: "failed",
-      totalDurationMs: Date.now() - startedAt,
-      createdAt: Date.now(),
+      id: requestId, containerId: req.containerId, scopeId: req.scopeId,
+      userId: req.userId, summonKind: req.summonKind,
+      model: usedModel, status: "failed",
+      totalDurationMs: Date.now() - startedAt, createdAt: Date.now(),
     });
-    return { status: "error", requestId, code, message: errorMsg, retryable: isRateLimited(error) };
+    return { status: "error", requestId, code, message: errorMsg, retryable: isRetryable(error) };
   }
 
-  if (!result) throw new Error("Generation produced no result after all attempts");
-  const usedModel = usedFallback && fallbackId ? fallbackId : (env.GENERATION_MODEL ?? "openai/gpt-5.6-luna");
+  // 7. Usage.
   const usage: GenerationUsage = {
     model: usedModel,
     inputTokens: result.usage.inputTokens ?? 0,
@@ -228,39 +215,31 @@ export async function generate(
   // 8. Telemetry.
   await safeFinish(env.DB, reservationId);
   await safeRecord(env.DB, {
-    id: requestId,
-    containerId: req.containerId,
-    scopeId: req.scopeId,
-    userId: req.userId,
-    summonKind: req.summonKind,
-    model: usage.model,
-    status: "completed",
-    inputTokens: usage.inputTokens,
-    outputTokens: usage.outputTokens,
+    id: requestId, containerId: req.containerId, scopeId: req.scopeId,
+    userId: req.userId, summonKind: req.summonKind,
+    model: usage.model, status: "completed",
+    inputTokens: usage.inputTokens, outputTokens: usage.outputTokens,
     cacheReadTokens: usage.cacheReadTokens ?? null,
     cacheWriteTokens: usage.cacheWriteTokens ?? null,
-    totalDurationMs: usage.durationMs,
-    createdAt: Date.now(),
+    totalDurationMs: usage.durationMs, createdAt: Date.now(),
   });
+
   try {
     await markUserInteraction(env.DB, {
-      scopeId: req.scopeId,
-      containerId: req.containerId,
-      userId: req.userId,
-      now: Date.now(),
+      scopeId: req.scopeId, containerId: req.containerId,
+      userId: req.userId, now: Date.now(),
     });
   } catch (error) {
     console.log(JSON.stringify({ event: "mark_interaction_error", error: String(error) }));
   }
 
-  // 9. Record tool invocations.
+  // 9. Tool invocation audit.
   try {
     for (const tr of result.toolResults ?? []) {
       const output = tr.output as Record<string, unknown> | null;
       const isError = output != null && typeof output === "object" && "error" in output;
       await recordToolInvocation(env.DB, {
-        id: crypto.randomUUID(),
-        interactionId: requestId,
+        id: crypto.randomUUID(), interactionId: requestId,
         toolName: tr.toolName,
         server: tr.toolName.includes("_") ? tr.toolName.split("_")[0] : "builtin",
         status: isError ? "error" : "ok",
@@ -273,26 +252,16 @@ export async function generate(
     console.log(JSON.stringify({ event: "record_tool_invocations_error", error: String(error) }));
   }
 
-  // 10. Close MCP clients.
+  // 10. Cleanup MCP.
   await closeMcpClients(mcpResult.clients);
 
-  console.log(
-    JSON.stringify({
-      event: "generation_completed",
-      messageId: req.messageId,
-      model: usedModel,
-      usedFallback,
-      replyLength: result.text.length,
-      replyPreview: result.text.slice(0, 100),
-      toolCalls: (result.toolResults ?? []).length,
-      steps: result.steps.length,
-    }),
-  );
+  console.log(JSON.stringify({
+    event: "generation_completed", messageId: req.messageId,
+    model: usedModel, replyLength: result.text.length,
+    replyPreview: result.text.slice(0, 100),
+    toolCalls: (result.toolResults ?? []).length,
+    steps: result.steps.length,
+  }));
 
-  return {
-    status: "completed",
-    requestId,
-    reply: result.text,
-    usage,
-  };
+  return { status: "completed", requestId, reply: result.text, usage };
 }
