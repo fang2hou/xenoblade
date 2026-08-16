@@ -1,15 +1,7 @@
 import { createServer, type Server } from "node:http";
 import process from "node:process";
 
-import {
-  Client,
-  GatewayIntentBits,
-  Partials,
-  REST,
-  Routes,
-  TextChannel,
-  ThreadChannel,
-} from "discord.js";
+import { Client, GatewayIntentBits, Partials, TextChannel, ThreadChannel } from "discord.js";
 import type { ChatInputCommandInteraction, Message, SendableChannels } from "discord.js";
 import type {
   DiscordAttachment,
@@ -26,6 +18,8 @@ import { postReply, sendTyping } from "./output";
 import { clearContext, generate } from "./ai-client";
 import { handleDmMessage } from "./dm-commands";
 import { ConversationQueue } from "./conversation-queue";
+import { registerSlashCommands } from "./slash-commands";
+import { handleUsageCommand } from "./usage";
 
 const FAILURE_REPLY = "这次处理失败了，请稍后重试。";
 const RATE_LIMIT_REPLY = "请求过于频繁，请稍后再试。";
@@ -353,6 +347,10 @@ async function handleInteraction(
       await handleClearContext(interaction, env);
       return;
     }
+    if (interaction.commandName === "usage") {
+      await handleUsageCommand(interaction, env);
+      return;
+    }
   } catch (error) {
     console.log(
       JSON.stringify({
@@ -402,28 +400,6 @@ async function handleClearContext(
       }),
     );
     await interaction.reply(CLEAR_FAILURE_REPLY).catch(() => undefined);
-  }
-}
-
-/** Register the two global slash commands (idempotent, best-effort). */
-async function registerSlashCommands(env: EnvConfig): Promise<void> {
-  try {
-    const rest = new REST({ version: "10" }).setToken(env.discordBotToken);
-    await rest.put(Routes.applicationCommands(env.discordApplicationId), {
-      body: [
-        {
-          name: "status",
-          description: "Check Xenoblade gateway status",
-        },
-        {
-          name: "clear-context",
-          description: "Clear your conversation context in this channel",
-        },
-      ],
-    });
-    console.log(JSON.stringify({ event: "slash_commands_registered" }));
-  } catch (error) {
-    console.log(JSON.stringify({ event: "slash_register_error", error: String(error) }));
   }
 }
 

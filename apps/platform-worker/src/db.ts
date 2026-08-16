@@ -2,6 +2,8 @@ import type {
   ContextClearRequest,
   MemoryCategory,
   SummonKind,
+  UsageSubjectSummary,
+  UsageSummary,
   UserMemory,
 } from "@xenoblade/contracts";
 
@@ -263,6 +265,88 @@ export async function recordToolInvocation(
       row.createdAt,
     )
     .run();
+}
+
+// ── Usage aggregation ─────────────────────────────────────────────────────
+
+/** Most-invoked tools returned per usage subject. */
+const USAGE_TOP_TOOLS_LIMIT = 5;
+
+type UsageAggregateRow = {
+  messages: number;
+  generations: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+};
+
+type UsageToolRow = { tool: string; count: number };
+
+/**
+ * Aggregate rolling-window usage for the requesting user and their guild.
+ *
+ * The window is {@link BUDGET_WINDOW_MS} (24h), matching the generation
+ * budget so the numbers users see describe the same window that limits them.
+ * `messages` counts deduped interactions (one row per processed trigger
+ * message); `generations` counts those that completed with a reply. Token
+ * totals are summed as recorded — NULLs read as 0, never fabricated.
+ */
+export async function getUsageSummary(
+  db: D1Database,
+  key: { userId: string; scopeId: string; now: number },
+): Promise<UsageSummary> {
+  const since = key.now - BUDGET_WINDOW_MS;
+  const [user, guild] = [
+    await summarizeUsageSubject(db, since, "user_id", key.userId),
+    await summarizeUsageSubject(db, since, "scope_id", key.scopeId),
+  ];
+  return { windowMs: BUDGET_WINDOW_MS, user, guild };
+}
+
+async function summarizeUsageSubject(
+  db: D1Database,
+  since: number,
+  predicateColumn: "user_id" | "scope_id",
+  value: string,
+): Promise<UsageSubjectSummary> {
+  const aggregate = await db
+    .prepare(
+      `SELECT
+         COUNT(*) AS messages,
+         COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) AS generations,
+         COALESCE(SUM(input_tokens), 0) AS input_tokens,
+         COALESCE(SUM(output_tokens), 0) AS output_tokens,
+         COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+         COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens
+       FROM interactions
+       WHERE created_at >= ?1 AND ${predicateColumn} = ?2`,
+    )
+    .bind(since, value)
+    .first<UsageAggregateRow>();
+
+  const topTools = await db
+    .prepare(
+      `SELECT ti.tool_name AS tool, COUNT(*) AS count
+       FROM tool_invocations AS ti
+       JOIN interactions AS i ON i.id = ti.interaction_id
+       WHERE i.created_at >= ?1 AND i.${predicateColumn} = ?2
+       GROUP BY ti.tool_name
+       ORDER BY count DESC, ti.tool_name ASC
+       LIMIT ${USAGE_TOP_TOOLS_LIMIT}`,
+    )
+    .bind(since, value)
+    .all<UsageToolRow>();
+
+  return {
+    messages: aggregate?.messages ?? 0,
+    generations: aggregate?.generations ?? 0,
+    inputTokens: aggregate?.input_tokens ?? 0,
+    outputTokens: aggregate?.output_tokens ?? 0,
+    cacheReadTokens: aggregate?.cache_read_tokens ?? 0,
+    cacheWriteTokens: aggregate?.cache_write_tokens ?? 0,
+    topTools: topTools.results.map((row) => ({ tool: row.tool, count: row.count })),
+  };
 }
 
 // ── Per-user context state ────────────────────────────────────────────────
