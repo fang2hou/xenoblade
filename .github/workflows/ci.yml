@@ -64,5 +64,5 @@ jobs:
         if: github.event_name == 'pull_request'
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
-        run: |
-          echo "$PR_TITLE" | cog verify -
+        run: cog verify "$PR_TITLE"
+
