@@ -90,14 +90,33 @@ export function selectModel(
   return createModel(env, config, options?.sessionId);
 }
 
+/**
+ * Render the request-time clock as a system segment. Kept last so the
+ * stable prefix (safety/base/persona) stays cache-friendly; only this
+ * trailing segment changes day to day.
+ */
+function formatNowSegment(now: Date): string {
+  const iso = now.toISOString();
+  const weekday = now.toLocaleDateString("en-US", { weekday: "long", timeZone: "UTC" });
+  return (
+    `Current date: ${iso.slice(0, 10)} (${weekday}), ${iso.slice(11, 16)} UTC. ` +
+    'Use this clock for every "today"/"now" reference; never infer the current ' +
+    "date from training data or from dates mentioned in the conversation."
+  );
+}
+
 export function composeSystemPrompt(parts: {
   safety: string;
   base?: string;
   persona?: string;
+  now?: Date;
 }): string {
   const segments: string[] = [];
   for (const part of [parts.safety, parts.base, parts.persona]) {
     if (part !== undefined && part.trim() !== "") segments.push(part);
+  }
+  if (parts.now !== undefined) {
+    segments.push(formatNowSegment(parts.now));
   }
   return segments.join("\n\n");
 }

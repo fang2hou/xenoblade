@@ -66,4 +66,22 @@ describe("composeSystemPrompt", () => {
       "Be safe.\n\nBe concise.",
     );
   });
+
+  it("appends the clock segment last when now is provided", () => {
+    const prompt = composeSystemPrompt({
+      safety: "Be safe.",
+      persona: "Be concise.",
+      now: new Date("2026-08-17T14:32:00.000Z"),
+    });
+    expect(prompt).toBe(
+      "Be safe.\n\nBe concise.\n\n" +
+        "Current date: 2026-08-17 (Monday), 14:32 UTC. " +
+        'Use this clock for every "today"/"now" reference; never infer the current ' +
+        "date from training data or from dates mentioned in the conversation.",
+    );
+  });
+
+  it("omits the clock segment when now is undefined", () => {
+    expect(composeSystemPrompt({ safety: "Be safe." })).toBe("Be safe.");
+  });
 });

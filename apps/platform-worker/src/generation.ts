@@ -127,7 +127,7 @@ export async function generate(env: Env, req: GenerationRequest): Promise<Genera
   } catch (error) {
     console.log(JSON.stringify({ event: "memory_read_error", error: String(error) }));
   }
-  const system = composeSystemPrompt({ safety: SAFETY_SYSTEM, persona });
+  const system = composeSystemPrompt({ safety: SAFETY_SYSTEM, persona, now: new Date(now) });
 
   // 5. Tools — ALL models get ALL tools (MCP + first-party + vision)
   const firstPartyTools = createFirstPartyTools(env);
