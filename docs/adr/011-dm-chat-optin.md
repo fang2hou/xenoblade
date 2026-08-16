@@ -5,60 +5,70 @@
 
 ## Context
 
-ADR-005 made DMs a pure control plane: DM messages never trigger AI generation and never enter conversation context, because private messages must not leak into guild conversations. The recorded trade-off (ADR-005:73) was that users who _want_ a private conversation with the bot cannot have one without "a separate explicit opt-in and a separate context scope."
+ADR-005 made DMs a pure control plane: DM messages never trigger generation and never enter conversation context, because private messages must not leak into guild conversations. The recorded trade-off was that users who _want_ a private conversation with the bot cannot have one without "a separate explicit opt-in and a separate context scope."
 
-That need is real: treating the DM channel as a command REPL is awkward for long-form private discussion, and users reasonably expect a chat experience once they have consciously asked for it. The constraint that remains non-negotiable is ADR-005's privacy posture — silence-by-default and structural isolation. Any DM chat feature must preserve both while flipping the default for a single, explicitly consenting user.
+That need is real: a command REPL is awkward for long-form private discussion, and users reasonably expect a chat experience once they have consciously asked for it. Non-negotiable: ADR-005's privacy posture — silence-by-default and structural isolation — must survive while flipping the default for a single, explicitly consenting user.
 
 ## Decision
 
 ### 1. Explicit opt-in, default OFF
 
-DM chat is gated per user by a `chat_optin` flag in the new `user_settings` table (Deliverable 3 of this change set), defaulting to `0`. The flag toggles via the DM control-plane commands `/chat on` and `/chat off`; `chat_optin_at` records when the opt-in was last enabled (NULL while off, so the flag remains the single source of truth). Unrecognized DM text from non-opted-in users keeps returning the fixed help message — the ADR-005 default is unchanged.
-
-The opt-in check fails closed: if the settings read errors, the user is treated as not opted in.
+A `chat_optin` flag in `user_settings` (default `0`), toggled via `/chat on` / `/chat off`; `chat_optin_at` records the last enable time (NULL while off — the flag is the single source of truth). Unrecognized DM text from non-opted-in users keeps returning the fixed help message. The check fails closed: a settings-read error treats the user as not opted in.
 
 ### 2. Control-plane routing priority is absolute
 
-Command dispatch happens before any opt-in consideration. `/help`, `/persona`, `/preference`, `/memory`, `/chat`, and `/learn` are always interpreted as commands — even when chat is enabled — so a user can always reach configuration (including `/chat off` itself) regardless of chat state. Only DM text that matches _no_ command is eligible for generation, and then only for opted-in users. A global operator kill switch is retained: the existing `bot_config.dm_enabled` runtime gate disables all DM generation independently of per-user flags.
+Command dispatch happens before any opt-in consideration. `/help`, `/persona`, `/preference`, `/memory`, `/chat`, and `/learn` always work — including `/chat off` itself — regardless of chat state. Only DM text matching no command is eligible for generation, and then only for opted-in users. A global operator kill switch (`bot_config.dm_enabled`) disables all DM generation independently of per-user flags.
 
 ### 3. DM-isolated context scope, enforced by keys
 
-Isolation is architectural (key shapes and fetch paths), not a prompt convention:
+Isolation is architectural (key shapes), not prompt convention:
 
-- **Scope and container keys.** DM generations use `scopeId = "dm"` and `containerId = discord:@me:<dmChannelId>`. `user_context_state` is keyed `(scope_id, container_id, user_id)`; guild rows carry a guild `scope_id` and a container whose second segment is the guild id. A guild request can therefore never read or write a DM row — the keys cannot collide. A DM channel is 1:1 with a user, so one user's DM state is never shared with another.
-- **Context fetch.** History is fetched live from the DM channel itself at request time (same `fetchHistory` path as guild channels). No cross-scope or cross-channel history fetch exists anywhere in the pipeline, so DM text cannot surface in a guild prompt.
-- **Context building.** DM containers are three-segment (non-thread) containers, so `buildContext` applies `channel` mode: only the requesting user's messages and bot replies survive filtering. In a DM those are the only participants anyway; the filter is defense in depth.
-- **Memory injection.** Only the triggering user's own `user_memory` is injected into their DM reply — the same user-scoped injection as guild generations, never another user's data. DM chat and history content is never _implicitly_ written to `user_memory`: the only DM-originated writes are values a user explicitly submits via the `/persona` and `/preference` control-plane commands (the ADR-005 path), and ADR-012's future extraction excludes DMs entirely.
-- **Clearing.** `/clear-context` invoked in a DM resolves to the same `discord:@me:<channelId>` container, so the existing command covers the DM scope with no special casing. Additionally, `/chat off` resets the user's DM context state, so opting out also ends the conversation's memory.
+- **Scope and container keys.** DM generations use `scopeId = "dm"` and `containerId = discord:@me:<dmChannelId>`. `user_context_state` is keyed `(scope_id, container_id, user_id)`; guild rows carry a guild `scope_id` and a guild-id container segment — a guild request can never read or write a DM row. A DM channel is 1:1 with a user, so DM state is never shared.
+- **Context fetch.** History is fetched live from the DM channel itself at request time; no cross-scope or cross-channel fetch exists in the pipeline.
+- **Context building.** DM containers are three-segment (non-thread), so `buildContext` applies `channel` mode: only the requesting user's messages and bot replies survive filtering (defense in depth — they are the only participants anyway).
+- **Memory injection.** Only the triggering user's own `user_memory` is injected. DM chat content is never _implicitly_ written to memory: DM-originated memory writes are only explicit `/persona` and `/preference` submissions, and ADR-012's extraction excludes DMs entirely.
+- **Clearing.** `/clear-context` in a DM resolves to the same `discord:@me:<channelId>` container. `/chat off` additionally resets the user's DM context state — opting out ends the conversation's memory.
 
-### 4. Privacy posture
+### 4. Privacy posture: metadata only, never content
 
-What the system retains about a DM conversation is metadata, never content:
-
-- **Persisted server-side:** `processed_messages` stores the message id (dedup); `user_context_state` stores reset/interaction timestamps; `interactions` telemetry stores container/scope/user ids, summon kind, model, token counts, and durations. None of these tables stores DM text or generated replies.
-- **Logs:** the guild path logs a 100-character reply preview for debugging; DM-scope generations omit content previews entirely (lengths and statuses only). No DM text is logged at any stage.
-- **Retention:** there is no DM content to retain — history lives only in Discord and is fetched per request. Telemetry rows follow the existing `interactions` retention policy.
-- **Clear path:** `/clear-context` in the DM (per-container) and `/chat off` (automatic on opt-out), as above. `/memory clear` covers user memory as before.
+- **Persisted:** `processed_messages` (ids), `user_context_state` (timestamps), `interactions` telemetry (container/scope/user ids, summon kind, model, token counts, durations). No DM text or generated replies are stored.
+- **Logs:** guild-path logging includes a 100-character reply preview for debugging; DM-scope generations omit content previews entirely (lengths and statuses only).
+- **Retention:** DM history lives only in Discord and is fetched per request; telemetry follows the existing `interactions` retention policy.
 
 ### 5. Budget interaction
 
-DM generations flow through the identical `/internal/v1/generations` pipeline, so they are subject to the same `processed_messages` dedup and count against the same rolling 24h reservation budget (`BUDGET_MAX_TOKENS`) as guild generations. There is no separate DM quota, and opting in does not increase a user's budget; a DM-heavy user consumes the same shared window their guild usage draws from.
+DM generations flow through the identical `/internal/v1/generations` pipeline: same `processed_messages` dedup, same rolling 24h reservation budget. No separate DM quota; a DM-heavy user draws from the same shared window as their guild usage.
+
+## Alternatives Considered
+
+### DM chat enabled for everyone by default
+
+- Pros: zero configuration; matches naive user expectations.
+- Cons: silently reverses ADR-005's silence-by-default; private content generated-but-unconsented from day one.
+- Why not chosen: consent must precede conversation, not follow it.
+
+### Separate DM-only generation pipeline
+
+- Pros: total code separation from the guild path.
+- Cons: duplicate dedup/budget/telemetry surfaces, divergent behavior, new leak paths.
+- Why not chosen: same pipeline + structural keys achieve isolation without forking the wire contract.
+
+### Naming-convention isolation (prefix/suffix on container ids)
+
+- Pros: no schema thinking; strings are cheap.
+- Cons: a typo or refactor silently merges scopes; keys must be impossible to collide by construction, not by convention.
+- Why not chosen: `@me` as the guild segment makes DM keys structurally disjoint from guild keys.
 
 ## Consequences
 
-**Positive:**
+**Positive:** private conversations through explicit, revocable consent; isolation rests on key invariants that are cheap to test and cannot regress through prompt drift; control-plane reachability is unconditional; one pipeline, one quota, one dedup ledger.
 
-- Users get private bot conversations through an explicit, revocable consent action; the privacy default for everyone else is exactly ADR-005's.
-- Isolation rests on key invariants (scope/container shapes), which are cheap to test and cannot regress through prompt drift.
-- Control-plane reachability is unconditional — an opted-in user can always turn chat off or manage memory.
-- No new budget surface: one pipeline, one quota, one dedup ledger.
+**Negative:** two routing branches in the DM handler; the opt-in settings read adds one Worker round trip per non-command DM message; DM context exists only as Discord-side history plus a reset timestamp — once Discord's history expires, older DM context is gone.
 
-**Negative:**
+**Neutral:** `bot_config.dm_enabled` semantics become "DM chat globally allowed for opted-in users" while still failing closed; the DM scope reuses the pre-existing `"dm"` sentinel.
 
-- Two routing branches in the DM handler (commands vs. opted-in chat) — the opt-in settings read adds one Worker round trip per non-command DM message.
-- DM context lives only as Discord-side history plus a reset timestamp; after Discord's own history expires, older DM context is simply gone (no server-side reconstruction).
+## Review Triggers
 
-**Neutral:**
-
-- `bot_config.dm_enabled` semantics change from "DMs are never chat" to "DM chat is globally allowed for opted-in users" while still failing closed (missing key ⇒ enabled, explicit `0` ⇒ disabled).
-- The DM scope reuses the `"dm"` sentinel already present in the worker's schema and runtime-config gate.
+- Discord ships per-channel or per-user bot privacy controls that change the threat model.
+- DM abuse against the shared budget becomes observable (consider a DM sub-quota).
+- Opt-in flow confuses users in practice (revisit command UX before weakening defaults).

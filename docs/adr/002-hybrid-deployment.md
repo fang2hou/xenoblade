@@ -5,63 +5,49 @@
 
 ## Context
 
-Discord bots that aim for deep platform integration — voice channels, persistent Gateway connections, real-time interactions — have runtime requirements that Cloudflare Workers cannot satisfy:
+Deep Discord integration — voice channels, a persistent Gateway connection, real-time interactions — has runtime requirements Cloudflare Workers cannot satisfy:
 
-1. **Persistent WebSocket.** Discord Gateway requires a long-lived WebSocket with heartbeat, session resume, and automatic reconnection. Workers are request-scoped; they cannot maintain persistent connections natively (the current workaround uses a community Durable Object, which is fragile and feature-limited).
+1. **Persistent WebSocket.** Discord Gateway needs a long-lived socket with heartbeat, session resume, and reconnection; Workers are request-scoped.
+2. **Bidirectional UDP.** Discord voice needs a Voice WebSocket plus UDP media transport; Workers offer outbound TCP only.
+3. **DAVE E2EE.** Discord's mandatory end-to-end encryption for voice involves MLS key exchange and ratcheted media keys — computationally unsuitable for per-request serverless.
 
-2. **Bidirectional UDP.** Discord voice requires a Voice WebSocket plus a bidirectional UDP socket for media transport. Workers only provide outbound TCP via `connect()` — no UDP support at all.
-
-3. **DAVE E2EE.** As of March 2026, Discord requires DAVE end-to-end encryption for all voice/video. This protocol involves MLS key exchange and per-sender ratcheted media keys — computationally unsuitable for per-request serverless.
-
-At the same time, the AI and data layer benefits strongly from Cloudflare's platform:
-
-1. **Edge compute.** AI orchestration (prompt building, tool calling, model routing) is stateless and CPU-light — ideal for Workers.
-
-2. **D1.** Managed SQLite with global read replicas provides configuration, budgeting, idempotency, and audit storage without database operations.
-
-3. **Browser Rendering.** Cloudflare's managed headless Chrome (`@cloudflare/puppeteer` binding) provides dynamic web page rendering without self-hosting Chromium.
-
-4. **Cache API.** Edge caching of search results and URL content reduces external API calls and latency.
-
-5. **Observability.** Built-in structured logging and metrics for Workers and D1.
+Meanwhile the AI/data layer fits Cloudflare well: stateless edge compute, D1 managed SQLite, Browser Rendering, edge caching, and built-in observability.
 
 ## Decision
 
-Split the system into two runtime tiers connected by a single outbound HTTPS path:
+Split the system into two tiers connected by a single outbound HTTPS path.
 
-**Discord Runtime (self-hosted host):**
+**Discord Runtime (self-hosted host):** runs `discord.js` in Docker; owns the bot token, Gateway WebSocket, interactions, REST, and future voice. All traffic is outbound; no inbound ports (the health port binds to localhost only).
 
-- Runs `discord.js` in a Docker container on a dedicated long-running host.
-- Owns the Discord bot token, Gateway WebSocket, all Interactions, REST calls, and future voice.
-- All network traffic is **outbound**: Gateway WebSocket to Discord, HTTPS to the Cloudflare Worker. No inbound ports required.
+**Platform Worker (Cloudflare):** pure AI/data backend — no Discord routes, no bot token. Owns AI credentials, D1, tools, and MCP clients; exposes authenticated `/internal/v1/*` endpoints only.
 
-**Platform Worker (Cloudflare):**
+The Runtime calls the Worker with a shared bearer token. The Worker never calls back; the Runtime's inbound firewall stays closed.
 
-- Pure AI/data backend. No Discord routes, no bot token.
-- Owns AI model credentials, D1, Browser Rendering, R2, Cache, and MCP clients.
-- Exposes authenticated internal endpoints (`/internal/v1/*`) called only by the Discord Runtime.
+## Alternatives Considered
 
-**Communication:** The Discord Runtime calls the Worker via outbound HTTPS with a shared bearer token. The Worker never calls back to the Runtime. This makes the Runtime's firewall fully closed inbound (SSH excluded), which is a significant security property.
+### All-in on Cloudflare Workers (community Gateway DO)
+
+- Pros: one platform, no self-hosted operations.
+- Cons: no UDP (no voice), DAVE E2EE unsuitable, fragile community dependency on the critical Gateway path.
+- Why not chosen: hard platform limits plus a critical-path dependency with no vendor backing.
+
+### Fully self-hosted
+
+- Pros: one tier, one deploy target, full control.
+- Cons: lose D1, Browser Rendering, edge caching, observability; must self-host and operate every equivalent.
+- Why not chosen: the AI/data layer gains nothing from self-hosting and costs real operational effort.
 
 ## Consequences
 
-**Positive:**
+**Positive:** Discord voice becomes feasible; no community Gateway DO dependency; clean credential isolation (Discord token never leaves the Runtime, AI keys never leave the Worker); Worker stays stateless and edge-distributed; outbound-only topology minimizes attack surface.
 
-- Discord voice becomes feasible (native UDP on a standard Linux host).
-- No community Gateway DO dependency.
-- Clean credential isolation: Discord token never leaves the Runtime; AI keys never leave the Worker.
-- Worker remains stateless and edge-distributed.
-- Browser Rendering and D1 stay on Cloudflare without self-hosting equivalents.
-- Outbound-only network topology simplifies firewall rules and reduces attack surface.
+**Negative:** two deployment targets; the self-hosted host is a single point of failure; every AI request traverses the public internet; container lifecycle, health monitoring, and disk management are on the team.
 
-**Negative:**
+**Neutral:** CPU billing differs per tier (per-CPU-ms vs fixed host cost); `packages/contracts` becomes a hard wire dependency — version mismatches fail silently and must be CI-gated.
 
-- Two deployment targets increase operational complexity.
-- The self-hosted host is a single point of failure (no global redundancy like Workers).
-- Every AI request traverses the public internet between the two tiers.
-- Docker process lifecycle, health monitoring, and disk management become the team's responsibility.
+## Review Triggers
 
-**Neutral:**
-
-- CPU billing differs between tiers: Workers bill per CPU millisecond; the host bills at fixed monthly cost regardless of utilization.
-- The internal API contract (`packages/contracts`) becomes a hard dependency — version mismatches cause silent failures and must be CI-gated.
+- Cloudflare Workers ships native persistent WebSocket and/or UDP support.
+- Voice support is deprioritized or dropped from the roadmap (the strongest reason for self-hosting weakens).
+- Cloudflare pricing or platform changes erase the Worker tier's cost/ops advantage.
+- The contracts compatibility gate proves insufficient in practice (silent version-skew incidents).

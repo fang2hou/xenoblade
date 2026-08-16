@@ -7,52 +7,55 @@
 
 A single model cannot efficiently serve all tasks in a Discord AI bot:
 
-1. **Generation (conversation, reasoning).** Requires a high-quality model with strong reasoning, creativity, and instruction-following. These models are expensive per token. Their context window should be reserved for conversation, user memory, and compressed tool results — not raw web page HTML.
+1. **Generation (conversation, reasoning)** wants a large, high-quality model; its context window should hold conversation, memory, and compressed tool results — not raw web pages.
+2. **Summarization (web page extraction)** is mechanical extraction over 5,000–50,000-character pages; a small, fast model does it at a fraction of the cost.
+3. **Transcription (audio)** requires a specialized speech-to-text model, not a general LLM.
 
-2. **Summarization (web page extraction).** When a tool fetches a web page, the raw content can be 5,000–50,000 characters. Sending this to the generation model wastes tokens on navigation, boilerplate, and irrelevant sections. A small, fast model can extract key facts, data points, and arguments at a fraction of the cost.
-
-3. **Transcription (audio).** Voice messages require a specialized speech-to-text model, not a general-purpose LLM.
-
-Using the generation model for all three roles means either (a) sending raw web pages to an expensive model, or (b) skipping content extraction entirely. Both are suboptimal.
+One model for everything means either feeding raw pages to an expensive model or skipping extraction entirely.
 
 ## Decision
 
-Define three model roles, each independently configurable and routed through OpenRouter via the AI SDK standard interface:
+Define model roles, each independently configured and routed through OpenRouter via the AI SDK standard interface:
 
 ```ts
-type ModelRole = "generation" | "summarization" | "transcription";
+type ModelRole = "generation" | "summarization" | "transcription" | "vision";
 ```
 
-| Role            | Purpose                                          | Characteristics                | Config key            |
-| --------------- | ------------------------------------------------ | ------------------------------ | --------------------- |
-| `generation`    | Main conversation, reasoning, tool orchestration | Large, high-quality, expensive | `GENERATION_MODEL`    |
-| `summarization` | Web page compression, key fact extraction        | Small, fast, cheap             | `SUMMARIZATION_MODEL` |
-| `transcription` | Audio-to-text                                    | Specialized STT                | `TRANSCRIPTION_MODEL` |
+| Role            | Purpose                                     | Config key      |
+| --------------- | ------------------------------------------- | --------------- |
+| `generation`    | Conversation, reasoning, tool orchestration | `generation`    |
+| `summarization` | Web page compression, key fact extraction   | `summarization` |
+| `transcription` | Audio-to-text                               | `transcription` |
+| `vision`        | Image description for text-only models      | `vision`        |
 
-All three go through OpenRouter using the AI SDK provider abstraction. Each is configured via a separate Wrangler var and can be swapped independently without affecting the others.
+Each role is an ordered **model chain** (`MODEL_CONFIG` Worker var; defaults in `packages/ai`) with provider fallbacks, so the primary can fail over without code changes. `selectModel(role)` picks the head of the chain.
 
-The `packages/ai` module exposes:
+_Evolution note:_ the original decision defined three roles; `vision` was added when fallback models without native image input entered the generation chain (the `vision_describe` tool delegates to it). The transcription role is configured but not yet wired — no voice handling ships today.
 
-```ts
-function selectModel(role: ModelRole): LanguageModel;
-```
+## Alternatives Considered
+
+### One model for all roles
+
+- Pros: single configuration, no role routing.
+- Cons: generation-model prices paid for boilerplate extraction; context window pollution; wrong tool for audio.
+- Why not chosen: order-of-magnitude token waste on web-heavy tasks.
+
+### Per-call ad-hoc model choice (no roles/chains)
+
+- Pros: maximum flexibility per request.
+- Cons: configuration scattered across call sites; no fallback story; swapping providers means code changes.
+- Why not chosen: roles + chains make swaps and failover configuration, not code.
 
 ## Consequences
 
-**Positive:**
+**Positive:** the generation model sees compressed summaries (≤ 512 tokens), not raw pages; extraction runs near-free; each role upgrades/swaps independently; the AI SDK abstraction keeps direct-provider connections open as a future option.
 
-- The generation model's context window sees only compressed summaries (≤ 512 tokens), not raw pages. Token consumption drops by an order of magnitude for web-heavy tasks.
-- The summarization model handles mechanical extraction at near-zero cost per call.
-- Each role can be upgraded, downgraded, or switched to a different provider without touching the others.
-- The AI SDK abstraction preserves the option to switch from OpenRouter to direct provider connections in the future.
+**Negative:** two model calls per `read_url` invocation (latency); a weak summarizer starves the generation model; several model configurations to maintain.
 
-**Negative:**
+**Neutral:** the summarization prompt is tuned for extraction (preserve numbers, dates, names, quotes; drop navigation/ads); on summarizer failure `read_url` falls back to truncating raw text — tool availability survives at the cost of token efficiency.
 
-- Two model calls per `read_url` invocation (fetch + summarize), adding latency.
-- The summarization model's output quality affects what the generation model "sees" — a poor summarizer can drop critical details.
-- Three model configurations to maintain instead of one.
+## Review Triggers
 
-**Neutral:**
-
-- The summarization model's prompt is tuned for extraction, not creativity: "Preserve specific numbers, dates, names, and quotes. Remove navigation, ads, boilerplate. Output structured markdown."
-- If the summarization model fails, `read_url` falls back to truncating raw text to a safe length, preserving tool availability at the cost of token efficiency.
+- A single model family serves all roles cheaply (large-context, low-cost models erase the economic split).
+- OpenRouter pricing or provider availability breaks a chain's economics.
+- Voice ships and the transcription role gains real constraints (streaming, formats), forcing re-evaluation.
