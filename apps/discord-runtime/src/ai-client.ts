@@ -5,6 +5,7 @@ import type {
   GenerationResult,
   MemoryRequest,
   MemoryResponse,
+  UsageSummaryResponse,
 } from "@xenoblade/contracts";
 
 /** Timeout for Worker generation calls (AI inference can be slow). */
@@ -59,27 +60,52 @@ export function memoryOp(
   );
 }
 
+/** Fetch the rolling-window usage summary for a user and their guild. */
+export function fetchUsage(
+  params: { userId: string; scopeId: string },
+  workerUrl: string,
+  token: string,
+): Promise<UsageSummaryResponse> {
+  const query = `userId=${encodeURIComponent(params.userId)}&scopeId=${encodeURIComponent(params.scopeId)}`;
+  return requestJson<UsageSummaryResponse>(
+    `${workerUrl}/internal/v1/usage?${query}`,
+    { method: "GET", headers: { Authorization: `Bearer ${token}` } },
+    CONTROL_TIMEOUT_MS,
+  );
+}
+
 /**
  * POST a JSON body to the Worker with Bearer auth and a timeout. Throws after
  * structured logging on any network, non-2xx, or JSON-parse failure.
  */
-async function postJson<T = unknown>(
+function postJson<T = unknown>(
   url: string,
   body: unknown,
   token: string,
   timeoutMs: number,
 ): Promise<T> {
-  let response: Response;
-  try {
-    response = await fetch(url, {
+  return requestJson<T>(
+    url,
+    {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
+    },
+    timeoutMs,
+  );
+}
+
+/**
+ * Perform a JSON request against the Worker with a timeout. Throws after
+ * structured logging on any network, non-2xx, or JSON-parse failure.
+ */
+async function requestJson<T>(url: string, init: RequestInit, timeoutMs: number): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
   } catch (error) {
     console.log(
       JSON.stringify({

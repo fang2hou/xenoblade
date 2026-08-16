@@ -105,6 +105,39 @@ export type GenerationResult =
       retryable: boolean;
     };
 
+// ── Usage ─────────────────────────────────────────────────────────────────
+
+/** One tool and its invocation count over the usage window. */
+export interface UsageToolCount {
+  tool: string;
+  count: number;
+}
+
+/** Aggregated usage for one subject (a user or a guild) over the window. */
+export interface UsageSubjectSummary {
+  /** Deduped trigger messages processed (one `interactions` row each). */
+  messages: number;
+  /** Interactions that completed with a reply. */
+  generations: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  /** Most-invoked tools in the window, count descending. */
+  topTools: UsageToolCount[];
+}
+
+/** Rolling-window usage for the requesting user and their guild. */
+export interface UsageSummary {
+  windowMs: number;
+  user: UsageSubjectSummary;
+  guild: UsageSubjectSummary;
+}
+
+export type UsageSummaryResponse =
+  | ({ status: "ok" } & UsageSummary)
+  | { status: "error"; code: string };
+
 // ── User Memory ───────────────────────────────────────────────────────────
 
 export type MemoryCategory = "persona" | "preference" | "fact";
