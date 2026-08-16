@@ -11,6 +11,7 @@ import type {
   SendableChannels,
   User,
 } from "discord.js";
+
 import type {
   DiscordAttachment,
   GenerationRequest,
@@ -22,7 +23,8 @@ import { loadEnv, type EnvConfig } from "./env";
 import { containerIdFromMessage, scopeIdFromMessage } from "./conversation-scope";
 import { evaluateTrigger, type TriggerDecision } from "./trigger-policy";
 import { fetchHistory } from "./history";
-import { postReply, sendTyping } from "./output";
+import { sendTyping } from "./output";
+import { StagedStatus } from "./staged-status";
 import { clearContext, generate } from "./ai-client";
 import { handleDmMessage } from "./dm-commands";
 import { ConversationQueue } from "./conversation-queue";
@@ -221,9 +223,10 @@ interface GenerationRun {
 
 /**
  * Serialized generation execution: one typing indicator, call the Worker,
- * post the result with its reaction affordances. Runs inside the
- * per-container queue; regenerates re-run a previously built request with the
- * same shape.
+ * post the result with its reaction affordances. Long runs get a staged
+ * status placeholder (ADR-003 amendment) that the final reply replaces.
+ * Runs inside the per-container queue; regenerates re-run a previously
+ * built request with the same shape.
  */
 async function executeGeneration(
   channel: SendableChannels,
@@ -236,6 +239,12 @@ async function executeGeneration(
   // indicator expires after ~10s; refresh every 8s until done.
   await sendTyping(channel);
   const typingInterval = setInterval(() => void sendTyping(channel), 8000);
+
+  // Staged status placeholder for long generations (ADR-003 amendment):
+  // posts after ~8s, escalates at coarse milestones, and is replaced by the
+  // final reply or failure notice.
+  const staged = new StagedStatus(channel);
+  staged.start();
 
   const wireRequest: GenerationRequest = run.regenerate
     ? { ...request, regenerateOf: request.messageId }
@@ -256,7 +265,7 @@ async function executeGeneration(
         error: String(error),
       }),
     );
-    await postReply(channel, FAILURE_REPLY).catch((e) => {
+    await staged.settle(FAILURE_REPLY).catch((e) => {
       console.log(
         JSON.stringify({
           event: "post_reply_error",
@@ -269,7 +278,7 @@ async function executeGeneration(
   }
 
   clearInterval(typingInterval);
-  await applyGenerationResult(channel, result, { request, controls: run.controls, registry });
+  await applyGenerationResult(result, { request, controls: run.controls, registry, staged });
 }
 
 /** Context for posting a result: what the reaction controls need. */
@@ -277,14 +286,15 @@ interface PostContext {
   request: GenerationRequest;
   controls: ReplyControls;
   registry: ReplyRegistry;
+  /** Staged placeholder this run owns; settle/dismiss post or remove it. */
+  staged: StagedStatus;
 }
 
-/** Post the Worker result (or a fallback message) to the channel. */
-async function applyGenerationResult(
-  channel: SendableChannels,
-  result: GenerationResult,
-  ctx: PostContext,
-): Promise<void> {
+/**
+ * Post the Worker result (or a fallback message) to the channel, settling the
+ * staged status placeholder (if any) with the outcome text.
+ */
+async function applyGenerationResult(result: GenerationResult, ctx: PostContext): Promise<void> {
   const messageId = ctx.request.messageId;
   console.log(
     JSON.stringify({
@@ -310,7 +320,7 @@ async function applyGenerationResult(
       );
       if (replyLength === 0 || content === "") {
         console.log(JSON.stringify({ event: "empty_reply", messageId }));
-        await postReply(channel, FAILURE_REPLY).catch((e) => {
+        await ctx.staged.settle(FAILURE_REPLY).catch((e) => {
           console.log(
             JSON.stringify({
               event: "post_reply_error",
@@ -321,7 +331,8 @@ async function applyGenerationResult(
         });
         return;
       }
-      const posted = await postReply(channel, content)
+      const posted = await ctx.staged
+        .settle(content)
         .then((sent) => {
           console.log(
             JSON.stringify({
@@ -351,7 +362,7 @@ async function applyGenerationResult(
     case "rejected":
       // duplicate / disabled → silent; budget_exceeded → courteous notice.
       if (result.code === "budget_exceeded") {
-        await postReply(channel, RATE_LIMIT_REPLY).catch((e) => {
+        await ctx.staged.settle(RATE_LIMIT_REPLY).catch((e) => {
           console.log(
             JSON.stringify({
               event: "post_reply_error",
@@ -360,6 +371,9 @@ async function applyGenerationResult(
             }),
           );
         });
+      } else {
+        // Silent rejection still must not leave a stale placeholder.
+        await ctx.staged.dismiss();
       }
       console.log(
         JSON.stringify({
@@ -379,7 +393,7 @@ async function applyGenerationResult(
           retryable: result.retryable,
         }),
       );
-      await postReply(channel, FAILURE_REPLY).catch((e) => {
+      await ctx.staged.settle(FAILURE_REPLY).catch((e) => {
         console.log(
           JSON.stringify({
             event: "post_reply_error",

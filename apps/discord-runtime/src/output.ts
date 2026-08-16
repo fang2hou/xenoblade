@@ -1,7 +1,7 @@
 import type { Message, SendableChannels } from "discord.js";
 
 /** Discord's per-message character limit. */
-const MAX_MESSAGE_LENGTH = 2000;
+export const MAX_MESSAGE_LENGTH = 2000;
 
 /** Send a typing indicator to a channel. Never throws. */
 export async function sendTyping(channel: SendableChannels): Promise<void> {
@@ -43,7 +43,7 @@ export async function postReply(target: SendableChannels, content: string): Prom
  * Split text into chunks no larger than `max`, preferring newline boundaries so
  * replies stay readable. Long single-line paragraphs are hard-wrapped.
  */
-function sliceIntoChunks(text: string, max: number): string[] {
+export function sliceIntoChunks(text: string, max: number): string[] {
   if (text.length <= max) return [text];
 
   const chunks: string[] = [];
