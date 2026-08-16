@@ -13,6 +13,11 @@ export async function handleUsageCommand(
   env: EnvConfig,
 ): Promise<void> {
   const scopeId = interaction.guildId ?? "dm";
+  // Acknowledge inside Discord's 3s interaction window before the Worker call:
+  // the usage fetch can run up to its 15s timeout, and a first reply that
+  // late renders as "The application did not respond". The deferred reply is
+  // ephemeral so the final edit stays visible only to the invoking user.
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   try {
     const summary = await fetchUsage(
       { userId: interaction.user.id, scopeId },
@@ -20,7 +25,7 @@ export async function handleUsageCommand(
       env.internalApiToken,
     );
     const content = summary.status === "ok" ? formatUsageSummary(summary) : USAGE_FAILURE_REPLY;
-    await interaction.reply({ content, flags: MessageFlags.Ephemeral });
+    await interaction.editReply({ content });
   } catch (error) {
     console.log(
       JSON.stringify({
@@ -30,9 +35,7 @@ export async function handleUsageCommand(
         error: String(error),
       }),
     );
-    await interaction
-      .reply({ content: USAGE_FAILURE_REPLY, flags: MessageFlags.Ephemeral })
-      .catch(() => undefined);
+    await interaction.editReply({ content: USAGE_FAILURE_REPLY }).catch(() => undefined);
   }
 }
 
