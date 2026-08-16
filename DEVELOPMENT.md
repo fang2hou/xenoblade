@@ -61,7 +61,7 @@ mise run test -- {{filter}} # run a single test file or case, e.g. mise run test
 2. Implement the smallest coherent change
 3. `mise run check` must pass (the pre-commit hook enforces it)
 4. Commit with Conventional Commits (validated by Cocogitto via the prek `commit-msg` hook)
-5. Open a PR following [CONTRIBUTING.md](./CONTRIBUTING.md); rebase-merge keeps history linear
+5. Open a PR following [CONTRIBUTING.md](./CONTRIBUTING.md); squash-merge keeps history linear
 
 ## Layout
 

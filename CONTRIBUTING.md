@@ -28,9 +28,9 @@ Discuss before implementing: open an issue describing the use case and collect f
 2. Implement; keep `mise run check` green
 3. Commit messages follow Conventional Commits (validated by Cocogitto via the prek `commit-msg` hook locally, and again in CI)
 4. Open a PR; CI (`ci.yml`) must pass
-5. Review, then **rebase-merge** — history stays linear and every commit on `main` is conventional and individually valid
+5. Review, then **squash-merge** — one commit per PR keeps history linear (squash-only is enforced by the repo settings and the default-branch ruleset; other merge methods are disabled)
 
-The PR title must also follow Conventional Commits — CI validates it with `cog verify`. Expect review within a few days. The maintainer signs commits with SSH keys backed by 1Password; signing is welcome but not required.
+The PR title must also follow Conventional Commits — CI validates it with `cog verify`, and it becomes the squash commit title on `main`. Expect review within a few days. The maintainer signs commits with SSH keys backed by 1Password; signing is welcome but not required.
 
 ## Review Expectations
 
@@ -51,7 +51,7 @@ fix(auth): handle expired sessions
 docs(adr): amend ADR-003 for typing renewal
 ```
 
-With rebase-merging, every commit lands on `main` individually — squash fixups before merging, not after; each must pass `cog verify` on its own.
+The squash commit that lands on `main` is titled with the PR title and detailed with the PR's commit messages — keep each commit message informative because together they form the squash body.
 
 ## AI-Assisted Pull Requests
 
