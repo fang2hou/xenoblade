@@ -1,7 +1,14 @@
 import { createServer, type Server } from "node:http";
 import process from "node:process";
 
-import { Client, GatewayIntentBits, Partials, TextChannel, ThreadChannel } from "discord.js";
+import {
+  Client,
+  DMChannel,
+  GatewayIntentBits,
+  Partials,
+  TextChannel,
+  ThreadChannel,
+} from "discord.js";
 import type {
   ChatInputCommandInteraction,
   Message,
@@ -101,8 +108,9 @@ async function main(): Promise<void> {
 }
 
 /**
- * messageCreate entry point. Skips bots, routes DMs to the control plane, and
- * runs the summon matrix for guild messages. Triggered messages are enqueued
+ * messageCreate entry point. Skips bots, routes DMs to the control plane
+ * (which dispatches opted-in non-command text to generation), and runs the
+ * summon matrix for guild messages. Triggered messages are enqueued
  * per-container so only one generation runs at a time per conversation.
  */
 async function handleMessageCreate(
@@ -115,9 +123,14 @@ async function handleMessageCreate(
   try {
     if (message.author.bot) return;
 
-    // DMs route to the control plane, never the AI pipeline.
+    // DMs route to the control plane first (commands always win); non-command
+    // text continues to generation only for chat-opted-in users (ADR-011).
     if (message.channel?.isDMBased()) {
-      await handleDmMessage(message, env);
+      await handleDmMessage(message, env, (dmMessage) => {
+        queue.enqueue(containerIdFromMessage(dmMessage), () =>
+          runGeneration(dmMessage, { kind: "dm-chat" }, env, registry),
+        );
+      });
       return;
     }
 
@@ -167,7 +180,11 @@ async function runGeneration(
 
   let history: HistoryMessage[] = [];
   try {
-    if (channel instanceof TextChannel || channel instanceof ThreadChannel) {
+    if (
+      channel instanceof TextChannel ||
+      channel instanceof ThreadChannel ||
+      channel instanceof DMChannel
+    ) {
       history = await fetchHistory(channel);
     }
   } catch (error) {
@@ -278,7 +295,13 @@ async function executeGeneration(
   }
 
   clearInterval(typingInterval);
-  await applyGenerationResult(result, { request, controls: run.controls, registry, staged });
+  await applyGenerationResult(result, {
+    request,
+    controls: run.controls,
+    registry,
+    staged,
+    redactContent: request.scopeId === "dm",
+  });
 }
 
 /** Context for posting a result: what the reaction controls need. */
@@ -288,11 +311,14 @@ interface PostContext {
   registry: ReplyRegistry;
   /** Staged placeholder this run owns; settle/dismiss post or remove it. */
   staged: StagedStatus;
+  /** DM-scope results never log content previews (ADR-011 privacy posture). */
+  redactContent: boolean;
 }
 
 /**
  * Post the Worker result (or a fallback message) to the channel, settling the
- * staged status placeholder (if any) with the outcome text.
+ * staged status placeholder (if any) with the outcome text. DM-scope results
+ * never log content previews (ADR-011 privacy posture).
  */
 async function applyGenerationResult(result: GenerationResult, ctx: PostContext): Promise<void> {
   const messageId = ctx.request.messageId;
@@ -308,13 +334,13 @@ async function applyGenerationResult(result: GenerationResult, ctx: PostContext)
     case "completed": {
       const content = renderReply(result.reply, result.sources);
       const replyLength = result.reply.length;
-      const replyPreview = result.reply.slice(0, 100);
+      const replyPreview = ctx.redactContent ? "" : result.reply.slice(0, 100);
       console.log(
         JSON.stringify({
           event: "reply_posting",
           messageId,
           replyLength,
-          replyPreview,
+          ...(replyPreview === "" ? {} : { replyPreview }),
           sources: result.sources.length,
         }),
       );

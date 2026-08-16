@@ -1,4 +1,4 @@
-import type { Message, TextChannel, ThreadChannel } from "discord.js";
+import type { DMChannel, Message, TextChannel, ThreadChannel } from "discord.js";
 import type { HistoryMessage } from "@xenoblade/contracts";
 
 /** Page size when fetching recent messages from Discord. */
@@ -14,7 +14,7 @@ const RETURN_LIMIT = 20;
  * the result in chronological (oldest-first) order for the Worker.
  */
 export async function fetchHistory(
-  channel: TextChannel | ThreadChannel,
+  channel: TextChannel | ThreadChannel | DMChannel,
   limit: number = FETCH_LIMIT,
 ): Promise<HistoryMessage[]> {
   const fetched = await channel.messages.fetch({ limit });

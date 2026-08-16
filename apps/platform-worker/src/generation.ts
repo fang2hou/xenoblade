@@ -11,6 +11,7 @@ import type {
 import {
   claimMessage,
   claimRegenerate,
+  DM_SCOPE,
   finishGeneration,
   GenerationBudgetExceededError,
   getRuntimeConfig,
@@ -278,7 +279,8 @@ export async function generate(env: Env, req: GenerationRequest): Promise<Genera
       messageId: req.messageId,
       model: usedModel,
       replyLength: result.text.length,
-      replyPreview: result.text.slice(0, 100),
+      // DM-scope generations never log content previews (ADR-011 privacy posture).
+      ...(req.scopeId === DM_SCOPE ? {} : { replyPreview: result.text.slice(0, 100) }),
       toolCalls: (result.toolResults ?? []).length,
       steps: result.steps.length,
       sources: sources.length,

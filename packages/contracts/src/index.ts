@@ -45,7 +45,9 @@ export type SummonKind =
   | "role-mention"
   | "reply-to-bot"
   | "slash-command"
-  | "component";
+  | "component"
+  /** Non-command DM text from a chat-opted-in user (ADR-011). */
+  | "dm-chat";
 
 // ── History (context) ─────────────────────────────────────────────────────
 
