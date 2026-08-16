@@ -24,6 +24,7 @@ import {
 } from "./db";
 import { buildContext } from "./context";
 import { buildGenerationMessages, SAFETY_SYSTEM } from "./prompt";
+import { extractSources } from "./sources";
 import { createFirstPartyTools, connectMcpServers, closeMcpClients } from "./tools";
 
 function formatMemoryBlock(displayName: string, memories: readonly UserMemory[]): string {
@@ -269,6 +270,8 @@ export async function generate(env: Env, req: GenerationRequest): Promise<Genera
 
   await closeMcpClients(mcpResult.clients);
 
+  const sources = extractSources(result.toolResults ?? []);
+
   console.log(
     JSON.stringify({
       event: "generation_completed",
@@ -278,8 +281,9 @@ export async function generate(env: Env, req: GenerationRequest): Promise<Genera
       replyPreview: result.text.slice(0, 100),
       toolCalls: (result.toolResults ?? []).length,
       steps: result.steps.length,
+      sources: sources.length,
     }),
   );
 
-  return { status: "completed", requestId, reply: result.text, usage };
+  return { status: "completed", requestId, reply: result.text, usage, sources };
 }

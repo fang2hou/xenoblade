@@ -37,6 +37,7 @@ import {
   type ReplyControls,
   type ReplyEntry,
 } from "./reply-controls";
+import { renderReply } from "./citations";
 
 const FAILURE_REPLY = "这次处理失败了，请稍后重试。";
 const RATE_LIMIT_REPLY = "请求过于频繁，请稍后再试。";
@@ -295,6 +296,7 @@ async function applyGenerationResult(
 
   switch (result.status) {
     case "completed": {
+      const content = renderReply(result.reply, result.sources);
       const replyLength = result.reply.length;
       const replyPreview = result.reply.slice(0, 100);
       console.log(
@@ -303,9 +305,10 @@ async function applyGenerationResult(
           messageId,
           replyLength,
           replyPreview,
+          sources: result.sources.length,
         }),
       );
-      if (replyLength === 0 || result.reply.trim() === "") {
+      if (replyLength === 0 || content === "") {
         console.log(JSON.stringify({ event: "empty_reply", messageId }));
         await postReply(channel, FAILURE_REPLY).catch((e) => {
           console.log(
@@ -318,7 +321,7 @@ async function applyGenerationResult(
         });
         return;
       }
-      const posted = await postReply(channel, result.reply)
+      const posted = await postReply(channel, content)
         .then((sent) => {
           console.log(
             JSON.stringify({
