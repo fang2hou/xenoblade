@@ -146,8 +146,7 @@ export async function generate(env: Env, req: GenerationRequest): Promise<Genera
   let usedModel = chain[0]?.id ?? "unknown";
 
   GENERATION_LOOP: try {
-    for (let i = 0; i < chain.length; i++) {
-      const config = chain[i];
+    for (const [i, config] of chain.entries()) {
       const isPrimary = i === 0;
       try {
         const model = createModel(env, config, sessionId);
@@ -258,7 +257,7 @@ export async function generate(env: Env, req: GenerationRequest): Promise<Genera
         id: crypto.randomUUID(),
         interactionId: requestId,
         toolName: tr.toolName,
-        server: tr.toolName.includes("_") ? tr.toolName.split("_")[0] : "builtin",
+        server: tr.toolName.includes("_") ? (tr.toolName.split("_")[0] ?? "builtin") : "builtin",
         status: isError ? "error" : "ok",
         inputSize: JSON.stringify(tr.input).length,
         outputSize: JSON.stringify(tr.output).length,

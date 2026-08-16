@@ -40,13 +40,15 @@ function enforceLimits(messages: HistoryMessage[]): HistoryMessage[] {
   let totalTokens = 0;
   for (let i = messages.length - 1; i >= 0; i--) {
     if (result.length >= MAX_CONTEXT_MESSAGES) break;
-    const chars = Array.from(messages[i].text).length;
-    const tokens = estimateTokens(messages[i].text);
+    const message = messages[i];
+    if (message === undefined) continue;
+    const chars = Array.from(message.text).length;
+    const tokens = estimateTokens(message.text);
     if (totalChars + chars > MAX_CONTEXT_CHARS) break;
     if (totalTokens + tokens > MAX_CONTEXT_TOKENS) break;
     totalChars += chars;
     totalTokens += tokens;
-    result.push(messages[i]);
+    result.push(message);
   }
   result.reverse();
   return result;

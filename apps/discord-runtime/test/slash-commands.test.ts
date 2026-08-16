@@ -35,8 +35,8 @@ describe("registerSlashCommands", () => {
     });
 
     expect(puts).toHaveLength(1);
-    expect(puts[0].route).toBe(Routes.applicationCommands("app-id"));
-    expect(puts[0].body).toEqual({ body: SLASH_COMMANDS });
+    expect(puts[0]?.route).toBe(Routes.applicationCommands("app-id"));
+    expect(puts[0]?.body).toEqual({ body: SLASH_COMMANDS });
   });
 
   it("swallows registration failures (best-effort, never fatal)", async () => {

@@ -185,7 +185,7 @@ export async function reserveGeneration(
   ]);
 
   const insert = results[1];
-  if (insert.meta.changes === 0) {
+  if (insert === undefined || insert.meta.changes === 0) {
     throw new GenerationBudgetExceededError();
   }
   const id = insert.meta.last_row_id;

@@ -18,7 +18,7 @@ function parseIPv4(host: string): [number, number, number, number] | null {
     const part = parts[i];
     // Reject hex/octal encodings and non-numeric garbage so only plain decimal
     // quads are treated as IP literals.
-    if (!/^\d+$/.test(part)) return null;
+    if (part === undefined || !/^\d+$/.test(part)) return null;
     const n = Number(part);
     if (n > 255) return null;
     octets[i] = n;

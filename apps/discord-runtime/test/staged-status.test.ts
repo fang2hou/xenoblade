@@ -106,7 +106,7 @@ describe("StagedStatus milestones", () => {
     expect(h.sends).toHaveLength(0);
     await vi.advanceTimersByTimeAsync(1);
     expect(h.sends).toHaveLength(1);
-    expect(h.sends[0].length).toBeGreaterThan(0);
+    expect(h.sends[0]?.length).toBeGreaterThan(0);
   });
   it("retries placeholder creation at the next milestone after a failed send", async () => {
     const h = harness();
@@ -210,7 +210,7 @@ describe("StagedStatus settle", () => {
     const continuation = h.sends.slice(1);
     expect(continuation).toHaveLength(2);
     for (const chunk of [h.edits[0], ...continuation]) {
-      expect(chunk.length).toBeLessThanOrEqual(2_000);
+      expect(chunk?.length).toBeLessThanOrEqual(2_000);
     }
     expect([h.edits[0], ...continuation].join("\n")).toBe(content);
   });
