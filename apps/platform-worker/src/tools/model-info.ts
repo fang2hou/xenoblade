@@ -5,6 +5,7 @@
  * cannot run in a Cloudflare Worker. These tools call the same API directly.
  */
 import { jsonSchema, tool } from "ai";
+import type { ToolSet } from "ai";
 
 const AA_BASE = "https://artificialanalysis.ai/api/v1";
 const TIMEOUT_MS = 10_000;
@@ -23,9 +24,9 @@ async function aaFetch(path: string, apiKey: string): Promise<unknown> {
   return response.json();
 }
 
-export function createModelInfoTools(env: Env) {
+export function createModelInfoTools(env: Env): ToolSet {
   if (!env.ARTIFICIAL_ANALYSIS_API_KEY) {
-    return {} as Record<string, never>;
+    return {};
   }
 
   const apiKey = env.ARTIFICIAL_ANALYSIS_API_KEY;

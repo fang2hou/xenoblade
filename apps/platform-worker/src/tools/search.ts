@@ -1,4 +1,5 @@
 import { jsonSchema, tool } from "ai";
+import type { ToolSet } from "ai";
 
 // ── Brave API response shapes ─────────────────────────────────────────────
 
@@ -37,7 +38,7 @@ function isBraveAnswerResponse(v: unknown): v is BraveAnswerResponse {
  * fails, they return a structured error object so the model can degrade
  * gracefully — no tool failure is fatal.
  */
-export function createSearchTools(env: Env) {
+export function createSearchTools(env: Env): ToolSet {
   return {
     /**
      * Search the web and return the top 5 results with title, URL, and a

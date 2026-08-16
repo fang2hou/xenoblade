@@ -1,4 +1,5 @@
 import { generateText, jsonSchema, tool } from "ai";
+import type { Tool } from "ai";
 
 import { selectModel } from "@xenoblade/ai";
 
@@ -45,7 +46,7 @@ function stripHtml(html: string): string {
  * SSRF-unsafe URLs are rejected before any network call. All failures return a
  * structured error — the tool never throws.
  */
-export function createReadUrlTool(env: Env) {
+export function createReadUrlTool(env: Env): Tool {
   return tool({
     description:
       "Read the text content of a web page at a given URL. " +
