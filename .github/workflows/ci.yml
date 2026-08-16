@@ -65,4 +65,3 @@ jobs:
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: cog verify "$PR_TITLE"
-
