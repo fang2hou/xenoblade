@@ -1,14 +1,31 @@
 # Architecture
 
-This document answers one question:
+This document orients new contributors and guards the design against
+accidental drift — especially by AI agents making broad changes. Keep it short
+and stable: a map of the country, not an atlas of its states. Revisit it
+occasionally; do not try to keep it synchronized with the code.
 
-> **What must remain true about the current architecture?**
+## Overview
 
-Keep it short and operational. It is a guardrail against accidental drift —
-especially by AI agents making broad changes — not a comprehensive architecture
-description.
+Xenoblade is a Discord AI assistant split into two tiers: a self-hosted
+discord.js runtime that owns the Discord connection, and a Cloudflare Worker
+that owns AI generation, tools, and data. The runtime calls the worker over
+outbound HTTPS with a bearer token; the worker never calls back. Models are
+routed through OpenRouter with per-role fallback chains, and all durable state
+lives in D1.
+
+## Codebase Map
+
+- **platform-worker** — the Cloudflare Worker: `/internal/v1/*` routes with bearer auth, the generation pipeline (budget, dedup, memory injection, model chains), first-party tools (`web_search`, `web_answer`, `read_url`, `vision_describe`, model-info), MCP clients, and the D1 access layer
+- **discord-runtime** — the self-hosted gateway: discord.js client, trigger policy, per-container conversation queue, staged status, reply affordances (regenerate/delete), slash commands, and the DM control plane
+- **contracts** — wire types for every runtime↔worker call; shared verbatim by both apps
+- **ai** — model chains per role (generation/summarization/transcription/vision) via the OpenRouter provider, system-prompt composition, generation limits
+- **db** — legacy D1 helpers from the pre-split worker; unreferenced
+- **deploy / scripts** — docker-compose definition for the gateway host; local deploy tooling
 
 ## Invariants
+
+What must remain true about the architecture:
 
 - **Communication direction**: the Discord Runtime calls the Platform Worker over outbound HTTPS with a bearer token (`INTERNAL_API_TOKEN`) on `/internal/v1/*` — and that is the only path. The Worker **never** calls back the Runtime; the runtime host's inbound firewall is closed (its health port binds to `127.0.0.1` only). Everything on the Worker outside `/internal/v1/*` returns 404.
 - **Credential isolation**: the Discord bot token exists only in the Runtime's environment; AI provider keys (`OPENROUTER_API_KEY`, Brave, MCP, Artificial Analysis) exist only in the Worker's. Neither set crosses the wire.
@@ -19,6 +36,10 @@ description.
 - **Wire contract**: `packages/contracts` is the single definition of every Runtime↔Worker message. Both apps import it verbatim; changes must stay compatible across the split or ship to both sides atomically.
 - **Ownership**: the Runtime owns everything Discord (Gateway, REST, interactions, slash commands); the Worker owns everything else (models, tools, D1, MCP). Dependency direction is `apps → packages`; the two apps share no code except `packages/*`.
 - **Raw fetch-handler Worker** (accepted divergence): the Worker uses no HTTP framework on purpose — it is a small, pre-existing, working service. Introducing one is a decision change, not a refactor.
+
+## Cross-Cutting Concerns
+
+- **Logging**: structured JSON only — `console.log(JSON.stringify({ event, ... }))`, one line per event, on both tiers. DM-scope events never include content previews (lengths and statuses only).
 
 ## Decisions
 
@@ -36,6 +57,7 @@ follow the ADR conflict workflow in the guideline's architecture governance.
 | [005](docs/adr/005-dm-control-plane-memory.md)  | DM Control Plane and Per-User Memory | DMs are a configuration console by default; per-user memory, never implicit learning.           |
 | [006](docs/adr/006-smart-url-reader.md)         | Smart URL Reader Pipeline            | `read_url` compresses long pages via the summarization model before the generation model.       |
 | [007](docs/adr/007-brave-search-integration.md) | Brave Search and Answer Integration  | Search as first-class model tools (`web_search` / `web_answer`), no prefetch heuristics.        |
+| [008](docs/adr/008-mcp-integration.md)          | MCP Integration Scope                | Remote Streamable HTTP servers only; read-only tools; server + tool allowlists.                 |
 | [010](docs/adr/010-cicd-docker-ssh.md)          | CI/CD with Docker Registry and SSH   | Self-hosted registry + SSH deploys; split CI (`ci.yml` check, `deploy.yml` deploy).             |
 | [011](docs/adr/011-dm-chat-optin.md)            | Opt-in DM Conversations              | DM chat behind a per-user opt-in with a dm-isolated context scope; fails closed.                |
 | [012](docs/adr/012-auto-memory-optin.md)        | Opt-in Auto Memory with Confirmation | Guild-only extraction for opted-in users; pending candidates confirmed in DM, never by default. |
