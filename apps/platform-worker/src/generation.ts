@@ -10,6 +10,7 @@ import type {
 
 import {
   claimMessage,
+  claimRegenerate,
   finishGeneration,
   GenerationBudgetExceededError,
   getRuntimeConfig,
@@ -23,6 +24,7 @@ import {
 } from "./db";
 import { buildContext } from "./context";
 import { buildGenerationMessages, SAFETY_SYSTEM } from "./prompt";
+import { extractSources } from "./sources";
 import { createFirstPartyTools, connectMcpServers, closeMcpClients } from "./tools";
 
 function formatMemoryBlock(displayName: string, memories: readonly UserMemory[]): string {
@@ -66,9 +68,14 @@ export async function generate(env: Env, req: GenerationRequest): Promise<Genera
   const now = Date.now();
   const requestId = crypto.randomUUID();
 
-  // 1. Dedup
+  // 1. Dedup — a regenerate claims the once-per-original-message slot
+  // instead of the message id itself (already claimed by the original run).
   try {
-    if (!(await claimMessage(env.DB, req.messageId, now))) {
+    const claimed =
+      req.regenerateOf !== undefined
+        ? await claimRegenerate(env.DB, req.regenerateOf, now)
+        : await claimMessage(env.DB, req.messageId, now);
+    if (!claimed) {
       return { status: "rejected", requestId, code: "duplicate" };
     }
   } catch (error) {
@@ -263,6 +270,8 @@ export async function generate(env: Env, req: GenerationRequest): Promise<Genera
 
   await closeMcpClients(mcpResult.clients);
 
+  const sources = extractSources(result.toolResults ?? []);
+
   console.log(
     JSON.stringify({
       event: "generation_completed",
@@ -272,8 +281,9 @@ export async function generate(env: Env, req: GenerationRequest): Promise<Genera
       replyPreview: result.text.slice(0, 100),
       toolCalls: (result.toolResults ?? []).length,
       steps: result.steps.length,
+      sources: sources.length,
     }),
   );
 
-  return { status: "completed", requestId, reply: result.text, usage };
+  return { status: "completed", requestId, reply: result.text, usage, sources };
 }

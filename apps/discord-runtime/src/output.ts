@@ -1,9 +1,9 @@
-import type { SendableChannels } from "discord.js";
+import type { Message, SendableChannels } from "discord.js";
 
 /** Discord's per-message character limit. */
 const MAX_MESSAGE_LENGTH = 2000;
 
-/** Send a single typing indicator to a channel. Never throws. */
+/** Send a typing indicator to a channel. Never throws. */
 export async function sendTyping(channel: SendableChannels): Promise<void> {
   try {
     await channel.sendTyping();
@@ -21,18 +21,22 @@ export async function sendTyping(channel: SendableChannels): Promise<void> {
 /**
  * Post a reply to a channel, splitting content into ≤2000-char chunks when
  * needed. Chunks are split on newline boundaries first, then hard-wrapped.
+ * Returns the posted messages, head chunk first — callers use them to attach
+ * reaction affordances and to delete the whole reply later.
  *
  * No streaming, no edit loop — one typing indicator earlier, then a single
  * complete post here.
  */
-export async function postReply(target: SendableChannels, content: string): Promise<void> {
+export async function postReply(target: SendableChannels, content: string): Promise<Message[]> {
   if (content.trim() === "") {
     throw new Error("postReply: content is empty after trim");
   }
   const chunks = sliceIntoChunks(content, MAX_MESSAGE_LENGTH);
+  const posted: Message[] = [];
   for (const chunk of chunks) {
-    await target.send(chunk);
+    posted.push(await target.send(chunk));
   }
+  return posted;
 }
 
 /**

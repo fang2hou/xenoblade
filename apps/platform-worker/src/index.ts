@@ -3,10 +3,11 @@ import type {
   GenerationRequest,
   HealthResponse,
   MemoryRequest,
+  UsageSummaryResponse,
 } from "@xenoblade/contracts";
 
 import { isInternalAuthorized } from "./auth";
-import { clearUserContext } from "./db";
+import { clearUserContext, getUsageSummary } from "./db";
 import { generate } from "./generation";
 import { handleMemory } from "./memory";
 
@@ -86,6 +87,25 @@ export default {
       } catch (error) {
         console.log(JSON.stringify({ event: "context_clear_failed", error: String(error) }));
         return json({ status: "error", code: "context_clear_failed" });
+      }
+    }
+
+    // GET /internal/v1/usage?userId=&scopeId=
+    if (request.method === "GET" && path === "/internal/v1/usage") {
+      const params = new URL(request.url).searchParams;
+      const userId = params.get("userId");
+      const scopeId = params.get("scopeId");
+      if (userId === null || userId === "" || scopeId === null || scopeId === "") {
+        return json({ status: "error", code: "invalid_params" }, 400);
+      }
+      try {
+        const summary = await getUsageSummary(env.DB, { userId, scopeId, now: Date.now() });
+        const body: UsageSummaryResponse = { status: "ok", ...summary };
+        return json(body);
+      } catch (error) {
+        console.log(JSON.stringify({ event: "usage_query_failed", error: String(error) }));
+        const body: UsageSummaryResponse = { status: "error", code: "usage_query_failed" };
+        return json(body);
       }
     }
 

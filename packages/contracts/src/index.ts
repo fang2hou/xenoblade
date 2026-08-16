@@ -74,6 +74,12 @@ export interface GenerationRequest {
   attachments: DiscordAttachment[];
   /** When true, hints the pipeline that the user is asking about recent events. */
   searchHint?: boolean;
+  /**
+   * When set, this request regenerates the reply for the given original
+   * message id. Dedup claims the once-per-message regenerate slot instead of
+   * `messageId`, so exactly one re-run is allowed per original trigger.
+   */
+  regenerateOf?: string;
 }
 
 export interface GenerationUsage {
@@ -91,6 +97,9 @@ export type GenerationResult =
       requestId: string;
       reply: string;
       usage: GenerationUsage;
+      /** Citation sources captured from search tool invocations, in the
+       * order the model saw them; `index` matches inline [n] markers. */
+      sources: GenerationSource[];
     }
   | {
       status: "rejected";
@@ -104,6 +113,46 @@ export type GenerationResult =
       message: string;
       retryable: boolean;
     };
+
+/** One citation source, numbered in the order the model saw search results. */
+export interface GenerationSource {
+  index: number;
+  title: string;
+  url: string;
+}
+
+// ── Usage ─────────────────────────────────────────────────────────────────
+
+/** One tool and its invocation count over the usage window. */
+export interface UsageToolCount {
+  tool: string;
+  count: number;
+}
+
+/** Aggregated usage for one subject (a user or a guild) over the window. */
+export interface UsageSubjectSummary {
+  /** Deduped trigger messages processed (one `interactions` row each). */
+  messages: number;
+  /** Interactions that completed with a reply. */
+  generations: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  /** Most-invoked tools in the window, count descending. */
+  topTools: UsageToolCount[];
+}
+
+/** Rolling-window usage for the requesting user and their guild. */
+export interface UsageSummary {
+  windowMs: number;
+  user: UsageSubjectSummary;
+  guild: UsageSubjectSummary;
+}
+
+export type UsageSummaryResponse =
+  | ({ status: "ok" } & UsageSummary)
+  | { status: "error"; code: string };
 
 // ── User Memory ───────────────────────────────────────────────────────────
 

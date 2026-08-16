@@ -1,16 +1,16 @@
 import { createServer, type Server } from "node:http";
 import process from "node:process";
 
-import {
-  Client,
-  GatewayIntentBits,
-  Partials,
-  REST,
-  Routes,
-  TextChannel,
-  ThreadChannel,
+import { Client, GatewayIntentBits, Partials, TextChannel, ThreadChannel } from "discord.js";
+import type {
+  ChatInputCommandInteraction,
+  Message,
+  MessageReaction,
+  PartialMessageReaction,
+  PartialUser,
+  SendableChannels,
+  User,
 } from "discord.js";
-import type { ChatInputCommandInteraction, Message, SendableChannels } from "discord.js";
 import type {
   DiscordAttachment,
   GenerationRequest,
@@ -26,6 +26,18 @@ import { postReply, sendTyping } from "./output";
 import { clearContext, generate } from "./ai-client";
 import { handleDmMessage } from "./dm-commands";
 import { ConversationQueue } from "./conversation-queue";
+import { registerSlashCommands } from "./slash-commands";
+import { handleUsageCommand } from "./usage";
+import {
+  DELETE_EMOJI,
+  isAffordanceEmoji,
+  REGENERATE_EMOJI,
+  ReplyRegistry,
+  resolveAffordanceAction,
+  type ReplyControls,
+  type ReplyEntry,
+} from "./reply-controls";
+import { renderReply } from "./citations";
 
 const FAILURE_REPLY = "这次处理失败了，请稍后重试。";
 const RATE_LIMIT_REPLY = "请求过于频繁，请稍后再试。";
@@ -35,6 +47,7 @@ const CLEAR_FAILURE_REPLY = "清除上下文失败，请稍后重试。";
 async function main(): Promise<void> {
   const env = loadEnv();
   const queue = new ConversationQueue();
+  const registry = new ReplyRegistry();
 
   const client = new Client({
     intents: [
@@ -42,10 +55,16 @@ async function main(): Promise<void> {
       GatewayIntentBits.GuildMessages,
       GatewayIntentBits.MessageContent,
       GatewayIntentBits.DirectMessages,
+      // Required to receive messageReactionAdd events for the reply
+      // affordances (🔁 regenerate / 🗑 delete).
+      GatewayIntentBits.GuildMessageReactions,
     ],
     // Partials.Channel is required to receive MESSAGE_CREATE in DM channels
-    // that are not yet in the cache.
-    partials: [Partials.Channel],
+    // that are not yet in the cache. Message/Reaction/User partials keep
+    // messageReactionAdd flowing for replies that have fallen out of the
+    // cache — the handler reads only ids and fetches full structures before
+    // acting, so partial payloads are safe.
+    partials: [Partials.Channel, Partials.Message, Partials.Reaction, Partials.User],
   });
 
   client.once("ready", () => {
@@ -60,7 +79,11 @@ async function main(): Promise<void> {
   });
 
   client.on("messageCreate", (message) => {
-    void handleMessageCreate(message, env, queue, client);
+    void handleMessageCreate(message, env, queue, client, registry);
+  });
+
+  client.on("messageReactionAdd", (reaction, user) => {
+    void handleReactionAdd(reaction, user, env, queue, client, registry);
   });
 
   client.on("interactionCreate", (interaction) => {
@@ -85,6 +108,7 @@ async function handleMessageCreate(
   env: EnvConfig,
   queue: ConversationQueue,
   client: Client,
+  registry: ReplyRegistry,
 ): Promise<void> {
   try {
     if (message.author.bot) return;
@@ -109,7 +133,7 @@ async function handleMessageCreate(
         hasFallback: Boolean(decision.fallbackMessage),
       }),
     );
-    queue.enqueue(containerId, () => runGeneration(message, decision, env));
+    queue.enqueue(containerId, () => runGeneration(message, decision, env, registry));
   } catch (error) {
     console.log(
       JSON.stringify({
@@ -122,14 +146,15 @@ async function handleMessageCreate(
 }
 
 /**
- * Serialized generation for one triggered message: one typing indicator, fetch
- * history, build the request, call the Worker, post the result. Runs inside the
+ * Serialized generation for one triggered message: fetch history, build the
+ * request, hand off to {@link executeGeneration}. Runs inside the
  * per-container queue.
  */
 async function runGeneration(
   message: Message,
   decision: TriggerDecision,
   env: EnvConfig,
+  registry: ReplyRegistry,
 ): Promise<void> {
   const channel = message.channel;
   if (!channel?.isSendable()) return;
@@ -137,11 +162,6 @@ async function runGeneration(
   const scopeId = scopeIdFromMessage(message);
   const containerId = containerIdFromMessage(message);
   const effective = decision.fallbackMessage ?? message;
-
-  // Keep typing indicator alive during generation. Discord's typing
-  // indicator expires after ~10s; refresh every 8s until done.
-  await sendTyping(channel);
-  const typingInterval = setInterval(() => void sendTyping(channel), 8000);
 
   let history: HistoryMessage[] = [];
   try {
@@ -189,36 +209,83 @@ async function runGeneration(
     }),
   );
 
+  await executeGeneration(channel, request, env, { regenerate: false, controls: "full" }, registry);
+}
+
+/** How a generation run claims dedup and which affordances its reply gets. */
+interface GenerationRun {
+  /** True marks a regenerate: dedup claims the once-per-trigger slot. */
+  regenerate: boolean;
+  controls: ReplyControls;
+}
+
+/**
+ * Serialized generation execution: one typing indicator, call the Worker,
+ * post the result with its reaction affordances. Runs inside the
+ * per-container queue; regenerates re-run a previously built request with the
+ * same shape.
+ */
+async function executeGeneration(
+  channel: SendableChannels,
+  request: GenerationRequest,
+  env: EnvConfig,
+  run: GenerationRun,
+  registry: ReplyRegistry,
+): Promise<void> {
+  // Keep typing indicator alive during generation. Discord's typing
+  // indicator expires after ~10s; refresh every 8s until done.
+  await sendTyping(channel);
+  const typingInterval = setInterval(() => void sendTyping(channel), 8000);
+
+  const wireRequest: GenerationRequest = run.regenerate
+    ? { ...request, regenerateOf: request.messageId }
+    : request;
+  if (run.regenerate) {
+    console.log(JSON.stringify({ event: "regenerate_request", messageId: request.messageId }));
+  }
+
   let result: GenerationResult;
   try {
-    result = await generate(request, env.workerUrl, env.internalApiToken);
+    result = await generate(wireRequest, env.workerUrl, env.internalApiToken);
   } catch (error) {
     clearInterval(typingInterval);
     console.log(
       JSON.stringify({
         event: "generation_call_failed",
-        messageId: message.id,
+        messageId: request.messageId,
         error: String(error),
       }),
     );
     await postReply(channel, FAILURE_REPLY).catch((e) => {
       console.log(
-        JSON.stringify({ event: "post_reply_error", messageId: message.id, error: String(e) }),
+        JSON.stringify({
+          event: "post_reply_error",
+          messageId: request.messageId,
+          error: String(e),
+        }),
       );
     });
     return;
   }
 
   clearInterval(typingInterval);
-  await applyGenerationResult(channel, result, message.id);
+  await applyGenerationResult(channel, result, { request, controls: run.controls, registry });
+}
+
+/** Context for posting a result: what the reaction controls need. */
+interface PostContext {
+  request: GenerationRequest;
+  controls: ReplyControls;
+  registry: ReplyRegistry;
 }
 
 /** Post the Worker result (or a fallback message) to the channel. */
 async function applyGenerationResult(
   channel: SendableChannels,
   result: GenerationResult,
-  messageId: string,
+  ctx: PostContext,
 ): Promise<void> {
+  const messageId = ctx.request.messageId;
   console.log(
     JSON.stringify({
       event: "generation_result",
@@ -229,6 +296,7 @@ async function applyGenerationResult(
 
   switch (result.status) {
     case "completed": {
+      const content = renderReply(result.reply, result.sources);
       const replyLength = result.reply.length;
       const replyPreview = result.reply.slice(0, 100);
       console.log(
@@ -237,9 +305,10 @@ async function applyGenerationResult(
           messageId,
           replyLength,
           replyPreview,
+          sources: result.sources.length,
         }),
       );
-      if (replyLength === 0 || result.reply.trim() === "") {
+      if (replyLength === 0 || content === "") {
         console.log(JSON.stringify({ event: "empty_reply", messageId }));
         await postReply(channel, FAILURE_REPLY).catch((e) => {
           console.log(
@@ -252,8 +321,8 @@ async function applyGenerationResult(
         });
         return;
       }
-      await postReply(channel, result.reply)
-        .then(() => {
+      const posted = await postReply(channel, content)
+        .then((sent) => {
           console.log(
             JSON.stringify({
               event: "reply_sent",
@@ -261,6 +330,7 @@ async function applyGenerationResult(
               length: replyLength,
             }),
           );
+          return sent;
         })
         .catch((e) => {
           console.log(
@@ -271,7 +341,11 @@ async function applyGenerationResult(
               replyLength,
             }),
           );
+          return undefined;
         });
+      if (posted !== undefined) {
+        await addReplyControls(posted, ctx);
+      }
       return;
     }
     case "rejected":
@@ -318,6 +392,182 @@ async function applyGenerationResult(
   }
 }
 
+/**
+ * React to the head chunk of a freshly posted reply with its affordances and
+ * register it for the reaction handler. Best-effort: a failed react is
+ * logged, never fatal — the reply itself is already delivered.
+ */
+async function addReplyControls(posted: readonly Message[], ctx: PostContext): Promise<void> {
+  const head = posted[0];
+  if (head === undefined) return;
+  ctx.registry.register(head.id, {
+    request: ctx.request,
+    chunkIds: posted.map((message) => message.id),
+    regenerable: ctx.controls === "full",
+  });
+  const emojis = ctx.controls === "full" ? [REGENERATE_EMOJI, DELETE_EMOJI] : [DELETE_EMOJI];
+  for (const emoji of emojis) {
+    await head.react(emoji).catch((error) => {
+      console.log(
+        JSON.stringify({
+          event: "reply_control_react_error",
+          messageId: head.id,
+          emoji,
+          error: String(error),
+        }),
+      );
+    });
+  }
+}
+
+/**
+ * messageReactionAdd entry point for the reply affordances: 🔁 regenerates
+ * the answer for the original trigger, 🗑 deletes the reply.
+ *
+ * The bot's own reactions are ignored — that includes the affordances it
+ * adds itself. Only the triggering user may act: 🔁 spends generation budget
+ * and 🗑 removes the answer they asked for, so restricting both to them stops
+ * third parties from burning the shared 24h budget or deleting other members'
+ * answers; moderators keep Discord's native message-deletion path.
+ */
+async function handleReactionAdd(
+  reaction: MessageReaction | PartialMessageReaction,
+  user: User | PartialUser,
+  env: EnvConfig,
+  queue: ConversationQueue,
+  client: Client,
+  registry: ReplyRegistry,
+): Promise<void> {
+  try {
+    const entry = registry.get(reaction.message.id);
+    const action = resolveAffordanceAction(entry, reaction.emoji?.name, user.id, user.bot);
+    if (action === "regenerate" && entry) {
+      await startRegenerate(reaction, entry, env, queue, client, registry);
+      return;
+    }
+    if (action === "delete" && entry) {
+      await deleteReply(reaction, entry, client, registry);
+    }
+  } catch (error) {
+    console.log(
+      JSON.stringify({
+        event: "reaction_handler_error",
+        messageId: reaction.message.id,
+        error: String(error),
+      }),
+    );
+  }
+}
+
+/**
+ * Consume the reply's regenerate affordance and enqueue a re-run of the
+ * frozen original request (same shape, plus the wire `regenerateOf` marker
+ * the Worker dedups on). The regenerated reply gets delete-only controls:
+ * the once-per-trigger regenerate claim is spent.
+ */
+async function startRegenerate(
+  reaction: MessageReaction | PartialMessageReaction,
+  entry: ReplyEntry,
+  env: EnvConfig,
+  queue: ConversationQueue,
+  client: Client,
+  registry: ReplyRegistry,
+): Promise<void> {
+  // Consume before enqueuing: one attempt per reply, even if the re-run
+  // fails. The Worker's claimRegenerate is the durable cross-restart bound.
+  registry.remove(reaction.message.id);
+  await clearAffordances(reaction, entry.request.userId);
+
+  queue.enqueue(entry.request.containerId, async () => {
+    const channel = await client.channels.fetch(entry.request.channelId);
+    if (!channel?.isSendable()) {
+      console.log(
+        JSON.stringify({
+          event: "regenerate_channel_unavailable",
+          messageId: entry.request.messageId,
+        }),
+      );
+      return;
+    }
+    await executeGeneration(
+      channel,
+      entry.request,
+      env,
+      { regenerate: true, controls: "delete-only" },
+      registry,
+    );
+  });
+}
+
+/** Delete the reply: head chunk plus every chunk continuation message. */
+async function deleteReply(
+  reaction: MessageReaction | PartialMessageReaction,
+  entry: ReplyEntry,
+  client: Client,
+  registry: ReplyRegistry,
+): Promise<void> {
+  registry.remove(reaction.message.id);
+
+  const channel = await client.channels.fetch(reaction.message.channelId);
+  if (!channel?.isSendable()) {
+    console.log(
+      JSON.stringify({
+        event: "reply_delete_channel_unavailable",
+        messageId: reaction.message.id,
+      }),
+    );
+    return;
+  }
+
+  // Head first so the affordances disappear immediately; the reactions die
+  // with the message, so no explicit clear is needed here.
+  for (const id of entry.chunkIds) {
+    await channel.messages.delete(id).catch((error) => {
+      console.log(
+        JSON.stringify({ event: "reply_chunk_delete_error", messageId: id, error: String(error) }),
+      );
+    });
+  }
+  console.log(
+    JSON.stringify({
+      event: "reply_deleted",
+      messageId: reaction.message.id,
+      chunks: entry.chunkIds.length,
+    }),
+  );
+}
+
+/**
+ * Remove the affordance reactions from a reply once it has been acted on, so
+ * stale buttons don't accumulate. Removes the bot's own instances and the
+ * actor's click (the latter needs MANAGE_MESSAGES; both are best-effort).
+ */
+async function clearAffordances(
+  reaction: MessageReaction | PartialMessageReaction,
+  actorId: string,
+): Promise<void> {
+  try {
+    const fetched = reaction.message.partial ? await reaction.message.fetch() : reaction.message;
+    if (!fetched) return;
+    for (const emoji of [REGENERATE_EMOJI, DELETE_EMOJI]) {
+      const affordance = fetched.reactions.cache.find((r) =>
+        isAffordanceEmoji(r.emoji?.name, emoji),
+      );
+      if (!affordance) continue;
+      await affordance.remove().catch(() => undefined);
+      await affordance.users.remove(actorId).catch(() => undefined);
+    }
+  } catch (error) {
+    console.log(
+      JSON.stringify({
+        event: "clear_affordances_error",
+        messageId: reaction.message.id,
+        error: String(error),
+      }),
+    );
+  }
+}
+
 /** Build the wire `reference` from a reply, if any. */
 function buildReference(message: Message): GenerationRequest["reference"] {
   const reference = message.reference;
@@ -351,6 +601,10 @@ async function handleInteraction(
     }
     if (interaction.commandName === "clear-context") {
       await handleClearContext(interaction, env);
+      return;
+    }
+    if (interaction.commandName === "usage") {
+      await handleUsageCommand(interaction, env);
       return;
     }
   } catch (error) {
@@ -402,28 +656,6 @@ async function handleClearContext(
       }),
     );
     await interaction.reply(CLEAR_FAILURE_REPLY).catch(() => undefined);
-  }
-}
-
-/** Register the two global slash commands (idempotent, best-effort). */
-async function registerSlashCommands(env: EnvConfig): Promise<void> {
-  try {
-    const rest = new REST({ version: "10" }).setToken(env.discordBotToken);
-    await rest.put(Routes.applicationCommands(env.discordApplicationId), {
-      body: [
-        {
-          name: "status",
-          description: "Check Xenoblade gateway status",
-        },
-        {
-          name: "clear-context",
-          description: "Clear your conversation context in this channel",
-        },
-      ],
-    });
-    console.log(JSON.stringify({ event: "slash_commands_registered" }));
-  } catch (error) {
-    console.log(JSON.stringify({ event: "slash_register_error", error: String(error) }));
   }
 }
 
