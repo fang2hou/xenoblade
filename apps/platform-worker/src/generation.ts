@@ -185,6 +185,9 @@ export async function generate(env: Env, req: GenerationRequest): Promise<Genera
             error: error instanceof Error ? error.message : String(error),
           }),
         );
+        // Rethrow as-is: everything in this try (createModel, generateText,
+        // the empty-text check) throws Error instances, so the terminal
+        // failure keeps its original Error shape for the caller.
         if (i === chain.length - 1) throw error;
         await sleep(3000);
       }
