@@ -3,8 +3,11 @@ import type { SendableChannels } from "discord.js";
 
 import { StagedStatus, type StatusMilestone } from "../src/staged-status";
 
-/** Rate-limit-shaped error as discord.js would surface it. */
-const RATE_LIMIT_ERROR = { name: "DiscordAPIError", status: 429, message: "rate limited" };
+/** Rate-limit-shaped error as discord.js would surface it (DiscordAPIError extends Error). */
+const RATE_LIMIT_ERROR = Object.assign(new Error("rate limited"), {
+  name: "DiscordAPIError",
+  status: 429,
+});
 
 interface FakeMessage {
   id: string;
@@ -26,7 +29,7 @@ interface Harness {
  * `edit` records text (after optionally throwing queued failures) and whose
  * `delete` counts deletions.
  */
-function harness(failEdits: unknown[] = []): Harness {
+function harness(failEdits: Error[] = []): Harness {
   const sends: string[] = [];
   const sentMessages: FakeMessage[] = [];
   const edits: string[] = [];
