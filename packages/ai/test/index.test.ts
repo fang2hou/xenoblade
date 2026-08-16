@@ -13,15 +13,15 @@ describe("getModelChain", () => {
   it("returns default generation chain (Luna → DeepSeek)", () => {
     const chain = getModelChain(baseEnv, "generation");
     expect(chain.length).toBeGreaterThanOrEqual(2);
-    expect(chain[0].id).toBe("openai/gpt-5.6-luna");
-    expect(chain[1].id).toBe("deepseek/deepseek-v4-flash-0731");
-    expect(chain[1].providers).toEqual(["DeepSeek", "NovitaAI", "SiliconFlow"]);
+    expect(chain[0]?.id).toBe("openai/gpt-5.6-luna");
+    expect(chain[1]?.id).toBe("deepseek/deepseek-v4-flash-0731");
+    expect(chain[1]?.providers).toEqual(["DeepSeek", "NovitaAI", "SiliconFlow"]);
   });
 
   it("vision chain has MiMo with Xiaomi provider", () => {
     const chain = getModelChain(baseEnv, "vision");
-    expect(chain[0].id).toBe("xiaomi/mimo-v2.5");
-    expect(chain[0].providers).toEqual(["Xiaomi", "NovitaAI"]);
+    expect(chain[0]?.id).toBe("xiaomi/mimo-v2.5");
+    expect(chain[0]?.providers).toEqual(["Xiaomi", "NovitaAI"]);
   });
 
   it("reads from MODEL_CONFIG env var", () => {
@@ -30,7 +30,7 @@ describe("getModelChain", () => {
       MODEL_CONFIG: JSON.stringify({ generation: [{ id: "custom/model" }] }),
     };
     const chain = getModelChain(env, "generation");
-    expect(chain[0].id).toBe("custom/model");
+    expect(chain[0]?.id).toBe("custom/model");
   });
 });
 

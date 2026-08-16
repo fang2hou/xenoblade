@@ -163,7 +163,8 @@ export class StagedStatus {
       return postReply(this.channel, content);
     }
     const chunks = sliceIntoChunks(content, MAX_MESSAGE_LENGTH);
-    if (await this.editPlaceholder(placeholder, chunks[0])) {
+    const head = chunks[0];
+    if (head !== undefined && (await this.editPlaceholder(placeholder, head))) {
       log("staged_placeholder_settled", this.channel.id, { edits: this.edits });
       const posted: Message[] = [placeholder];
       for (const chunk of chunks.slice(1)) posted.push(await this.channel.send(chunk));

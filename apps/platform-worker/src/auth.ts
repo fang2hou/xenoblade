@@ -41,7 +41,7 @@ export function bearerToken(header: string | null): string | null {
     return null;
   }
   const match = /^Bearer\s+(.+)$/i.exec(header);
-  return match === null ? null : match[1];
+  return match?.[1] ?? null;
 }
 
 /**
