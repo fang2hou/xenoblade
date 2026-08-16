@@ -39,7 +39,8 @@ export function loadEnv(): EnvConfig {
   }
 
   // Normalize the Worker base URL by stripping any trailing slashes so endpoint
-  // paths can be concatenated without producing `//`.
+  // paths can be concatenated without producing `//`. The required-vars check
+  // above guarantees WORKER_URL is present and non-empty.
   const workerUrl = process.env.WORKER_URL!.replace(/\/+$/, "");
 
   const mentionRoleIds = (process.env.MENTION_ROLE_IDS ?? "")
@@ -53,6 +54,8 @@ export function loadEnv(): EnvConfig {
     throw new Error(`Invalid HEALTH_PORT: ${String(process.env.HEALTH_PORT)}`);
   }
 
+  // The required-vars check above guarantees every value read here is
+  // present and non-empty.
   return {
     discordBotToken: process.env.DISCORD_BOT_TOKEN!,
     discordApplicationId: process.env.DISCORD_APPLICATION_ID!,

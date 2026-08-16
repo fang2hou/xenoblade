@@ -38,6 +38,8 @@ export class ConversationQueue {
       );
     }
 
+    // Fire-and-forget: drain serializes the container's tasks in the
+    // background (task errors are logged there) while enqueue stays sync.
     void this.drain(containerId);
   }
 
@@ -49,7 +51,8 @@ export class ConversationQueue {
       const queue = this.queues.get(containerId);
       if (!queue) return;
       while (queue.length > 0) {
-        const task = queue.shift()!;
+        const task = queue.shift();
+        if (task === undefined) break;
         try {
           await task();
         } catch (error) {

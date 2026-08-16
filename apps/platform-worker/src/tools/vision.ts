@@ -7,9 +7,10 @@
  * this tool entirely for image understanding.
  */
 import { generateText, jsonSchema, tool } from "ai";
+import type { ToolSet } from "ai";
 import { selectModel } from "@xenoblade/ai";
 
-export function createVisionTool(env: Env) {
+export function createVisionTool(env: Env): ToolSet {
   return {
     vision_describe: tool({
       description:

@@ -84,19 +84,27 @@ async function main(): Promise<void> {
         applicationId: client.user?.id ?? env.discordApplicationId,
       }),
     );
+    // Best-effort registration on ready: the helper swallows its own
+    // failures so a Discord API outage never breaks startup.
     void registerSlashCommands(env);
   });
 
   client.on("messageCreate", (message) => {
+    // Fire-and-forget: the handler catches and logs internally; awaiting
+    // would block the gateway's event dispatch.
     void handleMessageCreate(message, env, queue, client, registry);
   });
 
   client.on("messageReactionAdd", (reaction, user) => {
+    // Fire-and-forget: the handler catches and logs internally; awaiting
+    // would block the gateway's event dispatch.
     void handleReactionAdd(reaction, user, env, queue, client, registry);
   });
 
   client.on("interactionCreate", (interaction) => {
     if (!interaction.isChatInputCommand()) return;
+    // Fire-and-forget: the handler catches and logs internally; awaiting
+    // would block the gateway's event dispatch.
     void handleInteraction(interaction, env);
   });
 
@@ -724,6 +732,8 @@ function registerShutdown(client: Client, server: Server): void {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(JSON.stringify({ event: "shutdown", signal }));
+    // Fire-and-forget: process exit below is driven by server.close (with a
+    // 5s failsafe), not by awaiting the gateway teardown.
     void client.destroy();
     server.close(() => {
       console.log(JSON.stringify({ event: "health_closed" }));
