@@ -101,6 +101,13 @@ async function main(): Promise<void> {
   });
 
   client.on("interactionCreate", (interaction) => {
+    // Receipt log: without it, an interaction that is dropped here (wrong
+    // type, unrouted command) fails silently as "did not respond" in Discord.
+    const command =
+      interaction.isChatInputCommand() || interaction.isContextMenuCommand()
+        ? interaction.commandName
+        : null;
+    console.log(JSON.stringify({ event: "interaction_received", type: interaction.type, command }));
     if (!interaction.isChatInputCommand()) return;
     // Fire-and-forget: the handler catches and logs internally; awaiting
     // would block the gateway's event dispatch.
