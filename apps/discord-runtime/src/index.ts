@@ -32,10 +32,11 @@ import { evaluateTrigger, type TriggerDecision } from "./trigger-policy";
 import { fetchHistory } from "./history";
 import { sendTyping } from "./output";
 import { StagedStatus } from "./staged-status";
-import { clearContext, generate } from "./ai-client";
+import { generate } from "./ai-client";
 import { handleDmMessage } from "./dm-commands";
 import { ConversationQueue } from "./conversation-queue";
 import { registerSlashCommands } from "./slash-commands";
+import { handleClearContext } from "./clear-context";
 import { handleUsageCommand } from "./usage";
 import {
   DELETE_EMOJI,
@@ -50,8 +51,6 @@ import { renderReply } from "./citations";
 
 const FAILURE_REPLY = "这次处理失败了，请稍后重试。";
 const RATE_LIMIT_REPLY = "请求过于频繁，请稍后再试。";
-const CLEAR_SUCCESS_REPLY = "已清除你在此频道的对话上下文。";
-const CLEAR_FAILURE_REPLY = "清除上下文失败，请稍后重试。";
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -663,47 +662,6 @@ async function handleInteraction(
         error: String(error),
       }),
     );
-  }
-}
-
-/** /clear-context → call the Worker context-clear endpoint. */
-async function handleClearContext(
-  interaction: ChatInputCommandInteraction,
-  env: EnvConfig,
-): Promise<void> {
-  const guildId = interaction.guildId ?? "@me";
-  const scopeId = interaction.guildId ?? "dm";
-  const channel = interaction.channel;
-
-  let containerId: string;
-  if (channel && channel.isThread()) {
-    containerId = `discord:${guildId}:${channel.parentId ?? channel.id}:${channel.id}`;
-  } else {
-    containerId = `discord:${guildId}:${interaction.channelId ?? ""}`;
-  }
-
-  try {
-    const result = await clearContext(
-      {
-        userId: interaction.user.id,
-        scopeId,
-        containerId,
-        scope: "user",
-      },
-      env.workerUrl,
-      env.internalApiToken,
-    );
-    await interaction.reply(result.status === "ok" ? CLEAR_SUCCESS_REPLY : CLEAR_FAILURE_REPLY);
-  } catch (error) {
-    console.log(
-      JSON.stringify({
-        event: "clear_context_error",
-        userId: interaction.user.id,
-        containerId,
-        error: String(error),
-      }),
-    );
-    await interaction.reply(CLEAR_FAILURE_REPLY).catch(() => undefined);
   }
 }
 
