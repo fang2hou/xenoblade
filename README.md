@@ -1,135 +1,112 @@
 # Xenoblade
 
-A natural Discord bot powered by LLMs — running entirely on Cloudflare Workers with D1, Durable Objects, and OpenRouter.
+> A natural-language Discord bot split across two tiers: a self-hosted discord.js runtime that owns the Discord connection, and a Cloudflare Worker that owns AI generation, tools, and data.
+
+## Overview
+
+- **What it does**: an LLM-powered Discord assistant. Mentions, role mentions, replies, and slash commands trigger conversation-aware answers with web search, page reading, vision, and per-user memory — budget-bounded and citation-backed.
+- **Who uses it**: Discord communities operated by the project maintainer (single-operator deployment today).
+- **Current status**: actively developed. Core conversation, search, vision, memory, and DM opt-in chat are live; voice is not yet wired (see [Features](#features)).
+
+## Purpose
+
+- **Problem**: give a Discord server a genuinely useful AI assistant — context-aware, cost-bounded, and privacy-safe in DMs — without leaking credentials or private content across tiers.
+- **Scope boundaries**: Discord only (no cross-platform abstraction); no token streaming; no self-hosted model inference (all models via OpenRouter); voice support is enabled by the topology but not yet implemented.
 
 ## Features
 
-- **Natural conversation** — replies in-channel (no forced thread creation), always reads conversation context, matches the user's language
-- **Vision** — sees images in messages and Discord message links
-- **Voice** — transcribes audio messages via `openai/gpt-transcribe`
-- **Web search** — Brave Search tool for real-time information
-- **Per-user context** — isolated conversation state with `/clear-context`
-- **Bare @mention fallback** — send a message, then `@bot` alone to trigger it
-- **Retry with backoff** — generation retries up to 3 times on transient failures
+- **Natural conversation** — `@bot <message>`, watched-role mentions, replies to the bot, and bare `@bot` (falls back to your most recent message); replies in-channel with conversation context, always matching the user's language.
+- **Reaction controls** — 🔁 regenerate and 🗑️ delete on the bot's replies; only the triggering user can act (ADR-003 protocol, durable regenerate claim).
+- **Structured citations** — inline `[n]` markers with a canonical numbered **Sources** footer built from actual search results.
+- **Staged status** — long generations escalate a status placeholder at coarse milestones (hard cap: 4 edits per generation, ADR-003 amendment).
+- **Slash commands** — `/status` (runtime status), `/clear-context` (reset your context in the channel), `/usage` (ephemeral 24h per-user and per-server token/tool summary).
+- **DM opt-in chat** — private conversations with the bot behind an explicit per-user opt-in (`/chat on`), stored in a DM-isolated context scope that can never collide with guild data (ADR-011); off by default, `/chat off` also wipes the DM context.
+- **DM control plane** — DMs are primarily a configuration console: `/persona`, `/preference`, `/memory`, `/learn`, `/help` manage your per-user settings without any AI generation.
+- **Per-user memory** — persona, preferences, and facts (`user_memory`) are injected only into the triggering user's prompts; auto-memory extraction is consent-gated: opt-in plus pending/confirm review, never from DMs (ADR-012; extraction pipeline not yet implemented — the consent contract is).
+- **Web search** — `web_search` (Brave Search) and `web_answer` (Brave Answer) as first-class model tools with graceful degradation.
+- **Page reading** — `read_url` fetches a page, strips boilerplate, and compresses long content through the summarization model before it reaches the generation model.
+- **Vision** — image attachments are seen natively by vision-capable models; a `vision_describe` tool gives text-only fallback models the same ability.
+- **MCP** — remote MCP servers over Streamable HTTP (context7 always; GitHub MCP when a token is configured), read-only scope (ADR-008).
+- **Voice** — not yet wired: the runtime topology supports it (ADR-002) and a transcription model role (`openai/gpt-transcribe`) is configured, but no voice/audio handling ships today.
+- **Budget guardrails** — rolling 24h token budget per user, message dedup, and per-container serialization of generations.
 
 ## Architecture
 
+Two tiers, one direction of trust:
+
 ```
-Discord Gateway ──► Worker (/webhooks/discord)
-                       │
-                       ├── @xenoblade/ai    model selection + prompt construction
-                       ├── @xenoblade/db    D1: budget, dedup, user context state
-                       ├── context          history fetching + container isolation
-                       ├── prompt           cache-friendly message building
-                       ├── tools            Brave Search
-                       ├── transcribe       voice → text (gpt-transcribe)
-                       └── discord-links    message link unfurling (text + images)
+Discord ←→ Discord Runtime (self-hosted, discord.js, Docker)
+                 │ outbound HTTPS + bearer token only
+                 ▼
+            Platform Worker (Cloudflare)
+                 ├─ AI generation (OpenRouter, model chains per role)
+                 ├─ Tools: web_search / web_answer / read_url / vision / MCP
+                 ├─ D1: config, budget, dedup, memory, telemetry
+                 └─ /internal/v1/* — the only exposed surface
 ```
 
-## Quick Start
+The Runtime owns the Discord token and never accepts inbound traffic; the Worker owns AI keys and never calls back. Invariants and decision records: [ARCHITECTURE.md](./ARCHITECTURE.md). Day-to-day workflow: [DEVELOPMENT.md](./DEVELOPMENT.md). Contributions: [CONTRIBUTING.md](./CONTRIBUTING.md).
 
-### Prerequisites
+## Setup
 
-- Node.js 24+, pnpm 11+
-- Cloudflare account with Wrangler authenticated
-- Discord application with bot token, public key, and application ID
-- OpenRouter API key
-- Brave Search API key (optional, for web search)
-
-### Setup
+Requires [mise](https://mise.jdx.dev/), a Cloudflare account with Wrangler authenticated, a Discord application (bot token + application ID), and an OpenRouter API key. Brave keys are optional (search tools degrade gracefully without them).
 
 ```bash
+mise install                 # node, pnpm, prek, cocogitto
 pnpm install
 
-# Configure secrets
-cp .dev.vars.example apps/bot-worker/.dev.vars
-# Fill in your Discord, OpenRouter, and gateway tokens
+# Worker secrets for local dev (wrangler reads apps/platform-worker/.dev.vars)
+cp .dev.vars.example apps/platform-worker/.dev.vars
+#   fill: INTERNAL_API_TOKEN, OPENROUTER_API_KEY
+#   optional: BRAVE_SEARCH_API_KEY, BRAVE_ANSWER_API_KEY
 
-# Apply D1 migrations locally
-pnpm --filter @xenoblade/bot-worker db:migrate:local
-
-# Generate Worker types
-pnpm generate-types
-
-# Start dev server
-pnpm dev
+pnpm --filter @xenoblade/platform-worker db:migrate:local   # local D1 schema
+pnpm --filter @xenoblade/platform-worker types              # generate Worker types
+pnpm dev                                                   # wrangler dev (Worker)
 ```
 
-### Deploy
+To run the Discord Runtime locally as well (needs a real Discord bot token):
 
 ```bash
-# Remote D1 migration
-pnpm --filter @xenoblade/bot-worker db:migrate
-
-# Set secrets
-echo "YOUR_DISCORD_TOKEN" | pnpm --filter @xenoblade/bot-worker exec wrangler secret put DISCORD_BOT_TOKEN
-echo "YOUR_OPENROUTER_KEY" | pnpm --filter @xenoblade/bot-worker exec wrangler secret put OPENROUTER_API_KEY
-echo "YOUR_BRAVE_KEY" | pnpm --filter @xenoblade/bot-worker exec wrangler secret put BRAVE_SEARCH_API_KEY
-# ... repeat for DISCORD_PUBLIC_KEY, DISCORD_APPLICATION_ID, GATEWAY_CONTROL_TOKEN, GATEWAY_STATUS_TOKEN
-
-# Deploy
-pnpm --filter @xenoblade/bot-worker exec wrangler deploy
-
-# Register slash commands
-DISCORD_APPLICATION_ID=... DISCORD_BOT_TOKEN=... node scripts/register-status-command.mjs
-
-# Connect the Discord Gateway
-curl -X POST -H "Authorization: Bearer $GATEWAY_CONTROL_TOKEN" \
-  https://your-worker.workers.dev/gateway/connect
+export DISCORD_BOT_TOKEN=... DISCORD_APPLICATION_ID=... \
+       WORKER_URL=http://localhost:8787 INTERNAL_API_TOKEN=...
+pnpm dev:runtime
 ```
 
-## Configuration
-
-Secrets are injected via `wrangler secret put` (remote) or `.dev.vars` (local):
-
-| Secret                   | Required | Description                               |
-| ------------------------ | -------- | ----------------------------------------- |
-| `DISCORD_BOT_TOKEN`      | Yes      | Discord bot token                         |
-| `DISCORD_PUBLIC_KEY`     | Yes      | Discord application public key            |
-| `DISCORD_APPLICATION_ID` | Yes      | Discord application ID                    |
-| `OPENROUTER_API_KEY`     | Yes      | OpenRouter API key                        |
-| `GATEWAY_CONTROL_TOKEN`  | Yes      | Auth token for gateway connect/disconnect |
-| `GATEWAY_STATUS_TOKEN`   | Yes      | Auth token for gateway status             |
-| `BRAVE_SEARCH_API_KEY`   | No       | Brave Search API key (enables web search) |
-
-Model and provider are configured in `wrangler.jsonc`:
-
-```jsonc
-"vars": {
-  "AI_PROVIDER": "openrouter",
-  "AI_MODEL": "openai/gpt-5.6-luna"
-}
-```
+Deployment (CI-driven, D1 migration first) is documented in [DEVELOPMENT.md](./DEVELOPMENT.md#deployment).
 
 ## Usage
 
-| Action                 | Description                                            |
-| ---------------------- | ------------------------------------------------------ |
-| `@bot <message>`       | Mention with text — full conversation context included |
-| `@bot` (bare)          | Read and respond to your most recent prior message     |
-| Reply to bot           | Continue a conversation thread                         |
-| `/status`              | Check gateway status                                   |
-| `/clear-context`       | Clear your conversation context in the current channel |
-| Voice message + `@bot` | Transcribe via gpt-transcribe, then respond            |
-| Image + `@bot`         | Bot sees and describes the image                       |
+| Action                                             | Effect                                                                     |
+| -------------------------------------------------- | -------------------------------------------------------------------------- |
+| `@bot <message>`                                   | Reply with full conversation context                                       |
+| `@bot` (bare)                                      | Respond to your most recent prior message in the channel                   |
+| Mention a watched role                             | Same as a direct mention (roles set via `MENTION_ROLE_IDS` on the runtime) |
+| Reply to a bot message                             | Continue that conversation                                                 |
+| React 🔁 / 🗑️ on a reply                           | Regenerate / delete (triggering user only)                                 |
+| `/status`                                          | Runtime status                                                             |
+| `/clear-context`                                   | Clear your conversation context in the current channel                     |
+| `/usage`                                           | Ephemeral 24h usage and token summary (you + this server)                  |
+| DM: `/chat on` then text                           | Private opted-in conversation in a DM-isolated scope (ADR-011)             |
+| DM: `/persona`, `/preference`, `/memory`, `/learn` | Per-user configuration console (no AI generation)                          |
 
 The bot always replies in the user's language and switches when asked.
 
-## Development
+## Language Policy
 
-```bash
-pnpm test                                         # unit tests
-pnpm --filter @xenoblade/bot-worker test:worker   # worker integration tests
-pnpm typecheck                                    # TypeScript check
-pnpm lint                                         # oxlint
-pnpm format                                       # oxfmt
-```
+| Item                      | Value                                                             |
+| ------------------------- | ----------------------------------------------------------------- |
+| Bot conversation replies  | Match the user's language (enforced in the system prompt)         |
+| Primary UI literals       | Chinese (Simplified) — DM control-plane replies and error notices |
+| Additional UI languages   | English — `/usage` summary labels                                 |
+| Code / comments / commits | Always English                                                    |
 
-## Tech Stack
+Do not infer UI language from conversation language; do not switch UI literals because a conversation switched.
 
-- **Runtime**: Cloudflare Workers (with `nodejs_compat`)
-- **AI**: OpenRouter → GPT-5.6 Luna (chat) + GPT Transcribe (voice)
-- **Database**: Cloudflare D1 (SQLite)
-- **State**: Durable Objects (Chat state + Discord Gateway)
-- **Language**: TypeScript (strict, ESM)
-- **Tooling**: pnpm, oxlint, oxfmt, Vitest
+## Environment Requirements
+
+- **Runtimes**: managed by mise (see `mise.toml`); Node and pnpm versions come from `mise.toml` + `package.json` `packageManager`.
+- **Worker secrets** (`wrangler secret put`, required unless noted): `INTERNAL_API_TOKEN`, `OPENROUTER_API_KEY`; optional: `BRAVE_SEARCH_API_KEY`, `BRAVE_ANSWER_API_KEY`, `GITHUB_MCP_TOKEN`, `ARTIFICIAL_ANALYSIS_API_KEY`.
+- **Runtime environment** (host `.env`): `DISCORD_BOT_TOKEN`, `DISCORD_APPLICATION_ID`, `WORKER_URL`, `INTERNAL_API_TOKEN`; optional: `MENTION_ROLE_IDS`, `HEALTH_PORT` (default 8397).
+- **External services**: Discord (application + bot), Cloudflare (Workers, D1), OpenRouter, Brave APIs (optional), a self-hosted Docker host with its own registry for the runtime, MCP servers (context7; GitHub MCP optional), Artificial Analysis (optional).
+- **Model routing**: `MODEL_CONFIG` Worker var — JSON of model chains per role (`generation`, `summarization`, `transcription`, `vision`); defaults live in `packages/ai`.
