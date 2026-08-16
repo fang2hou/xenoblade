@@ -10,6 +10,7 @@ import type {
 
 import {
   claimMessage,
+  claimRegenerate,
   finishGeneration,
   GenerationBudgetExceededError,
   getRuntimeConfig,
@@ -66,9 +67,14 @@ export async function generate(env: Env, req: GenerationRequest): Promise<Genera
   const now = Date.now();
   const requestId = crypto.randomUUID();
 
-  // 1. Dedup
+  // 1. Dedup — a regenerate claims the once-per-original-message slot
+  // instead of the message id itself (already claimed by the original run).
   try {
-    if (!(await claimMessage(env.DB, req.messageId, now))) {
+    const claimed =
+      req.regenerateOf !== undefined
+        ? await claimRegenerate(env.DB, req.regenerateOf, now)
+        : await claimMessage(env.DB, req.messageId, now);
+    if (!claimed) {
       return { status: "rejected", requestId, code: "duplicate" };
     }
   } catch (error) {

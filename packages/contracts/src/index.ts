@@ -74,6 +74,12 @@ export interface GenerationRequest {
   attachments: DiscordAttachment[];
   /** When true, hints the pipeline that the user is asking about recent events. */
   searchHint?: boolean;
+  /**
+   * When set, this request regenerates the reply for the given original
+   * message id. Dedup claims the once-per-message regenerate slot instead of
+   * `messageId`, so exactly one re-run is allowed per original trigger.
+   */
+  regenerateOf?: string;
 }
 
 export interface GenerationUsage {
