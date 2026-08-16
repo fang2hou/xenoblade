@@ -6,7 +6,8 @@
   "scripts": {
     "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --sourcemap --banner:js=\"import {createRequire} from 'module';const require=createRequire(import.meta.url);\"",
     "start": "node --enable-source-maps dist/index.js",
-    "dev": "tsx src/index.ts"
+    "dev": "tsx src/index.ts",
+    "test": "vitest run"
   },
   "dependencies": {
     "@xenoblade/contracts": "workspace:*",
