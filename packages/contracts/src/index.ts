@@ -180,6 +180,32 @@ export type MemoryResponse =
   | { status: "ok"; memories: UserMemory[] }
   | { status: "error"; code: string };
 
+// ── User Settings ─────────────────────────────────────────────────────────
+
+/** Per-user opt-in flags (ADR-011 DM chat, ADR-012 auto memory). Default OFF. */
+export interface UserSettings {
+  chatOptin: boolean;
+  learnOptin: boolean;
+  /** When the opt-in was last enabled; null while off or never enabled. */
+  chatOptinAt: number | null;
+  learnOptinAt: number | null;
+}
+
+export type SettingsRequest =
+  | { op: "get"; userId: string }
+  | {
+      op: "set";
+      userId: string;
+      /** Enable (`true`) or disable (`false`) DM chat; omit to leave unchanged. */
+      chatOptin?: boolean;
+      /** Enable (`true`) or disable (`false`) auto memory; omit to leave unchanged. */
+      learnOptin?: boolean;
+    };
+
+export type SettingsResponse =
+  | { status: "ok"; settings: UserSettings }
+  | { status: "error"; code: string };
+
 // ── Context Clear ─────────────────────────────────────────────────────────
 
 export interface ContextClearRequest {

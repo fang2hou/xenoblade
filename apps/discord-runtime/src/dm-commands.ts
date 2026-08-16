@@ -2,7 +2,8 @@ import type { Message, SendableChannels } from "discord.js";
 import type { MemoryCategory, MemoryResponse, UserMemory } from "@xenoblade/contracts";
 
 import type { EnvConfig } from "./env";
-import { memoryOp } from "./ai-client";
+import { clearContext, memoryOp, settingsOp } from "./ai-client";
+import { containerIdFromMessage } from "./conversation-scope";
 import { postReply } from "./output";
 
 const HELP_TEXT = [
@@ -18,6 +19,9 @@ const HELP_TEXT = [
   "",
   "/memory show — 查看全部记忆",
   "/memory clear — 清除全部记忆",
+  "",
+  "/chat on|off — 开启/关闭私聊对话（默认关闭）",
+  "/learn on|off — 开启/关闭自动记忆学习（默认关闭）",
   "/help — 显示此帮助",
 ].join("\n");
 
@@ -52,6 +56,12 @@ export async function handleDmMessage(message: Message, env: EnvConfig): Promise
         return;
       case "/memory":
         await handleMemoryCommand(message, channel, env, tokens);
+        return;
+      case "/chat":
+        await handleChatCommand(message, env, tokens);
+        return;
+      case "/learn":
+        await handleLearnCommand(message, env, tokens);
         return;
       default:
         // Non-command DM text → help, no AI call.
@@ -148,6 +158,118 @@ async function handleMemoryCommand(
   }
 
   await safeReply(message, "未知子命令。用法：/memory show|clear");
+}
+
+/**
+ * Handle `/chat on|off` — toggle the DM chat opt-in (ADR-011). Opting out also
+ * resets the user's DM conversation context.
+ */
+async function handleChatCommand(
+  message: Message,
+  env: EnvConfig,
+  tokens: string[],
+): Promise<void> {
+  const userId = message.author.id;
+  const sub = (tokens[1] ?? "").toLowerCase();
+
+  if (sub === "on" || sub === "off") {
+    const enable = sub === "on";
+    const response = await settingsOp(
+      { op: "set", userId, chatOptin: enable },
+      env.workerUrl,
+      env.internalApiToken,
+    );
+    if (response.status === "error") {
+      await safeReply(message, GENERIC_ERROR_REPLY);
+      return;
+    }
+    if (enable) {
+      await safeReply(
+        message,
+        "已开启私聊对话。现在直接发消息即可与我对话，/chat off 可随时关闭。",
+      );
+      return;
+    }
+
+    // Opting out also resets the DM conversation context (ADR-011 §3),
+    // best-effort: a failed clear is surfaced with a /clear-context hint.
+    let clearNote = "，并已清除 DM 对话上下文。";
+    try {
+      const cleared = await clearContext(
+        {
+          userId,
+          scopeId: "dm",
+          containerId: containerIdFromMessage(message),
+          scope: "user",
+        },
+        env.workerUrl,
+        env.internalApiToken,
+      );
+      if (cleared.status === "error") {
+        clearNote = "。清除 DM 对话上下文失败，可用 /clear-context 重试。";
+      }
+    } catch {
+      clearNote = "。清除 DM 对话上下文失败，可用 /clear-context 重试。";
+    }
+    await safeReply(message, `已关闭私聊对话${clearNote}`);
+    return;
+  }
+
+  const state = await optinState(message, env, "chat");
+  await safeReply(message, `私聊对话当前${state}。用法：/chat on|off`);
+}
+
+/** Handle `/learn on|off` — toggle the auto-memory opt-in (ADR-012). */
+async function handleLearnCommand(
+  message: Message,
+  env: EnvConfig,
+  tokens: string[],
+): Promise<void> {
+  const userId = message.author.id;
+  const sub = (tokens[1] ?? "").toLowerCase();
+
+  if (sub === "on" || sub === "off") {
+    const response = await settingsOp(
+      { op: "set", userId, learnOptin: sub === "on" },
+      env.workerUrl,
+      env.internalApiToken,
+    );
+    if (response.status === "error") {
+      await safeReply(message, GENERIC_ERROR_REPLY);
+      return;
+    }
+    await safeReply(
+      message,
+      sub === "on"
+        ? "已开启自动学习。开启后仅从你在服务器频道的对话中提取记忆候选，并经你确认后保存（功能上线后生效）。"
+        : "已关闭自动学习。",
+    );
+    return;
+  }
+
+  const state = await optinState(message, env, "learn");
+  await safeReply(message, `自动学习当前${state}。用法：/learn on|off`);
+}
+
+/** Resolve the current on/off label for an opt-in flag; "未知" on read failure. */
+async function optinState(
+  message: Message,
+  env: EnvConfig,
+  flag: "chat" | "learn",
+): Promise<string> {
+  try {
+    const response = await settingsOp(
+      { op: "get", userId: message.author.id },
+      env.workerUrl,
+      env.internalApiToken,
+    );
+    const on =
+      response.status === "ok" &&
+      (flag === "chat" ? response.settings.chatOptin : response.settings.learnOptin);
+    return on ? "已开启" : "未开启";
+  } catch {
+    return "状态未知";
+  }
 }
 
 /** Filter a get-response to a single category; empty on error. */

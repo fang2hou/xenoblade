@@ -6,6 +6,8 @@ import type {
   MemoryRequest,
   MemoryResponse,
   UsageSummaryResponse,
+  SettingsRequest,
+  SettingsResponse,
 } from "@xenoblade/contracts";
 
 /** Timeout for Worker generation calls (AI inference can be slow). */
@@ -70,6 +72,20 @@ export function fetchUsage(
   return requestJson<UsageSummaryResponse>(
     `${workerUrl}/internal/v1/usage?${query}`,
     { method: "GET", headers: { Authorization: `Bearer ${token}` } },
+    CONTROL_TIMEOUT_MS,
+  );
+}
+
+/** Read or update per-user opt-in settings on the Worker. */
+export function settingsOp(
+  req: SettingsRequest,
+  workerUrl: string,
+  token: string,
+): Promise<SettingsResponse> {
+  return postJson<SettingsResponse>(
+    `${workerUrl}/internal/v1/settings`,
+    req,
+    token,
     CONTROL_TIMEOUT_MS,
   );
 }
