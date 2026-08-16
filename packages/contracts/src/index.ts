@@ -97,6 +97,9 @@ export type GenerationResult =
       requestId: string;
       reply: string;
       usage: GenerationUsage;
+      /** Citation sources captured from search tool invocations, in the
+       * order the model saw them; `index` matches inline [n] markers. */
+      sources: GenerationSource[];
     }
   | {
       status: "rejected";
@@ -110,6 +113,13 @@ export type GenerationResult =
       message: string;
       retryable: boolean;
     };
+
+/** One citation source, numbered in the order the model saw search results. */
+export interface GenerationSource {
+  index: number;
+  title: string;
+  url: string;
+}
 
 // ── Usage ─────────────────────────────────────────────────────────────────
 
