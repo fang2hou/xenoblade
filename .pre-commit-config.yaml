@@ -16,15 +16,21 @@ repos:
 
   - repo: local
     hooks:
+      - id: check
+        name: project checks (mise check)
+        entry: mise run check
+        language: system
+        pass_filenames: false
+
       - id: cog-verify
         name: conventional commit
         entry: cog verify --file
         language: system
         stages: [commit-msg]
 
-      - id: pnpm-test
-        name: pnpm test
-        entry: pnpm test
+      - id: test
+        name: project tests (mise test)
+        entry: mise run test
         language: system
         pass_filenames: false
         stages: [pre-push]
