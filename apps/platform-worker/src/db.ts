@@ -124,6 +124,29 @@ export async function claimMessage(
   return res.meta.changes > 0;
 }
 
+/**
+ * Claim the single allowed regenerate for an original message. Returns true
+ * the first time a regenerate is requested for that message, false after.
+ *
+ * This is the durable bound on reaction-driven re-runs: the Runtime's reply
+ * registry is in-memory and dies with the process, but `processed_messages`
+ * persists, so "max 1 regenerate per reply" survives restarts and races.
+ */
+export async function claimRegenerate(
+  db: D1Database,
+  originalMessageId: string,
+  now: number,
+): Promise<boolean> {
+  const claimId = `regen:${originalMessageId}`;
+  const res = await db
+    .prepare(
+      "INSERT OR IGNORE INTO processed_messages (message_id, claim_key, created_at) VALUES (?1, ?2, ?3)",
+    )
+    .bind(claimId, claimId, now)
+    .run();
+  return res.meta.changes > 0;
+}
+
 // ── Generation budget ─────────────────────────────────────────────────────
 
 /**
