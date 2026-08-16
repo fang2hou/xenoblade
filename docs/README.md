@@ -16,6 +16,7 @@ ADRs capture significant architectural decisions, their context, and consequence
 | [008](adr/008-mcp-integration.md)          | MCP Integration Scope                | Accepted |
 | [009](adr/009-fresh-database.md)           | Fresh D1 Database                    | Accepted |
 | [010](adr/010-cicd-docker-ssh.md)          | CI/CD with Docker Registry and SSH   | Accepted |
+| [011](adr/011-dm-chat-optin.md)           | Opt-in DM Conversations              | Accepted |
 
 ## ADR Format
 
