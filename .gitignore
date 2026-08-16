@@ -16,3 +16,4 @@ apps/platform-worker/tsconfig.json
 
 # OS files
 .DS_Store
+*.tsbuildinfo

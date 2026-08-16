@@ -1,5 +1,30 @@
 [tools]
-node = "latest"
+node = "24"
 pnpm = "latest"
 prek = "latest"
 cocogitto = "latest"
+
+[tasks.lint]
+run = "pnpm lint"
+
+[tasks.format]
+run = "pnpm format:check"
+
+[tasks.typecheck]
+run = "pnpm typecheck"
+
+[tasks.check]
+depends = ["lint", "format", "typecheck"]
+
+[tasks.test]
+depends = ["check"]
+run = "pnpm test"
+
+[tasks.build]
+run = "pnpm -r build"
+
+[tasks.dev]
+run = "pnpm dev"
+
+[tasks.deploy]
+run = "pnpm deploy"
