@@ -1,6 +1,6 @@
 # ADR-003: Single-Shot Generation Protocol
 
-- **Status**: Accepted
+- **Status**: Accepted (amended 2026-08-16 — see [Amendment](#amendment-2026-08-16))
 - **Date**: 2026-08-12
 
 ## Context
@@ -44,3 +44,44 @@ Adopt a single-shot response protocol:
 **Neutral:**
 
 - Future versions could add a single mid-generation "still working" typing refresh if latency exceeds a threshold, without adopting full streaming.
+
+## Amendment (2026-08-16)
+
+This amendment records accepted drift and authorizes one bounded addition to
+the protocol. The original decision above remains otherwise binding.
+
+### Accepted drift: typing renewal
+
+Commit `6068f97` ("feat: keep typing indicator alive during generation") made
+the Runtime refresh the typing indicator every 8 seconds for the duration of a
+generation, superseding Decision point 6 ("No periodic typing renewal"). This
+follows the direction already noted under "Neutral" above and is hereby
+recorded as accepted practice.
+
+### New authorization: staged status messages
+
+Long generations previously offered no feedback once the typing indicator
+became routine. The Runtime may now maintain a staged status placeholder,
+under hard constraints:
+
+1. A single placeholder message may be posted when a generation is still
+   running after ~8 seconds.
+2. The placeholder is edited **only** at coarse elapsed-time milestones
+   (8s / 20s / 40s / 90s after generation start) to escalate the status text.
+3. Hard cap: **4 edits per generation in total** (escalations plus the final
+   replacement). Escalations stop at 3 edits so the final replacement always
+   fits within the cap; the placeholder is never edited otherwise.
+4. **No token deltas** are transmitted between the Worker and the Runtime,
+   and there is **no per-chunk streaming**: the Worker protocol and the
+   single-request/single-response contract are unchanged. All staging logic
+   is Runtime-side timing only.
+5. When the result (or failure reply) arrives, it replaces the placeholder by
+   editing it; continuation chunks beyond Discord's 2000-character limit are
+   posted as new messages. Silent rejections delete the placeholder. A stale
+   placeholder must never remain.
+6. Edits respect Discord rate limits (single retry with backoff on `429`).
+
+Decision point 5 ("No placeholder messages") is superseded by this amendment
+within the bounds above. The single-shot Worker protocol (points 1–4) remains
+binding: the Worker still runs `generateText` and returns one complete
+`GenerationResult`.
