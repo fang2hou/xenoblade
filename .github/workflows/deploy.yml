@@ -1,64 +1,53 @@
-name: CI
+name: Deploy
 
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
     inputs:
       target:
-        description: "Deploy target (main pushes only)"
+        description: "Deploy target"
         required: true
         default: all
         type: choice
         options: [all, worker, runtime]
 
+permissions:
+  contents: read
+
 concurrency:
-  group: ci-${{ github.ref }}
+  group: deploy-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  DOCKER_REGISTRY: ${{ secrets.DOCKER_REGISTRY_URL }}
-
 jobs:
-  # ── Stage 1: Check ──────────────────────────────────────────────────
-  check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - uses: jdx/mise-action@v4
-
-      - run: pnpm install --frozen-lockfile
-      - run: prek run --all-files
-      - name: Generate Worker types
-        working-directory: apps/platform-worker
-        run: pnpm exec wrangler types
-      - run: pnpm lint
-      - run: pnpm test
-
-  # ── Stage 2a: Deploy Worker (Cloudflare) ────────────────────────────
   deploy-worker:
-    needs: check
+    name: Deploy Platform Worker
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: github.ref == 'refs/heads/main' && (github.event.inputs.target != 'runtime' || github.event_name == 'push')
     steps:
-      - uses: actions/checkout@v7
+      - name: Check out repository
+        uses: actions/checkout@v7
 
-      - uses: jdx/mise-action@v4
+      - name: Set up toolchain (mise)
+        uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4.2.5
 
-      - run: pnpm install --frozen-lockfile
+      - name: Install dependencies (pnpm)
+        run: pnpm install --frozen-lockfile
 
-      - name: Deploy Platform Worker
+      - name: Apply D1 migrations
+        working-directory: apps/platform-worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: pnpm exec wrangler d1 migrations apply xenoblade --remote
+
+      - name: Deploy Worker
         working-directory: apps/platform-worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: pnpm exec wrangler deploy
 
-      - name: Verify health
+      - name: Verify Worker health
         env:
           INTERNAL_API_TOKEN: ${{ secrets.INTERNAL_API_TOKEN }}
         run: |
@@ -68,33 +57,39 @@ jobs:
           echo "Worker status: $STATUS"
           [ "$STATUS" = "ok" ] || exit 1
 
-  # ── Stage 2b: Deploy Runtime (Gateway host) ─────────────────────────
   deploy-runtime:
-    needs: check
+    name: Deploy Discord Runtime
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     if: github.ref == 'refs/heads/main' && (github.event.inputs.target != 'worker' || github.event_name == 'push')
     steps:
-      - uses: actions/checkout@v7
+      - name: Check out repository
+        uses: actions/checkout@v7
 
-      - uses: jdx/mise-action@v4
+      - name: Set up toolchain (mise)
+        uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4.2.5
 
-      - run: pnpm install --frozen-lockfile
+      - name: Install dependencies (pnpm)
+        run: pnpm install --frozen-lockfile
 
       - name: Bundle discord-runtime
         run: pnpm --filter @xenoblade/discord-runtime build
 
-      - uses: docker/setup-qemu-action@v4
-      - uses: docker/setup-buildx-action@v4
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
-      - name: Registry login
-        uses: docker/login-action@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to container registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ secrets.DOCKER_REGISTRY_URL }}
           username: ${{ secrets.DOCKER_REGISTRY_USER }}
           password: ${{ secrets.DOCKER_REGISTRY_PASS }}
 
       - name: Build and push image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: apps/discord-runtime
           platforms: linux/arm64
@@ -105,8 +100,8 @@ jobs:
           cache-from: type=registry,ref=${{ secrets.DOCKER_REGISTRY_URL }}/xenoblade/discord-runtime:buildcache
           cache-to: type=registry,ref=${{ secrets.DOCKER_REGISTRY_URL }}/xenoblade/discord-runtime:buildcache,mode=max
 
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1
+      - name: Deploy runtime via SSH
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         with:
           host: ${{ secrets.GATEWAY_HOST }}
           username: ${{ secrets.GATEWAY_USER }}
