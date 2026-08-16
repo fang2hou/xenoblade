@@ -29,10 +29,16 @@ const GENERIC_ERROR_REPLY = "命令执行失败，请稍后重试。";
 const MEMORY_ERROR_REPLY = "读取记忆失败，请稍后重试。";
 
 /**
- * Route a DM message to the control-plane command handler. DMs NEVER reach the
- * AI generation pipeline. Unknown commands and plain DM text reply with help.
+ * Route a DM message. Control-plane commands ALWAYS take routing priority
+ * (ADR-011 §2). Non-command text reaches the AI generation pipeline — via
+ * `enqueueGeneration` — only for chat-opted-in users; everyone else gets the
+ * help message.
  */
-export async function handleDmMessage(message: Message, env: EnvConfig): Promise<void> {
+export async function handleDmMessage(
+  message: Message,
+  env: EnvConfig,
+  enqueueGeneration: (message: Message) => void,
+): Promise<void> {
   if (message.author.bot) return;
 
   // Only sendable channels can receive replies; bail silently otherwise.
@@ -64,7 +70,11 @@ export async function handleDmMessage(message: Message, env: EnvConfig): Promise
         await handleLearnCommand(message, env, tokens);
         return;
       default:
-        // Non-command DM text → help, no AI call.
+        // Non-command DM text → generation for opted-in users, else help.
+        if (await isChatOptedIn(message.author.id, env)) {
+          enqueueGeneration(message);
+          return;
+        }
         await postReply(channel, HELP_TEXT);
     }
   } catch (error) {
@@ -77,6 +87,17 @@ export async function handleDmMessage(message: Message, env: EnvConfig): Promise
       }),
     );
     await safeReply(message, GENERIC_ERROR_REPLY);
+  }
+}
+
+/** True only when the DM chat opt-in is confirmed readable and on (fail closed). */
+async function isChatOptedIn(userId: string, env: EnvConfig): Promise<boolean> {
+  try {
+    const response = await settingsOp({ op: "get", userId }, env.workerUrl, env.internalApiToken);
+    return response.status === "ok" && response.settings.chatOptin;
+  } catch (error) {
+    console.log(JSON.stringify({ event: "dm_optin_check_error", userId, error: String(error) }));
+    return false;
   }
 }
 
