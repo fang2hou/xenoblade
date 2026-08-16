@@ -4,12 +4,14 @@ import type {
   HealthResponse,
   MemoryRequest,
   UsageSummaryResponse,
+  SettingsRequest,
 } from "@xenoblade/contracts";
 
 import { isInternalAuthorized } from "./auth";
 import { clearUserContext, getUsageSummary } from "./db";
 import { generate } from "./generation";
 import { handleMemory } from "./memory";
+import { handleSettings } from "./settings";
 
 const INTERNAL_PREFIX = "/internal/v1/";
 
@@ -116,6 +118,15 @@ export default {
         return json({ status: "error", code: "invalid_body" }, 400);
       }
       return json(await handleMemory(env.DB, req));
+    }
+
+    // POST /internal/v1/settings
+    if (request.method === "POST" && path === "/internal/v1/settings") {
+      const req = await readJson<SettingsRequest>(request);
+      if (req === null) {
+        return json({ status: "error", code: "invalid_body" }, 400);
+      }
+      return json(await handleSettings(env.DB, req));
     }
 
     return notFound();

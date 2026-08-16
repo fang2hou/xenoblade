@@ -5,6 +5,7 @@ import type {
   UsageSubjectSummary,
   UsageSummary,
   UserMemory,
+  UserSettings,
 } from "@xenoblade/contracts";
 
 // ── Budget & session constants ────────────────────────────────────────────
@@ -52,6 +53,11 @@ type GuildConfigRow = {
 /** Type guard: true when `value` is an array of strings. */
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((v) => typeof v === "string");
+}
+
+/** Map an optional boolean opt-in flag to a 0/1 SQL value (NULL = unchanged). */
+function toFlag(value: boolean | undefined): number | null {
+  return value === undefined ? null : value ? 1 : 0;
 }
 
 /**
@@ -564,4 +570,89 @@ export async function clearUserMemory(
 
   const res = await stmt.run();
   return res.meta.changes;
+}
+
+// ── User settings (opt-in flags) ──────────────────────────────────────────
+
+type SettingsRow = {
+  chatOptin: number;
+  learnOptin: number;
+  chatOptinAt: number | null;
+  learnOptinAt: number | null;
+};
+
+/**
+ * Read a user's opt-in settings. Fail-closed: a missing row or any D1 error
+ * returns all-off defaults, so DM chat (ADR-011) never enables on a read
+ * failure.
+ */
+export async function getUserSettings(db: D1Database, userId: string): Promise<UserSettings> {
+  const off: UserSettings = {
+    chatOptin: false,
+    learnOptin: false,
+    chatOptinAt: null,
+    learnOptinAt: null,
+  };
+  try {
+    const row = await db
+      .prepare(
+        `SELECT chat_optin AS chatOptin, learn_optin AS learnOptin,
+                chat_optin_at AS chatOptinAt, learn_optin_at AS learnOptinAt
+         FROM user_settings WHERE user_id = ?1`,
+      )
+      .bind(userId)
+      .first<SettingsRow>();
+    if (!row) return off;
+    return {
+      chatOptin: row.chatOptin === 1,
+      learnOptin: row.learnOptin === 1,
+      chatOptinAt: row.chatOptinAt ?? null,
+      learnOptinAt: row.learnOptinAt ?? null,
+    };
+  } catch (error) {
+    console.log(JSON.stringify({ event: "settings_read_error", error: String(error) }));
+    return off;
+  }
+}
+
+/**
+ * Atomically upsert the opt-in flags present in `entry` (absent flags keep
+ * their current value). Enabling stamps `*_optin_at = now`; disabling clears
+ * it back to NULL, keeping flag ⇔ timestamp consistent.
+ */
+export async function setUserSettings(
+  db: D1Database,
+  entry: { userId: string; chatOptin?: boolean; learnOptin?: boolean },
+): Promise<void> {
+  const now = Date.now();
+  await db
+    .prepare(
+      `INSERT INTO user_settings (user_id, chat_optin, learn_optin, chat_optin_at, learn_optin_at)
+       VALUES (?1, ?2, ?3, ?4, ?5)
+       ON CONFLICT(user_id) DO UPDATE SET
+         chat_optin = COALESCE(?6, chat_optin),
+         chat_optin_at = CASE
+           WHEN ?6 = 1 THEN ?8
+           WHEN ?6 = 0 THEN NULL
+           ELSE chat_optin_at
+         END,
+         learn_optin = COALESCE(?7, learn_optin),
+         learn_optin_at = CASE
+           WHEN ?7 = 1 THEN ?9
+           WHEN ?7 = 0 THEN NULL
+           ELSE learn_optin_at
+         END`,
+    )
+    .bind(
+      entry.userId,
+      toFlag(entry.chatOptin) ?? 0,
+      toFlag(entry.learnOptin) ?? 0,
+      entry.chatOptin ? now : null,
+      entry.learnOptin ? now : null,
+      toFlag(entry.chatOptin),
+      toFlag(entry.learnOptin),
+      now,
+      now,
+    )
+    .run();
 }
