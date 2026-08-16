@@ -1,78 +1,67 @@
 # ADR-005: DM Control Plane and Per-User Memory
 
-- **Status**: Accepted
+- **Status**: Accepted (scope of DM chat later extended by ADR-011; implicit learning later consent-gated by ADR-012 — both preserve this ADR's privacy posture)
 - **Date**: 2026-08-12
 
 ## Context
 
-The current implementation treats DMs as a regular chat scope (`scope: dm`). Every DM message triggers AI generation, and DM content enters the conversation context alongside guild messages.
+The original implementation treated DMs as a regular chat scope: every DM message triggered AI generation, and DM content entered conversation context alongside guild messages. That is a privacy problem — private messages could surface in guild conversations via context windows or tool results.
 
-This has a privacy problem: DMs are private communications. A user might send sensitive information in a DM — personal details, configuration preferences, or role-play instructions. If this content enters the AI context and is later included in guild conversations (via context windows or tool results), the user's private data is leaked to other participants.
-
-Additionally, users need a way to customize the bot's behavior for their own interactions — setting a persona ("be a blunt code reviewer"), preferences ("respond in Japanese"), and facts ("I'm a Rust developer"). These settings should follow the user across channels but never affect other users.
+Separately, users need per-user customization (persona, preferences, facts) that follows them across channels without ever affecting another user's responses.
 
 ## Decision
 
 ### DM as control plane
 
-DMs are no longer a chat scope. DM messages do **not** trigger AI generation and do **not** enter any conversation context. DMs serve exclusively as a configuration interface:
+DMs do **not** trigger AI generation and do **not** enter any conversation context. DMs are a configuration interface:
 
-| Command                         | Effect                                       |
-| ------------------------------- | -------------------------------------------- |
-| `/persona set <description>`    | Set the user's persona                       |
-| `/persona show`                 | Display current persona                      |
-| `/persona clear`                | Remove persona                               |
-| `/preference set <key> <value>` | Set a preference (language, verbosity, etc.) |
-| `/preference list`              | List all preferences                         |
-| `/preference clear <key>`       | Remove a preference                          |
-| `/memory show`                  | Display all stored memory                    |
-| `/memory clear`                 | Clear all memory                             |
-| `/help`                         | List available commands                      |
+| Command                      | Effect                    |
+| ---------------------------- | ------------------------- |
+| `/persona set/show/clear`    | Manage the user's persona |
+| `/preference set/list/clear` | Manage preferences        |
+| `/memory show/clear`         | View or clear all memory  |
+| `/help`                      | List commands             |
 
-DM text that is not a recognized command receives a fixed help message, not an AI response.
+Unrecognized DM text gets a fixed help message, not an AI response. _(Extended by ADR-011: non-command DM text from explicitly opted-in users may generate, in a dm-isolated scope.)_
 
-### Per-user memory system
+### Per-user memory
 
-A `user_memory` table stores persona, preferences, and facts keyed by `user_id`:
-
-```sql
-CREATE TABLE user_memory (
-  user_id    TEXT NOT NULL,
-  category   TEXT NOT NULL CHECK (category IN ('persona', 'preference', 'fact')),
-  key        TEXT NOT NULL,
-  value      TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  PRIMARY KEY (user_id, category, key)
-);
-```
-
-When a user triggers the bot in any guild channel or thread, only **that user's** memory is loaded and injected into the system prompt. User A's persona never affects User B's responses. The memory block appears as:
-
-```
-[User context for {displayName}]
-Persona: {value}
-Preferences: {key}={value}, ...
-```
+A `user_memory` table stores persona, preferences, and facts keyed by `user_id`. When a user triggers the bot in any guild channel or thread, only **that user's** memory is injected into the system prompt.
 
 ### No implicit learning
 
-The first version supports only explicit configuration via DM commands. Implicit learning (extracting preferences from conversation history) is a future feature that requires explicit user opt-in.
+Only explicit DM-command configuration; implicit extraction from conversations requires explicit opt-in. _(Specified by ADR-012: guild-only extraction, opt-in plus pending/confirm.)_
+
+## Alternatives Considered
+
+### DM as normal chat scope (status quo)
+
+- Pros: chat-like DM UX with zero gating.
+- Cons: private content can leak into guild prompts — privacy by hope.
+- Why not chosen: the leak is architectural, not fixable by prompting.
+
+### Privacy by prompt convention
+
+- Pros: no routing changes.
+- Cons: an instruction, not a boundary — one prompt regression away from disclosure.
+- Why not chosen: isolation must be structural (routing and key shapes), not conventional.
+
+### Global bot persona / shared memory
+
+- Pros: one configuration, simpler schema.
+- Cons: every user's prompt inherits every other user's settings.
+- Why not chosen: cross-user leakage of personalization data.
 
 ## Consequences
 
-**Positive:**
+**Positive:** DM content never enters AI context by default — enforced at the architecture level; customization never crosses users; memory follows users across guild channels.
 
-- DM content never enters AI context. Privacy is enforced at the architecture level, not by prompt convention.
-- Users can customize bot behavior without affecting others.
-- Memory follows the user across all guild channels and threads.
-- Clean separation: DM is configuration, guild is conversation.
+**Negative:** no private AI conversations in DMs by design (later addressed for consenting users by ADR-011); one extra D1 read per generation to load the triggering user's memory.
 
-**Negative:**
+**Neutral:** DM commands are processed in the Discord Runtime; memory reads/writes go through the Worker's `/internal/v1/memory` endpoint.
 
-- Users cannot have private conversations with the bot in DMs (by design). If this is needed later, it requires a separate explicit opt-in and a separate context scope.
-- The memory system adds a D1 read per generation (to load the triggering user's memory).
+## Review Triggers
 
-**Neutral:**
-
-- DM commands are processed entirely in the Discord Runtime (no Worker call needed) except for the D1 memory read/write, which goes through the Worker's `/internal/v1/memory` endpoint.
+- Users systematically need private DM conversations → ADR-011 already covers this; revisit if its consent model proves too restrictive.
+- Memory volume strains the system-prompt budget (cap or compress per-user memory).
+- A request for group-shared memory arrives (needs a new consent and isolation model, not an edit here).

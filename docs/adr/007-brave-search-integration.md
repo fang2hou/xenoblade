@@ -5,57 +5,47 @@
 
 ## Context
 
-The bot needs web search capability for investigation tasks: answering questions about current events, looking up documentation, and finding specific information online.
-
-The previous design used a keyword-heuristic prefetch mechanism that guessed whether a query "looks like a search" and injected results into the prompt. This was not a tool — the model had no agency over when or what to search.
+The bot needs web search for current events, documentation lookups, and factual questions. The previous design used a keyword-heuristic prefetch that guessed whether a query "looks like a search" and injected results into the prompt — the model had no agency over when or what to search, and the heuristic dead code accumulated.
 
 ## Decision
 
-Expose Brave search as a first-class AI SDK tool that the model can call autonomously. Brave provides two complementary APIs, both configured:
+Expose Brave as first-class model tools the model calls autonomously:
 
-**Brave Search API** (`api.search.brave.com/res/v1/web/search`):
+- **`web_search`** — Brave Search API (`/res/v1/web/search`): structured results (title, URL, description) for research-style queries. Results feed the citation pipeline: inline `[n]` markers plus the canonical Sources footer.
+- **`web_answer`** — Brave Answer API (`/res/v1/chat/completions`): a synthesized, source-cited natural-language answer for factual questions.
 
-- Returns structured web search results (title, URL, description).
-- Used for general queries: "latest Rust release notes", "Cloudflare Workers CPU limits".
+Both tools are always present; with a missing key or a failed request they return a structured error so the model degrades gracefully — no tool failure is fatal. Two separate keys (`BRAVE_SEARCH_API_KEY`, `BRAVE_ANSWER_API_KEY`) are Worker secrets, each independently optional. The old keyword-prefetch pipeline and its dead code were deleted.
 
-**Brave Answer API** (`api.search.brave.com/res/v1/chat/completions`):
+## Alternatives Considered
 
-- Returns a synthesized natural-language answer with source citations.
-- Used for factual questions: "what is the capital of Brazil", "when did Discord add threads".
+### Keyword-heuristic prefetch (previous design)
 
-The tool automatically selects the appropriate API based on query type, or the model can specify explicitly:
+- Pros: no model round-trip for "obvious" searches.
+- Cons: no model agency; heuristics rot; results arrive whether or not they help.
+- Why not chosen: replaced — search decisions belong to the model.
 
-```ts
-web_search(query: string, opts?: {
-  mode?: "search" | "answer";
-  count?: number;
-}) → { results: Array<{ title, url, description }>, answer?: string }
-```
+### Single API only (search without answer, or vice versa)
 
-**Default behavior:** factual-looking questions (what/when/who/is/are) use the Answer API first, falling back to Search API. Complex or research-oriented queries use Search API directly.
+- Pros: one key, one code path.
+- Cons: factual questions get link lists; research questions get unsupported synthesis.
+- Why not chosen: the two APIs cover complementary query shapes.
 
-**Result normalization:** Both APIs return results in a common structured format. The synthesized answer (if available) is included alongside the result list.
+### Multi-provider search abstraction
 
-**Error handling:** If the primary API fails (timeout, rate limit), the tool falls back to the other API. If both fail, the tool returns a structured error, and the model can answer without search results.
-
-**Credentials:** Two separate API keys (`BRAVE_SEARCH_API_KEY`, `BRAVE_ANSWER_API_KEY`), stored as Worker secrets.
+- Pros: provider diversity from day one.
+- Cons: premature — normalized interfaces before a second proven need.
+- Why not chosen: wait for the second use case; the tool result shape is already normalized for it.
 
 ## Consequences
 
-**Positive:**
+**Positive:** the model decides when and what to search; citations are structured and consistent; no external search dependency beyond Brave.
 
-- The model decides when and what to search — no keyword heuristics.
-- Two complementary Brave APIs cover both factual answers and general web search.
-- No external reader/search service dependency beyond Brave.
-- Results are structured and easy to cite.
+**Negative:** two Brave keys to manage; Brave rate limits/pricing to watch; a Brave outage removes search entirely (no engine diversity).
 
-**Negative:**
+**Neutral:** additional backends can join later by emitting the same normalized result shape.
 
-- Two Brave API keys to manage (search + answer subscriptions).
-- Brave-specific rate limits and pricing to monitor.
-- No search engine diversity — Brave outage means no search capability.
+## Review Triggers
 
-**Neutral:**
-
-- The old keyword-based prefetch code and `tools.ts` dead code are deleted entirely. Search becomes a tool call, not a pipeline stage.
-- Additional search backends can be added later by implementing the normalized result interface.
+- A Brave outage or pricing change materially degrades the bot.
+- Search diversity becomes a requirement (add a backend behind the normalized interface).
+- The Answer API's quality diverges from the Search API's (re-split responsibilities).

@@ -5,58 +5,47 @@
 
 ## Context
 
-The `read_url` tool fetches web page content for the AI model to reference during investigation tasks. Web pages vary dramatically in size: a news article may be 3,000 characters; a documentation page or legal document may exceed 50,000 characters.
-
-Sending raw page content directly to the generation model has two problems:
-
-1. **Context window pollution.** A single 30,000-character page consumes ~15,000 tokens — a large fraction of the model's context window. Multi-source investigations (3–5 pages) can exhaust the window entirely, crowding out conversation history and user memory.
-
-2. **Cost.** The generation model is the most expensive per token. Paying generation-model rates for boilerplate HTML, navigation menus, cookie banners, and irrelevant sections is wasteful.
+The `read_url` tool fetches web pages for the model. Pages vary from ~3,000 to 50,000+ characters. Sending raw content to the generation model pollutes its context window (a 30k-character page ≈ 15k tokens) and pays generation-model rates for navigation, boilerplate, and cookie banners.
 
 ## Decision
 
-`read_url` is a two-stage pipeline that uses the **summarization model** (see [ADR-004](004-two-tier-model.md)) to compress content before it reaches the generation model:
+`read_url` is a two-stage pipeline that compresses content before the generation model sees it:
 
-```text
-Stage 1: Fetch
-  Cloudflare Browser Rendering → innerText
-  Block image/font/media/stylesheet requests for speed
-  Strip script/style/nav/header/footer/aside tags
-  Truncate to a safe maximum (e.g. 50,000 chars) before summarization
+1. **Fetch + strip**: fetch the URL (SSRF-gated), strip script/style/nav/header/footer/aside, decode entities, collapse whitespace; keep at most 8,000 characters.
+2. **Compress**: content over 2,000 characters is summarized by the **summarization model** (see [ADR-004](004-two-tier-model.md)) — extract key facts, numbers, dates, names; output ≤ 512 tokens. Below the threshold, content passes through raw. On summarizer failure, fall back to the truncated raw text — the tool stays available at the cost of tokens.
 
-Stage 2: Compress (only if content > READ_URL_CONTENT_THRESHOLD)
-  Call: SUMMARIZATION_MODEL (small, fast, cheap)
-  Prompt: "Extract key facts, data points, and arguments.
-           Preserve specific numbers, dates, names, quotes.
-           Remove navigation, ads, boilerplate.
-           Output structured markdown."
-  Max output: SUMMARIZATION_MAX_TOKENS (default 512)
+_Recorded drift:_ the original decision fetched via Cloudflare Browser Rendering. The implementation moved to direct `fetch` + HTML stripping (faster, simpler); the `BROWSER` binding remains provisioned but unused, and JavaScript-rendered pages are currently unsupported.
 
-Stage 3: Return to generation model
-  { content: compressed_summary_or_raw_text,
-    sourceUrl, originalLength, compressed: boolean }
-```
+## Alternatives Considered
 
-If the content is below the threshold (default 2,000 characters), it is returned raw without summarization — small pages don't warrant the extra model call.
+### Raw content straight to the generation model
 
-If the summarization model fails or times out, the tool falls back to truncating raw text to a safe length. The investigation continues; it just costs more tokens.
+- Pros: no extra call, no summarizer risk.
+- Cons: context-window pollution; premium tokens spent on boilerplate.
+- Why not chosen: the original problem being solved.
+
+### Cloudflare Browser Rendering for the fetch stage
+
+- Pros: executes JavaScript; managed Chrome without self-hosting.
+- Cons: 2–4s per page; heavier failure surface; direct fetch covers most pages faster.
+- Why not chosen: replaced by direct fetch (see recorded drift) — revisit if JS-rendered content becomes a primary target.
+
+### Dedicated reader API (e.g. hosted extraction service)
+
+- Pros: high-quality extraction without model calls.
+- Cons: new external dependency, per-call cost, another key to manage.
+- Why not chosen: the summarization role already exists (ADR-004) and is effectively free by comparison.
 
 ## Consequences
 
-**Positive:**
+**Positive:** generation sees ≤ 512-token summaries for long pages — token use drops 1–2 orders of magnitude on web-heavy tasks; no external reader dependency; graceful degradation on every failure.
 
-- Generation model sees only compressed summaries (≤ 512 tokens), not raw pages. Token consumption drops by 1–2 orders of magnitude for web-heavy tasks.
-- Browser Rendering is already a Cloudflare binding — no external API dependency for fetching.
-- Cache API can cache compressed results, avoiding re-summarization on repeated reads of the same URL.
+**Negative:** summarization adds 1–3s per long read; a poor summary starves the generation model; JS-rendered pages unreadable today.
 
-**Negative:**
+**Neutral:** threshold (2,000 chars) and cap (8,000 chars) are code constants in `apps/platform-worker/src/tools/read-url.ts`.
 
-- Browser Rendering is slower than a lightweight reader API (2–4 seconds per page including network idle wait).
-- Summarization adds 1–3 seconds latency per `read_url` call.
-- One additional failure mode (summarization timeout/error) to handle.
-- Browser sessions must be carefully closed in `finally` blocks to prevent resource leaks.
+## Review Triggers
 
-**Neutral:**
-
-- The threshold and max tokens are configurable via environment variables.
-- Browser Rendering handles JavaScript-rendered content natively (no need for a separate reader API).
+- JavaScript-rendered pages dominate `read_url` targets (Browser Rendering back on the table).
+- Summarizer quality regresses on the pages users actually read.
+- Thresholds prove mis-sized against observed traffic.
