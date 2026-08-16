@@ -1,5 +1,5 @@
 import type { ImagePart, ModelMessage, TextPart, UserModelMessage } from "ai";
-import type { GenerationRequest, HistoryMessage } from "@xenoblade/contracts";
+import type { DiscordAttachment, GenerationRequest, HistoryMessage } from "@xenoblade/contracts";
 
 import { formatContextBlock, type ContextDecision } from "./context";
 
@@ -45,30 +45,26 @@ function historyToModelMessages(history: readonly HistoryMessage[]): ModelMessag
   );
 }
 
-/**
- * Build the final user message from the current request: trimmed text plus any
- * image attachments as URL-based image parts. Discord CDN URLs are public, so
- * the model provider fetches them directly — no worker-side download needed.
- */
-function currentToUserMessage(
-  req: GenerationRequest,
-  includeImages: boolean = true,
-): UserModelMessage {
-  const text = req.content.trim();
-  const images = (req.attachments ?? []).filter(
+/** Image attachments of the current request, filtered to real image content types. */
+function imageAttachments(req: GenerationRequest): DiscordAttachment[] {
+  return (req.attachments ?? []).filter(
     (a) => a.contentType !== null && a.contentType.startsWith("image/"),
   );
+}
 
-  if (!includeImages || images.length === 0) {
-    // For text-only models: convert image attachments to text references
-    // so the model knows to call the vision_describe tool.
-    const imageRefs =
-      images.length > 0 ? images.map((img) => `[Image: ${img.url}]`).join("\n") : "";
-    const combined = imageRefs ? `${text}\n\n${imageRefs}` : text;
-    return { role: "user", content: combined };
+/**
+ * Build the current user message for a multimodal model: trimmed text plus
+ * image attachments as URL-based image parts (at most the first four).
+ * Discord CDN URLs are public, so the model provider fetches them directly —
+ * no worker-side download needed.
+ */
+function nativeImageUserMessage(req: GenerationRequest): UserModelMessage {
+  const text = req.content.trim();
+  const images = imageAttachments(req);
+  if (images.length === 0) {
+    return { role: "user", content: text };
   }
 
-  // Multimodal path: images as native content parts.
   const parts: Array<TextPart | ImagePart> = [];
   if (text.length > 0) {
     parts.push({ type: "text", text });
@@ -81,6 +77,18 @@ function currentToUserMessage(
     });
   }
   return { role: "user", content: parts };
+}
+
+/**
+ * Build the current user message for a text-only model: image attachments
+ * become text references so the model knows to call the vision_describe tool.
+ */
+function textRefUserMessage(req: GenerationRequest): UserModelMessage {
+  const text = req.content.trim();
+  const imageRefs = imageAttachments(req)
+    .map((img) => `[Image: ${img.url}]`)
+    .join("\n");
+  return { role: "user", content: imageRefs ? `${text}\n\n${imageRefs}` : text };
 }
 
 /** Append a trailing text block to a user message (string or parts content). */
@@ -105,10 +113,18 @@ function withTail(message: UserModelMessage, tail: string): UserModelMessage {
 export function buildGenerationMessages(
   req: GenerationRequest,
   context: ContextDecision,
-  includeImages: boolean = true,
 ): ModelMessage[] {
-  const current = currentToUserMessage(req, includeImages);
+  return assembleMessages(context, nativeImageUserMessage(req));
+}
 
+export function buildTextOnlyGenerationMessages(
+  req: GenerationRequest,
+  context: ContextDecision,
+): ModelMessage[] {
+  return assembleMessages(context, textRefUserMessage(req));
+}
+
+function assembleMessages(context: ContextDecision, current: UserModelMessage): ModelMessage[] {
   if (context.mode === "none") {
     return [current];
   }

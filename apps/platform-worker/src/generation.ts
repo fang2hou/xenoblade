@@ -24,7 +24,7 @@ import {
   type InteractionRecord,
 } from "./db";
 import { buildContext } from "./context";
-import { buildGenerationMessages, SAFETY_SYSTEM } from "./prompt";
+import { buildGenerationMessages, buildTextOnlyGenerationMessages, SAFETY_SYSTEM } from "./prompt";
 import { extractSources } from "./sources";
 import { createFirstPartyTools, connectMcpServers, closeMcpClients } from "./tools";
 
@@ -135,8 +135,8 @@ export async function generate(env: Env, req: GenerationRequest): Promise<Genera
   const allTools = { ...firstPartyTools, ...mcpResult.tools };
 
   // 6. Messages — primary gets images natively, fallback uses text refs + vision tool
-  const messagesWithImages = buildGenerationMessages(req, contextDecision, true);
-  const messagesTextOnly = buildGenerationMessages(req, contextDecision, false);
+  const messagesWithImages = buildGenerationMessages(req, contextDecision);
+  const messagesTextOnly = buildTextOnlyGenerationMessages(req, contextDecision);
 
   // 7. Model chain — try each model until one produces a response
   const chain = getModelChain(env, "generation");
