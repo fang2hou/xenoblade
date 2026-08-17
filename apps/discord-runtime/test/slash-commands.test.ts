@@ -37,11 +37,9 @@ describe("SLASH_COMMANDS", () => {
 describe("registerSlashCommands", () => {
   it("PUTs the command definitions to the global application commands route", async () => {
     const puts: Array<{ route: string; body: unknown }> = [];
-    await registerSlashCommands(env, {
-      put: async (route, body) => {
-        puts.push({ route, body });
-        return [] as never;
-      },
+    await registerSlashCommands(env, async (route, options) => {
+      puts.push({ route, body: options });
+      return [];
     });
 
     expect(puts).toHaveLength(1);
@@ -51,10 +49,8 @@ describe("registerSlashCommands", () => {
 
   it("swallows registration failures (best-effort, never fatal)", async () => {
     await expect(
-      registerSlashCommands(env, {
-        put: async () => {
-          throw new Error("rate limited");
-        },
+      registerSlashCommands(env, async () => {
+        throw new Error("rate limited");
       }),
     ).resolves.toBeUndefined();
   });
