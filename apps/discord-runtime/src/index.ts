@@ -38,6 +38,7 @@ import { handleDmMessage } from "./dm-commands";
 import { ConversationQueue } from "./conversation-queue";
 import { registerSlashCommands } from "./slash-commands";
 import { handleLanguageCommand, resolveUiLanguageBounded } from "./language";
+import { handleStatusCommand } from "./status";
 import { messages, stagedMilestones } from "./i18n";
 import { handleClearContext } from "./clear-context";
 import { handleUsageCommand } from "./usage";
@@ -653,7 +654,7 @@ async function handleInteraction(
 ): Promise<void> {
   try {
     if (interaction.commandName === "status") {
-      await interaction.reply("Xenoblade Gateway OK");
+      await handleStatusCommand(interaction, env);
       return;
     }
     if (interaction.commandName === "clear-context") {

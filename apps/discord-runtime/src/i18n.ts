@@ -10,6 +10,9 @@ import type { StatusMilestone } from "./staged-status";
  * (asserted by `satisfies` and a parity test).
  */
 const zh = {
+  status: {
+    ok: "Xenoblade 网关运行正常。",
+  },
   generation: {
     failure: "这次处理失败了，请稍后重试。",
     rateLimited: "请求过于频繁，请稍后再试。",
@@ -89,6 +92,7 @@ const zh = {
 } as const;
 
 export type Messages = {
+  status: { ok: string };
   generation: { failure: string; rateLimited: string };
   stagedMilestones: readonly string[];
   clearContext: { success: string; failure: string };
@@ -135,6 +139,9 @@ export type Messages = {
 };
 
 const en: Messages = {
+  status: {
+    ok: "Xenoblade Gateway OK",
+  },
   generation: {
     failure: "That request failed. Please try again later.",
     rateLimited: "You're sending requests too fast — please wait a moment.",
