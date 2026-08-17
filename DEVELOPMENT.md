@@ -23,7 +23,7 @@ mise install
 | vitest     | Test runner                              | `package.json`              |
 | wrangler   | Workers dev/deploy, D1, types            | `apps/platform-worker`      |
 
-Do not substitute tools without explicit approval (see the guideline repository's toolchain standards).
+Do not substitute tools without explicit approval (see the guidelines repository's toolchain standards).
 
 **First Worker run** — secrets and local D1:
 
@@ -75,7 +75,7 @@ mise run test -- {{filter}} # run a single test file or case, e.g. mise run test
 
 ## Coding Standards
 
-Follow the guideline repository's coding standards. Project-specific rules:
+Follow the guidelines repository's coding standards. Project-specific rules:
 
 - TypeScript strict, ESM only, `verbatimModuleSyntax`, `noUncheckedIndexedAccess` — guard every indexed access.
 - Code, comments, and identifiers in English, always; only intentional UI literals may be Chinese (see [AGENTS.md](./AGENTS.md)).

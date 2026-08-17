@@ -2,11 +2,30 @@
 
 Guidance for AI agents working in this repository. Read this before making changes.
 
+Xenoblade is an LLM-powered Discord assistant for community operators: a self-hosted discord.js runtime owns the Discord connection, a Cloudflare Worker owns AI generation, tools, and data.
+
+## Commands
+
+```bash
+mise install                 # set up the toolchain
+mise run dev                 # start the Platform Worker dev server (wrangler dev)
+mise run test                # test suite (runs check first)
+mise run test -- {{filter}}  # run a single test file or case, e.g. mise run test -- staged-status
+mise run lint                # lint only
+mise run format              # format check only — write with pnpm format
+mise run typecheck           # type checking only
+mise run build               # build discord-runtime (pnpm -r build)
+pnpm --filter @xenoblade/platform-worker types  # regenerate worker-configuration.d.ts
+mise run check               # full validation (lint + format + typecheck) — run before every commit
+```
+
+Use pnpm, never npm or yarn. The Discord Runtime has no mise task: run `pnpm dev:runtime` (needs a real Discord bot token).
+
 ## Engineering Standards
 
-This project follows the shared engineering guideline:
+This project follows the shared engineering guidelines:
 
-> <https://github.com/fang2hou/ai-coding-guideline> — start from its [PORTAL.md](https://github.com/fang2hou/ai-coding-guideline/blob/main/PORTAL.md).
+> <https://github.com/fang2hou/ai-coding-guidelines> — start from its [PORTAL.md](https://github.com/fang2hou/ai-coding-guidelines/blob/main/PORTAL.md).
 
 Read the portal's reading recipes for your task type before starting.
 Repository documentation always takes precedence over remembered summaries.
@@ -15,18 +34,6 @@ Project-specific overrides:
 
 - Server-side Vercel AI SDK (`ai` + `@openrouter/ai-sdk-provider`) without Next.js — justified: the SDK's tool-calling loop and provider abstraction are heavily exercised (model chains with provider fallbacks, tool loops, MCP); nothing else from the Vercel stack is used or wanted.
 - Raw fetch-handler Cloudflare Worker instead of a framework (Hono et al.) — pre-existing working service; introducing a framework is a decision change, not a refactor (see [ARCHITECTURE.md](./ARCHITECTURE.md)).
-
-## Commands
-
-```bash
-mise install                 # set up the toolchain
-mise run check               # full validation — run before every commit
-mise run test                # test suite (runs check first)
-mise run test -- {{filter}}  # run a single test file or case, e.g. mise run test -- staged-status
-mise run dev                 # start the Platform Worker dev server (wrangler dev)
-```
-
-Use pnpm, never npm or yarn. `mise run format` **checks** formatting; write with `pnpm format`. The Discord Runtime has no mise task: run `pnpm dev:runtime` (needs a real Discord bot token).
 
 ## Layout
 
