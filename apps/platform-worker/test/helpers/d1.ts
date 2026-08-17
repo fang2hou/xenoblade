@@ -16,8 +16,10 @@ export function createTestD1(): D1Database {
 }
 
 function readMigrations(): string {
-  const url = new URL("../../migrations/0001_initial.sql", import.meta.url);
-  return readFileSync(url, "utf8");
+  // Fixed order: every numbered migration, exactly as wrangler applies them.
+  const dir = new URL("../../migrations/", import.meta.url);
+  const names = ["0001_initial.sql", "0002_user_settings.sql", "0003_user_language.sql"];
+  return names.map((name) => readFileSync(new URL(name, dir), "utf8")).join("\n");
 }
 
 type BindParams = readonly SQLInputValue[];

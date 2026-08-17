@@ -17,7 +17,7 @@ describe("SLASH_COMMANDS", () => {
   it("includes the three global commands with unique kebab-case names", () => {
     const names = SLASH_COMMANDS.map((command) => command.name);
     expect(new Set(names).size).toBe(names.length);
-    expect(names).toEqual(["status", "clear-context", "usage"]);
+    expect(names).toEqual(["status", "clear-context", "usage", "language"]);
     for (const command of SLASH_COMMANDS) {
       expect(command.description.length).toBeGreaterThan(0);
     }

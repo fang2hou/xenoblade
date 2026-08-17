@@ -1,11 +1,12 @@
 import { MessageFlags } from "discord.js";
 import type { ChatInputCommandInteraction } from "discord.js";
-import type { UsageSubjectSummary, UsageSummary } from "@xenoblade/contracts";
+import type { UiLanguage, UsageSubjectSummary, UsageSummary } from "@xenoblade/contracts";
 
 import { fetchUsage } from "./ai-client";
 import type { EnvConfig } from "./env";
-
-const USAGE_FAILURE_REPLY = "Failed to load usage summary. Please try again later.";
+import type { Messages } from "./i18n";
+import { messages } from "./i18n";
+import { resolveUiLanguage } from "./language";
 
 /** /usage → fetch the Worker usage summary and reply ephemerally. */
 export async function handleUsageCommand(
@@ -19,12 +20,17 @@ export async function handleUsageCommand(
   // ephemeral so the final edit stays visible only to the invoking user.
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   try {
+    // Fail-open: the summary still renders (in zh) when settings are unreadable.
+    const language = await resolveUiLanguage(interaction.user.id, env);
     const summary = await fetchUsage(
       { userId: interaction.user.id, scopeId },
       env.workerUrl,
       env.internalApiToken,
     );
-    const content = summary.status === "ok" ? formatUsageSummary(summary) : USAGE_FAILURE_REPLY;
+    const content =
+      summary.status === "ok"
+        ? formatUsageSummary(summary, language)
+        : messages(language).usage.failure;
     await interaction.editReply({ content });
   } catch (error) {
     console.log(
@@ -35,33 +41,41 @@ export async function handleUsageCommand(
         error: String(error),
       }),
     );
-    await interaction.editReply({ content: USAGE_FAILURE_REPLY }).catch(() => undefined);
+    await interaction.editReply({ content: messages("zh").usage.failure }).catch(() => undefined);
   }
 }
 
 /**
- * Render the usage summary as a compact ephemeral reply.
+ * Render the usage summary as a compact ephemeral reply in the user's UI
+ * language.
  *
  * Follows the bot's Discord formatting rules (SAFETY_SYSTEM): bold labels for
  * section titles, no Markdown tables or headers, `·`-separated inline stats.
  */
-export function formatUsageSummary(summary: UsageSummary): string {
+export function formatUsageSummary(summary: UsageSummary, language: UiLanguage): string {
+  const table = messages(language).usage;
   const hours = Math.round(summary.windowMs / 3_600_000);
   return [
-    ...formatSubject(`**You — last ${hours}h**`, summary.user),
+    ...formatSubject(table.you(hours), table, summary.user),
     "",
-    ...formatSubject(`**Server — last ${hours}h**`, summary.guild),
+    ...formatSubject(table.server(hours), table, summary.guild),
   ].join("\n");
 }
 
-function formatSubject(title: string, subject: UsageSubjectSummary): string[] {
+function formatSubject(
+  title: string,
+  table: Messages["usage"],
+  subject: UsageSubjectSummary,
+): string[] {
   const lines = [
     title,
-    `Generations: ${subject.generations} · Messages: ${subject.messages}`,
-    `Tokens: ${subject.inputTokens.toLocaleString("en-US")} in · ${subject.outputTokens.toLocaleString("en-US")} out · ${subject.cacheReadTokens.toLocaleString("en-US")} cache read · ${subject.cacheWriteTokens.toLocaleString("en-US")} cache write`,
+    `${table.generations}: ${subject.generations} · ${table.messages}: ${subject.messages}`,
+    `${table.tokens}: ${subject.inputTokens.toLocaleString("en-US")} in · ${subject.outputTokens.toLocaleString("en-US")} out · ${subject.cacheReadTokens.toLocaleString("en-US")} ${table.cacheRead} · ${subject.cacheWriteTokens.toLocaleString("en-US")} ${table.cacheWrite}`,
   ];
   if (subject.topTools.length > 0) {
-    lines.push(`Top tools: ${subject.topTools.map((t) => `${t.tool} ×${t.count}`).join(" · ")}`);
+    lines.push(
+      `${table.topTools}: ${subject.topTools.map((t) => `${t.tool} ×${t.count}`).join(" · ")}`,
+    );
   }
   return lines;
 }

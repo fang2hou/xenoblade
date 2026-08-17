@@ -1,6 +1,7 @@
 import type { Message, SendableChannels } from "discord.js";
 
 import { MAX_MESSAGE_LENGTH, postReply, sliceIntoChunks } from "./output";
+import { stagedMilestones } from "./i18n";
 
 /**
  * Timer plumbing for staged status. Injectable so tests can drive milestones
@@ -30,13 +31,8 @@ const MAX_EDITS = 4;
 /** Backoff before a single retry of a rate-limited edit. */
 const RATE_LIMIT_RETRY_DELAY_MS = 1_000;
 
-/** Default escalation ladder; the first stage creates the placeholder. */
-const DEFAULT_MILESTONES: StatusMilestone[] = [
-  { afterMs: 8_000, text: "还在处理中…" },
-  { afterMs: 20_000, text: "仍在生成中，请稍候…" },
-  { afterMs: 40_000, text: "这次生成比较复杂，仍在处理…" },
-  { afterMs: 90_000, text: "仍在处理中，感谢耐心等待…" },
-];
+/** Default escalation ladder (zh); callers pass per-user localized milestones. */
+const DEFAULT_MILESTONES: StatusMilestone[] = stagedMilestones("zh");
 
 export interface StagedStatusOptions {
   scheduler?: StatusScheduler;

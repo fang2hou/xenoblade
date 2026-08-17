@@ -184,6 +184,9 @@ export type MemoryResponse =
 
 // ── User Settings ─────────────────────────────────────────────────────────
 
+/** UI language for runtime-rendered notices. Chat replies are NOT affected. */
+export type UiLanguage = "zh" | "en";
+
 /** Per-user opt-in flags (ADR-011 DM chat, ADR-012 auto memory). Default OFF. */
 export interface UserSettings {
   chatOptin: boolean;
@@ -191,6 +194,8 @@ export interface UserSettings {
   /** When the opt-in was last enabled; null while off or never enabled. */
   chatOptinAt: number | null;
   learnOptinAt: number | null;
+  /** UI language for bot notices; defaults to zh. */
+  language: UiLanguage;
 }
 
 export type SettingsRequest =
@@ -202,6 +207,8 @@ export type SettingsRequest =
       chatOptin?: boolean;
       /** Enable (`true`) or disable (`false`) auto memory; omit to leave unchanged. */
       learnOptin?: boolean;
+      /** Set the UI language for notices; omit to leave unchanged. */
+      language?: UiLanguage;
     };
 
 export type SettingsResponse =

@@ -24,6 +24,7 @@ import type {
   GenerationRequest,
   GenerationResult,
   HistoryMessage,
+  UiLanguage,
 } from "@xenoblade/contracts";
 
 import { loadEnv, type EnvConfig } from "./env";
@@ -36,6 +37,8 @@ import { generate } from "./ai-client";
 import { handleDmMessage } from "./dm-commands";
 import { ConversationQueue } from "./conversation-queue";
 import { registerSlashCommands } from "./slash-commands";
+import { handleLanguageCommand, resolveUiLanguage } from "./language";
+import { messages, stagedMilestones } from "./i18n";
 import { handleClearContext } from "./clear-context";
 import { handleUsageCommand } from "./usage";
 import {
@@ -48,9 +51,6 @@ import {
   type ReplyEntry,
 } from "./reply-controls";
 import { renderReply } from "./citations";
-
-const FAILURE_REPLY = "这次处理失败了，请稍后重试。";
-const RATE_LIMIT_REPLY = "请求过于频繁，请稍后再试。";
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -264,10 +264,15 @@ async function executeGeneration(
   await sendTyping(channel);
   const typingInterval = setInterval(() => void sendTyping(channel), 8000);
 
+  // UI language for this user's notices (staged status, failure texts);
+  // chat reply language stays conversation-driven and never comes from here.
+  const language = await resolveUiLanguage(request.userId, env);
+  const generationTexts = messages(language).generation;
+
   // Staged status placeholder for long generations (ADR-003 amendment):
   // posts after ~8s, escalates at coarse milestones, and is replaced by the
   // final reply or failure notice.
-  const staged = new StagedStatus(channel);
+  const staged = new StagedStatus(channel, { milestones: stagedMilestones(language) });
   staged.start();
 
   const wireRequest: GenerationRequest = run.regenerate
@@ -289,7 +294,7 @@ async function executeGeneration(
         error: String(error),
       }),
     );
-    await staged.settle(FAILURE_REPLY).catch((e) => {
+    await staged.settle(generationTexts.failure).catch((e) => {
       console.log(
         JSON.stringify({
           event: "post_reply_error",
@@ -307,6 +312,7 @@ async function executeGeneration(
     controls: run.controls,
     registry,
     staged,
+    language,
     redactContent: request.scopeId === "dm",
   });
 }
@@ -318,7 +324,8 @@ interface PostContext {
   registry: ReplyRegistry;
   /** Staged placeholder this run owns; settle/dismiss post or remove it. */
   staged: StagedStatus;
-  /** DM-scope results never log content previews (ADR-011 privacy posture). */
+  /** UI language for this user's failure/rate-limit notices. */
+  language: UiLanguage;
   redactContent: boolean;
 }
 
@@ -353,7 +360,7 @@ async function applyGenerationResult(result: GenerationResult, ctx: PostContext)
       );
       if (replyLength === 0 || content === "") {
         console.log(JSON.stringify({ event: "empty_reply", messageId }));
-        await ctx.staged.settle(FAILURE_REPLY).catch((e) => {
+        await ctx.staged.settle(messages(ctx.language).generation.failure).catch((e) => {
           console.log(
             JSON.stringify({
               event: "post_reply_error",
@@ -395,7 +402,7 @@ async function applyGenerationResult(result: GenerationResult, ctx: PostContext)
     case "rejected":
       // duplicate / disabled → silent; budget_exceeded → courteous notice.
       if (result.code === "budget_exceeded") {
-        await ctx.staged.settle(RATE_LIMIT_REPLY).catch((e) => {
+        await ctx.staged.settle(messages(ctx.language).generation.rateLimited).catch((e) => {
           console.log(
             JSON.stringify({
               event: "post_reply_error",
@@ -426,7 +433,7 @@ async function applyGenerationResult(result: GenerationResult, ctx: PostContext)
           retryable: result.retryable,
         }),
       );
-      await ctx.staged.settle(FAILURE_REPLY).catch((e) => {
+      await ctx.staged.settle(messages(ctx.language).generation.failure).catch((e) => {
         console.log(
           JSON.stringify({
             event: "post_reply_error",
@@ -652,6 +659,10 @@ async function handleInteraction(
     }
     if (interaction.commandName === "usage") {
       await handleUsageCommand(interaction, env);
+      return;
+    }
+    if (interaction.commandName === "language") {
+      await handleLanguageCommand(interaction, env);
       return;
     }
   } catch (error) {
