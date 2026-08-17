@@ -1,4 +1,4 @@
-import { REST, Routes } from "discord.js";
+import { ApplicationCommandOptionType, REST, Routes } from "discord.js";
 
 import type { EnvConfig } from "./env";
 
@@ -31,6 +31,7 @@ export const SLASH_COMMANDS = [
     description_localizations: { "zh-CN": "切换提示语言（聊天回复语言始终自动跟随对话）" },
     options: [
       {
+        type: ApplicationCommandOptionType.String,
         name: "value",
         description: "Notice language",
         required: true,
