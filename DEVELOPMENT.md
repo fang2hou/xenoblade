@@ -42,7 +42,7 @@ export DISCORD_BOT_TOKEN=... DISCORD_APPLICATION_ID=... \
 pnpm dev:runtime
 ```
 
-The runtime registers global slash commands (`/status`, `/clear-context`, `/usage`) automatically on startup and connects to the Discord Gateway on login.
+The runtime registers the global slash commands (`/status`, `/context truncate|restore`, `/usage`, `/language`, `/persona`, `/preference`, `/memory`, `/chat`, `/learn`, `/help`) automatically on startup and connects to the Discord Gateway on login.
 
 ## Commands
 

@@ -14,9 +14,23 @@ export const SLASH_COMMANDS = [
     description_localizations: { "zh-CN": "检查 Xenoblade 网关状态" },
   },
   {
-    name: "clear-context",
-    description: "Clear your conversation context in this channel",
-    description_localizations: { "zh-CN": "清除你在此频道的对话上下文" },
+    name: "context",
+    description: "Manage which past messages the bot references in this channel",
+    description_localizations: { "zh-CN": "管理机器人参考的历史消息范围" },
+    options: [
+      {
+        type: 1,
+        name: "truncate",
+        description: "Stop referencing messages before now (undoable)",
+        description_localizations: { "zh-CN": "从现在起不再参考之前的消息（可撤销）" },
+      },
+      {
+        type: 1,
+        name: "restore",
+        description: "Undo the latest truncation in this channel",
+        description_localizations: { "zh-CN": "撤销此频道最近一次截断" },
+      },
+    ],
   },
   {
     name: "usage",
@@ -40,6 +54,166 @@ export const SLASH_COMMANDS = [
         ],
       },
     ],
+  },
+  {
+    name: "persona",
+    description: "Manage your persona memories (how you describe yourself to the bot)",
+    description_localizations: { "zh-CN": "管理你的人设记忆（你希望机器人如何了解你）" },
+    options: [
+      {
+        type: 1,
+        name: "show",
+        description: "List all your persona memories",
+        description_localizations: { "zh-CN": "查看你的全部人设记忆" },
+      },
+      {
+        type: 1,
+        name: "set",
+        description: "Set one persona memory",
+        description_localizations: { "zh-CN": "设置一条人设记忆" },
+        options: [
+          {
+            type: 3,
+            name: "key",
+            description: "Memory key",
+            required: true,
+            description_localizations: { "zh-CN": "记忆键名" },
+          },
+          {
+            type: 3,
+            name: "value",
+            description: "Memory content",
+            required: true,
+            description_localizations: { "zh-CN": "记忆内容" },
+          },
+        ],
+      },
+      {
+        type: 1,
+        name: "clear",
+        description: "Clear persona memories (optionally one key)",
+        description_localizations: { "zh-CN": "清除人设记忆（可指定键名）" },
+        options: [
+          {
+            type: 3,
+            name: "key",
+            description: "Only clear this key",
+            required: false,
+            description_localizations: { "zh-CN": "仅清除该键名" },
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: "preference",
+    description: "Manage your preference memories (how the bot should behave)",
+    description_localizations: { "zh-CN": "管理你的偏好记忆（希望机器人的行为方式）" },
+    options: [
+      {
+        type: 1,
+        name: "list",
+        description: "List your preferences",
+        description_localizations: { "zh-CN": "查看你的偏好" },
+      },
+      {
+        type: 1,
+        name: "set",
+        description: "Set one preference",
+        description_localizations: { "zh-CN": "设置一条偏好" },
+        options: [
+          {
+            type: 3,
+            name: "key",
+            description: "Preference key",
+            required: true,
+            description_localizations: { "zh-CN": "偏好键名" },
+          },
+          {
+            type: 3,
+            name: "value",
+            description: "Preference content",
+            required: true,
+            description_localizations: { "zh-CN": "偏好内容" },
+          },
+        ],
+      },
+      {
+        type: 1,
+        name: "clear",
+        description: "Clear preferences (optionally one key)",
+        description_localizations: { "zh-CN": "清除偏好（可指定键名）" },
+        options: [
+          {
+            type: 3,
+            name: "key",
+            description: "Only clear this key",
+            required: false,
+            description_localizations: { "zh-CN": "仅清除该键名" },
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: "memory",
+    description: "View or clear everything the bot remembers about you",
+    description_localizations: { "zh-CN": "查看或清除机器人对你的全部记忆" },
+    options: [
+      {
+        type: 1,
+        name: "show",
+        description: "Show all memories",
+        description_localizations: { "zh-CN": "查看全部记忆" },
+      },
+      {
+        type: 1,
+        name: "clear",
+        description: "Clear all memories",
+        description_localizations: { "zh-CN": "清除全部记忆" },
+      },
+    ],
+  },
+  {
+    name: "chat",
+    description: "Toggle DM chat with the bot (DMs only)",
+    description_localizations: { "zh-CN": "开关与机器人的私聊对话（仅限私聊）" },
+    options: [
+      {
+        type: 3,
+        name: "value",
+        description: "Enable or disable DM chat; omit to show the current state",
+        required: false,
+        description_localizations: { "zh-CN": "开启或关闭私聊；不填则查看当前状态" },
+        choices: [
+          { name: "on", value: "on" },
+          { name: "off", value: "off" },
+        ],
+      },
+    ],
+  },
+  {
+    name: "learn",
+    description: "Toggle auto memory learning (DM console)",
+    description_localizations: { "zh-CN": "开关自动记忆学习（私聊控制台）" },
+    options: [
+      {
+        type: 3,
+        name: "value",
+        description: "Enable or disable learning; omit to show the current state",
+        required: false,
+        description_localizations: { "zh-CN": "开启或关闭；不填则查看当前状态" },
+        choices: [
+          { name: "on", value: "on" },
+          { name: "off", value: "off" },
+        ],
+      },
+    ],
+  },
+  {
+    name: "help",
+    description: "Show what Xenoblade can do",
+    description_localizations: { "zh-CN": "查看 Xenoblade 的功能说明" },
   },
 ] as const;
 

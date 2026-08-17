@@ -14,10 +14,21 @@ const env: EnvConfig = {
 };
 
 describe("SLASH_COMMANDS", () => {
-  it("includes the three global commands with unique kebab-case names", () => {
+  it("includes the global commands with unique kebab-case names", () => {
     const names = SLASH_COMMANDS.map((command) => command.name);
     expect(new Set(names).size).toBe(names.length);
-    expect(names).toEqual(["status", "clear-context", "usage", "language"]);
+    expect(names).toEqual([
+      "status",
+      "context",
+      "usage",
+      "language",
+      "persona",
+      "preference",
+      "memory",
+      "chat",
+      "learn",
+      "help",
+    ]);
     for (const command of SLASH_COMMANDS) {
       expect(command.description.length).toBeGreaterThan(0);
     }
@@ -31,6 +42,8 @@ describe("SLASH_COMMANDS", () => {
       }
     }
     expect(SLASH_COMMANDS[3]?.options?.[0]?.type).toBe(ApplicationCommandOptionType.String);
+    expect(SLASH_COMMANDS[1]?.options?.[0]?.type).toBe(ApplicationCommandOptionType.Subcommand);
+    expect(SLASH_COMMANDS[1]?.options?.[1]?.type).toBe(ApplicationCommandOptionType.Subcommand);
   });
 });
 

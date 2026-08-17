@@ -1,6 +1,6 @@
 # ADR-007: Brave Search and Answer Integration
 
-- **Status**: Accepted
+- **Status**: Accepted (the citation-rendering clause is amended: the inline `[n]` + Sources-footer pipeline was replaced by inline masked links with a durable source index — see below)
 - **Date**: 2026-08-12
 
 ## Context
@@ -11,7 +11,7 @@ The bot needs web search for current events, documentation lookups, and factual 
 
 Expose Brave as first-class model tools the model calls autonomously:
 
-- **`web_search`** — Brave Search API (`/res/v1/web/search`): structured results (title, URL, description) for research-style queries. Results feed the citation pipeline: inline `[n]` markers plus the canonical Sources footer.
+- **`web_search`** — Brave Search API (`/res/v1/web/search`): structured results (title, URL, description) for research-style queries. Results feed the citation pipeline. _(Amended 2026-08-17: replies cite inline masked links with short labels (来源/原文) instead of `[n]` markers plus a rendered Sources footer — Discord's preview-card spam destroyed readability. A runtime sanitizer masks any bare URL as a guarantee layer, and every generation's extracted sources persist in `interaction_sources` (24h window) and are re-injected into later generations of the same container, so "where is the source" follow-ups stay answerable with no footer at all.)_
 - **`web_answer`** — Brave Answer API (`/res/v1/chat/completions`): a synthesized, source-cited natural-language answer for factual questions.
 
 Both tools are always present; with a missing key or a failed request they return a structured error so the model degrades gracefully — no tool failure is fatal. Two separate keys (`BRAVE_SEARCH_API_KEY`, `BRAVE_ANSWER_API_KEY`) are Worker secrets, each independently optional. The old keyword-prefetch pipeline and its dead code were deleted.

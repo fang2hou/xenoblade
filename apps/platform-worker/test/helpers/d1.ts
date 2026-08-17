@@ -18,7 +18,13 @@ export function createTestD1(): D1Database {
 function readMigrations(): string {
   // Fixed order: every numbered migration, exactly as wrangler applies them.
   const dir = new URL("../../migrations/", import.meta.url);
-  const names = ["0001_initial.sql", "0002_user_settings.sql", "0003_user_language.sql"];
+  const names = [
+    "0001_initial.sql",
+    "0002_user_settings.sql",
+    "0003_user_language.sql",
+    "0004_context_truncate.sql",
+    "0005_interaction_sources.sql",
+  ];
   return names.map((name) => readFileSync(new URL(name, dir), "utf8")).join("\n");
 }
 

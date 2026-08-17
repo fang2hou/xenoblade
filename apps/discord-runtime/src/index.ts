@@ -29,6 +29,11 @@ import type {
 
 import { loadEnv, type EnvConfig } from "./env";
 import { containerIdFromMessage, scopeIdFromMessage } from "./conversation-scope";
+import {
+  handleMemoryConfirmReaction,
+  MemoryConfirmRegistry,
+  postMemoryConfirmation,
+} from "./memory-confirm";
 import { evaluateTrigger, type TriggerDecision } from "./trigger-policy";
 import { fetchHistory } from "./history";
 import { sendTyping } from "./output";
@@ -38,9 +43,10 @@ import { handleDmMessage } from "./dm-commands";
 import { ConversationQueue } from "./conversation-queue";
 import { registerSlashCommands } from "./slash-commands";
 import { handleLanguageCommand, resolveUiLanguageBounded } from "./language";
-import { handleStatusCommand } from "./status";
 import { messages, stagedMilestones } from "./i18n";
-import { handleClearContext } from "./clear-context";
+import { handleStatusCommand } from "./status";
+import { handleContextCommand } from "./context";
+import { handleControlCommand } from "./control-commands";
 import { handleUsageCommand } from "./usage";
 import {
   DELETE_EMOJI,
@@ -57,7 +63,7 @@ async function main(): Promise<void> {
   const env = loadEnv();
   const queue = new ConversationQueue();
   const registry = new ReplyRegistry();
-
+  const confirms = new MemoryConfirmRegistry();
   const client = new Client({
     intents: [
       GatewayIntentBits.Guilds,
@@ -92,13 +98,13 @@ async function main(): Promise<void> {
   client.on("messageCreate", (message) => {
     // Fire-and-forget: the handler catches and logs internally; awaiting
     // would block the gateway's event dispatch.
-    void handleMessageCreate(message, env, queue, client, registry);
+    void handleMessageCreate(message, env, queue, client, registry, confirms);
   });
 
   client.on("messageReactionAdd", (reaction, user) => {
     // Fire-and-forget: the handler catches and logs internally; awaiting
     // would block the gateway's event dispatch.
-    void handleReactionAdd(reaction, user, env, queue, client, registry);
+    void handleReactionAdd(reaction, user, env, queue, client, registry, confirms);
   });
 
   client.on("interactionCreate", (interaction) => {
@@ -134,6 +140,7 @@ async function handleMessageCreate(
   queue: ConversationQueue,
   client: Client,
   registry: ReplyRegistry,
+  confirms: MemoryConfirmRegistry,
 ): Promise<void> {
   try {
     if (message.author.bot) return;
@@ -143,7 +150,7 @@ async function handleMessageCreate(
     if (message.channel?.isDMBased()) {
       await handleDmMessage(message, env, (dmMessage) => {
         queue.enqueue(containerIdFromMessage(dmMessage), () =>
-          runGeneration(dmMessage, { kind: "dm-chat" }, env, registry),
+          runGeneration(dmMessage, { kind: "dm-chat" }, env, registry, confirms),
         );
       });
       return;
@@ -163,7 +170,7 @@ async function handleMessageCreate(
         hasFallback: Boolean(decision.fallbackMessage),
       }),
     );
-    queue.enqueue(containerId, () => runGeneration(message, decision, env, registry));
+    queue.enqueue(containerId, () => runGeneration(message, decision, env, registry, confirms));
   } catch (error) {
     console.log(
       JSON.stringify({
@@ -185,6 +192,7 @@ async function runGeneration(
   decision: TriggerDecision,
   env: EnvConfig,
   registry: ReplyRegistry,
+  confirms: MemoryConfirmRegistry,
 ): Promise<void> {
   const channel = message.channel;
   if (!channel?.isSendable()) return;
@@ -243,7 +251,14 @@ async function runGeneration(
     }),
   );
 
-  await executeGeneration(channel, request, env, { regenerate: false, controls: "full" }, registry);
+  await executeGeneration(
+    channel,
+    request,
+    env,
+    { regenerate: false, controls: "full" },
+    registry,
+    confirms,
+  );
 }
 
 /** How a generation run claims dedup and which affordances its reply gets. */
@@ -266,6 +281,7 @@ async function executeGeneration(
   env: EnvConfig,
   run: GenerationRun,
   registry: ReplyRegistry,
+  confirms: MemoryConfirmRegistry,
 ): Promise<void> {
   // Keep typing indicator alive during generation. Discord's typing
   // indicator expires after ~10s; refresh every 8s until done.
@@ -322,7 +338,9 @@ async function executeGeneration(
     request,
     controls: run.controls,
     registry,
+    confirms,
     staged,
+    channel,
     language,
     redactContent: request.scopeId === "dm",
   });
@@ -333,8 +351,12 @@ interface PostContext {
   request: GenerationRequest;
   controls: ReplyControls;
   registry: ReplyRegistry;
+  /** Pending memory confirmations for this runtime (ADR-013). */
+  confirms: MemoryConfirmRegistry;
   /** Staged placeholder this run owns; settle/dismiss post or remove it. */
   staged: StagedStatus;
+  /** Channel the reply was posted to; confirmations follow the reply. */
+  channel: SendableChannels;
   /** UI language for this user's failure/rate-limit notices. */
   language: UiLanguage;
   redactContent: boolean;
@@ -357,7 +379,7 @@ async function applyGenerationResult(result: GenerationResult, ctx: PostContext)
 
   switch (result.status) {
     case "completed": {
-      const content = renderReply(result.reply, result.sources);
+      const content = renderReply(result.reply);
       const replyLength = result.reply.length;
       const replyPreview = ctx.redactContent ? "" : result.reply.slice(0, 100);
       console.log(
@@ -407,6 +429,25 @@ async function applyGenerationResult(result: GenerationResult, ctx: PostContext)
         });
       if (posted !== undefined) {
         await addReplyControls(posted, ctx);
+      }
+      // Memory proposals from this generation (ADR-013): post the
+      // ✅/❌ confirmation message right after the reply. Count-only logs —
+      // proposal text never reaches the logs (DM posture applies everywhere).
+      if (result.memoryProposals !== undefined && result.memoryProposals.length > 0) {
+        console.log(
+          JSON.stringify({
+            event: "memory_proposals_posted",
+            messageId,
+            proposals: result.memoryProposals.length,
+          }),
+        );
+        await postMemoryConfirmation(
+          ctx.channel,
+          ctx.request.userId,
+          result.memoryProposals,
+          messages(ctx.language).memoryConfirm,
+          ctx.confirms,
+        );
       }
       return;
     }
@@ -502,12 +543,16 @@ async function handleReactionAdd(
   queue: ConversationQueue,
   client: Client,
   registry: ReplyRegistry,
+  confirms: MemoryConfirmRegistry,
 ): Promise<void> {
   try {
+    // Memory confirmations are a separate message family from reply
+    // affordances; ids never overlap, so order is irrelevant.
+    await handleMemoryConfirmReaction(reaction, user, env, confirms);
     const entry = registry.get(reaction.message.id);
     const action = resolveAffordanceAction(entry, reaction.emoji?.name, user.id, user.bot);
     if (action === "regenerate" && entry) {
-      await startRegenerate(reaction, entry, env, queue, client, registry);
+      await startRegenerate(reaction, entry, env, queue, client, registry, confirms);
       return;
     }
     if (action === "delete" && entry) {
@@ -537,6 +582,7 @@ async function startRegenerate(
   queue: ConversationQueue,
   client: Client,
   registry: ReplyRegistry,
+  confirms: MemoryConfirmRegistry,
 ): Promise<void> {
   // Consume before enqueuing: one attempt per reply, even if the re-run
   // fails. The Worker's claimRegenerate is the durable cross-restart bound.
@@ -560,6 +606,7 @@ async function startRegenerate(
       env,
       { regenerate: true, controls: "delete-only" },
       registry,
+      confirms,
     );
   });
 }
@@ -664,8 +711,8 @@ async function handleInteraction(
       await handleStatusCommand(interaction, env);
       return;
     }
-    if (interaction.commandName === "clear-context") {
-      await handleClearContext(interaction, env);
+    if (interaction.commandName === "context") {
+      await handleContextCommand(interaction, env);
       return;
     }
     if (interaction.commandName === "usage") {
@@ -674,6 +721,17 @@ async function handleInteraction(
     }
     if (interaction.commandName === "language") {
       await handleLanguageCommand(interaction, env);
+      return;
+    }
+    if (
+      interaction.commandName === "persona" ||
+      interaction.commandName === "preference" ||
+      interaction.commandName === "memory" ||
+      interaction.commandName === "chat" ||
+      interaction.commandName === "learn" ||
+      interaction.commandName === "help"
+    ) {
+      await handleControlCommand(interaction, env);
       return;
     }
   } catch (error) {

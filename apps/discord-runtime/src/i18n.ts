@@ -23,9 +23,30 @@ const zh = {
     "这次生成比较复杂，仍在处理…",
     "仍在处理中，感谢耐心等待…",
   ],
-  clearContext: {
-    success: "已清除你在此频道的对话上下文。",
-    failure: "清除上下文失败，请稍后重试。",
+  context: {
+    truncateSuccess: "已截断：此时间点之前的消息不再纳入参考。可用 /context restore 撤销。",
+    truncateFailure: "截断失败，请稍后重试。",
+    restoreSuccess: (remaining: number) =>
+      remaining > 0
+        ? `已撤销最近一次截断，更早的消息重新纳入参考。还可撤销 ${remaining} 次。`
+        : "已撤销最近一次截断，更早的消息重新纳入参考。",
+    restoreNone: "当前没有可撤销的截断。",
+    restoreFailure: "撤销截断失败，请稍后重试。",
+  },
+  memoryConfirm: {
+    header: "我准备更新对你的记忆：",
+    saveLine: (label: string, key: string, value: string) => `＋ ${label} · ${key}：${value}`,
+    forgetLine: (label: string | null, key: string) =>
+      label === null ? `－ ${key}` : `－ ${label} · ${key}`,
+    footer: "回复 ✅ 保存，❌ 取消（5 分钟内有效）。",
+    saved: "✅ 已保存到记忆。",
+    savedPartial: (ok: number, total: number) => `部分保存成功（${ok}/${total}），其余请稍后重试。`,
+    full: "记忆条数已达上限（50 条），请先用 /memory clear 清理后再试。",
+    cancelled: "已取消，未修改记忆。",
+    expired: "⏱️ 未及时确认，本次未修改记忆。",
+    failed: "保存失败，请稍后重试。",
+    labelFact: "事实",
+    labelPreference: "偏好",
   },
   usage: {
     failure: "加载用量统计失败，请稍后重试。",
@@ -45,34 +66,29 @@ const zh = {
   },
   dm: {
     help: [
-      "Xenoblade DM 控制台。可用命令：",
+      "Xenoblade 控制台。可用命令（均为 Discord 原生斜杠命令）：",
       "",
-      "/persona show — 查看你的全部人设记忆",
-      "/persona set <key> <value> — 设置一条人设记忆",
-      "/persona clear [key] — 清除人设记忆（可指定 key）",
+      "/persona show · set · clear — 管理你的人设记忆",
+      "/preference list · set · clear — 管理你的偏好",
+      "/memory show · clear — 查看或清除全部记忆",
       "",
-      "/preference list — 查看你的偏好",
-      "/preference set <key> <value> — 设置一条偏好",
-      "/preference clear [key] — 清除偏好（可指定 key）",
+      '也可以在对话中直接说"帮我记住…"/"忘掉…"，确认后即写入记忆。',
       "",
-      "/memory show — 查看全部记忆",
-      "/memory clear — 清除全部记忆",
-      "",
-      "/chat on|off — 开启/关闭私聊对话（默认关闭）",
+      "/chat on|off — 开启/关闭私聊对话（默认关闭，仅限私聊使用）",
       "/learn on|off — 开启/关闭自动记忆学习（默认关闭）",
+      "/context truncate|restore — 管理机器人参考的历史消息范围",
+      "/language — 切换提示语言",
       "/help — 显示此帮助",
     ].join("\n"),
     genericError: "命令执行失败，请稍后重试。",
     memoryError: "读取记忆失败，请稍后重试。",
-    categoryUsage: (category: string) => `用法：/${category} set <key> <value>`,
     memorySet: (label: string, key: string) => `已设置${label}记忆：${key}`,
     memoryCleared: (label: string) => `已清除${label}记忆。`,
-    unknownSubCategory: (category: string) => `未知子命令。用法：/${category} show|set|clear`,
-    unknownSubMemory: "未知子命令。用法：/memory show|clear",
     allMemoriesCleared: "已清除全部记忆。",
+    chatDmOnly: "此命令仅在私聊中可用。",
     chatOn: "已开启私聊对话。现在直接发消息即可与我对话，/chat off 可随时关闭。",
     chatOffClearOk: "，并已清除 DM 对话上下文。",
-    chatOffClearFailed: "。清除 DM 对话上下文失败，可用 /clear-context 重试。",
+    chatOffClearFailed: "。清除 DM 对话上下文失败，可用 /context truncate 重试。",
     chatOffPrefix: "已关闭私聊对话",
     chatState: (state: string) => `私聊对话当前${state}。用法：/chat on|off`,
     learnOn:
@@ -95,7 +111,27 @@ export type Messages = {
   status: { ok: string };
   generation: { failure: string; rateLimited: string };
   stagedMilestones: readonly string[];
-  clearContext: { success: string; failure: string };
+  context: {
+    truncateSuccess: string;
+    truncateFailure: string;
+    restoreSuccess: (remaining: number) => string;
+    restoreNone: string;
+    restoreFailure: string;
+  };
+  memoryConfirm: {
+    header: string;
+    saveLine: (label: string, key: string, value: string) => string;
+    forgetLine: (label: string | null, key: string) => string;
+    footer: string;
+    saved: string;
+    savedPartial: (ok: number, total: number) => string;
+    full: string;
+    cancelled: string;
+    expired: string;
+    failed: string;
+    labelFact: string;
+    labelPreference: string;
+  };
   usage: {
     failure: string;
     you: (hours: number) => string;
@@ -112,12 +148,10 @@ export type Messages = {
     help: string;
     genericError: string;
     memoryError: string;
-    categoryUsage: (category: string) => string;
     memorySet: (label: string, key: string) => string;
     memoryCleared: (label: string) => string;
-    unknownSubCategory: (category: string) => string;
-    unknownSubMemory: string;
     allMemoriesCleared: string;
+    chatDmOnly: string;
     chatOn: string;
     chatOffClearOk: string;
     chatOffClearFailed: string;
@@ -152,9 +186,32 @@ const en: Messages = {
     "This one is taking longer than usual…",
     "Still working — thanks for your patience…",
   ],
-  clearContext: {
-    success: "Cleared your conversation context in this channel.",
-    failure: "Failed to clear the context. Please try again later.",
+  context: {
+    truncateSuccess:
+      "Truncated: messages before this point are no longer referenced. Undo anytime with /context restore.",
+    truncateFailure: "Failed to truncate. Please try again later.",
+    restoreSuccess: (remaining: number) =>
+      remaining > 0
+        ? `Undid the latest truncation; earlier messages are referenced again. ${remaining} more undo(s) available.`
+        : "Undid the latest truncation; earlier messages are referenced again.",
+    restoreNone: "There is no truncation to undo right now.",
+    restoreFailure: "Failed to undo the truncation. Please try again later.",
+  },
+  memoryConfirm: {
+    header: "I'd like to update what I remember about you:",
+    saveLine: (label: string, key: string, value: string) => `+ ${label} · ${key}: ${value}`,
+    forgetLine: (label: string | null, key: string) =>
+      label === null ? `- ${key}` : `- ${label} · ${key}`,
+    footer: "React ✅ to save or ❌ to cancel (valid for 5 minutes).",
+    saved: "✅ Saved to memory.",
+    savedPartial: (ok: number, total: number) =>
+      `Partially saved (${ok}/${total}); please retry the rest later.`,
+    full: "Your memory is full (50 entries); clear some with /memory clear first.",
+    cancelled: "Cancelled — nothing was changed.",
+    expired: "⏱️ Not confirmed in time — nothing was changed.",
+    failed: "Failed to save. Please try again later.",
+    labelFact: "fact",
+    labelPreference: "preference",
   },
   usage: {
     failure: "Failed to load the usage summary. Please try again later.",
@@ -174,35 +231,29 @@ const en: Messages = {
   },
   dm: {
     help: [
-      "Xenoblade DM console. Available commands:",
+      "Xenoblade console. Available commands (native Discord slash commands):",
       "",
-      "/persona show — list all your persona memories",
-      "/persona set <key> <value> — set one persona memory",
-      "/persona clear [key] — clear persona memories (optionally one key)",
+      "/persona show · set · clear — manage your persona memories",
+      "/preference list · set · clear — manage your preferences",
+      "/memory show · clear — show or clear all memories",
       "",
-      "/preference list — list your preferences",
-      "/preference set <key> <value> — set one preference",
-      "/preference clear [key] — clear preferences (optionally one key)",
+      'You can also just say "remember…" / "forget…" in chat; it\'s saved after you confirm.',
       "",
-      "/memory show — show all memories",
-      "/memory clear — clear all memories",
-      "",
-      "/chat on|off — enable/disable DM chat (off by default)",
+      "/chat on|off — enable/disable DM chat (off by default, DMs only)",
       "/learn on|off — enable/disable auto memory learning (off by default)",
+      "/context truncate|restore — manage which past messages the bot references",
+      "/language — switch notice language",
       "/help — show this help",
     ].join("\n"),
     genericError: "Command failed. Please try again later.",
     memoryError: "Failed to read memories. Please try again later.",
-    categoryUsage: (category: string) => `Usage: /${category} set <key> <value>`,
     memorySet: (label: string, key: string) => `Set ${label} memory: ${key}`,
     memoryCleared: (label: string) => `Cleared ${label} memories.`,
-    unknownSubCategory: (category: string) =>
-      `Unknown subcommand. Usage: /${category} show|set|clear`,
-    unknownSubMemory: "Unknown subcommand. Usage: /memory show|clear",
     allMemoriesCleared: "Cleared all memories.",
+    chatDmOnly: "This command is only available in DMs.",
     chatOn: "DM chat enabled. Just send a message to talk to me; /chat off disables it anytime.",
     chatOffClearOk: " and cleared the DM conversation context.",
-    chatOffClearFailed: ". Failed to clear the DM context; retry with /clear-context.",
+    chatOffClearFailed: ". Failed to clear the DM context; retry with /context truncate.",
     chatOffPrefix: "DM chat disabled",
     chatState: (state: string) => `DM chat is currently ${state}. Usage: /chat on|off`,
     learnOn:

@@ -1,8 +1,14 @@
 import type {
   ContextClearRequest,
   ContextClearResult,
+  ContextRestoreRequest,
+  ContextRestoreResult,
+  ContextTruncateRequest,
+  ContextTruncateResult,
   GenerationRequest,
   GenerationResult,
+  MemoryProposalRequest,
+  MemoryProposalResponse,
   MemoryRequest,
   MemoryResponse,
   UsageSummaryResponse,
@@ -48,6 +54,34 @@ export function clearContext(
   );
 }
 
+/** Push an undo-able context truncation on the Worker (ADR-014). */
+export function truncateContext(
+  req: ContextTruncateRequest,
+  workerUrl: string,
+  token: string,
+): Promise<ContextTruncateResult> {
+  return postJson<ContextTruncateResult>(
+    `${workerUrl}/internal/v1/context/truncate`,
+    req,
+    token,
+    CONTROL_TIMEOUT_MS,
+  );
+}
+
+/** Pop the newest undoable truncation on the Worker (ADR-014). */
+export function restoreContext(
+  req: ContextRestoreRequest,
+  workerUrl: string,
+  token: string,
+): Promise<ContextRestoreResult> {
+  return postJson<ContextRestoreResult>(
+    `${workerUrl}/internal/v1/context/restore`,
+    req,
+    token,
+    CONTROL_TIMEOUT_MS,
+  );
+}
+
 /** Perform a user-memory operation on the Worker. */
 export function memoryOp(
   req: MemoryRequest,
@@ -56,6 +90,20 @@ export function memoryOp(
 ): Promise<MemoryResponse> {
   return postJson<MemoryResponse>(
     `${workerUrl}/internal/v1/memory`,
+    req,
+    token,
+    CONTROL_TIMEOUT_MS,
+  );
+}
+
+/** Execute user-confirmed memory proposals on the Worker (ADR-013). */
+export function applyMemoryProposals(
+  req: MemoryProposalRequest,
+  workerUrl: string,
+  token: string,
+): Promise<MemoryProposalResponse> {
+  return postJson<MemoryProposalResponse>(
+    `${workerUrl}/internal/v1/memory/proposals`,
     req,
     token,
     CONTROL_TIMEOUT_MS,

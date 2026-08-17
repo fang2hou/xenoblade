@@ -1,5 +1,6 @@
 import type { ToolSet } from "ai";
 
+import { createMemoryTools } from "./memory-tools";
 import { createReadUrlTool } from "./read-url";
 import { createSearchTools } from "./search";
 import { createModelInfoTools } from "./model-info";
@@ -18,5 +19,6 @@ export function createFirstPartyTools(env: Env): ToolSet {
     read_url: createReadUrlTool(env),
     ...createModelInfoTools(env),
     ...createVisionTool(env),
+    ...createMemoryTools(),
   };
 }
