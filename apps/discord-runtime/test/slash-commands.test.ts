@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { Routes } from "discord.js";
+import { ApplicationCommandOptionType, Routes } from "discord.js";
 
 import { SLASH_COMMANDS, registerSlashCommands } from "../src/slash-commands";
 import type { EnvConfig } from "../src/env";
@@ -21,6 +21,16 @@ describe("SLASH_COMMANDS", () => {
     for (const command of SLASH_COMMANDS) {
       expect(command.description.length).toBeGreaterThan(0);
     }
+  });
+
+  it("declares a type on every option (Discord rejects the PUT without it)", () => {
+    for (const command of SLASH_COMMANDS) {
+      if (!("options" in command)) continue;
+      for (const option of command.options) {
+        expect(option.type).toBeDefined();
+      }
+    }
+    expect(SLASH_COMMANDS[3]?.options?.[0]?.type).toBe(ApplicationCommandOptionType.String);
   });
 });
 
