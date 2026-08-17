@@ -5,6 +5,7 @@ import {
   Client,
   DMChannel,
   GatewayIntentBits,
+  MessageFlags,
   Partials,
   TextChannel,
   ThreadChannel,
@@ -12,6 +13,7 @@ import {
 import type {
   ChatInputCommandInteraction,
   Message,
+  MessageComponentInteraction,
   MessageReaction,
   PartialMessageReaction,
   PartialUser,
@@ -49,12 +51,9 @@ import { handleContextCommand } from "./context";
 import { handleControlCommand } from "./control-commands";
 import { handleUsageCommand } from "./usage";
 import {
-  DELETE_EMOJI,
-  isAffordanceEmoji,
-  REGENERATE_EMOJI,
+  buildReplyControlsRow,
   ReplyRegistry,
-  resolveAffordanceAction,
-  type ReplyControls,
+  resolveControlAction,
   type ReplyEntry,
 } from "./reply-controls";
 import { renderReply } from "./citations";
@@ -70,15 +69,16 @@ async function main(): Promise<void> {
       GatewayIntentBits.GuildMessages,
       GatewayIntentBits.MessageContent,
       GatewayIntentBits.DirectMessages,
-      // Required to receive messageReactionAdd events for the reply
-      // affordances (🔁 regenerate / 🗑 delete).
+      // Required to receive messageReactionAdd events for the memory
+      // confirmations (ADR-013 ✅/❌). Reply controls are buttons and arrive
+      // as interactions (ADR-015).
       GatewayIntentBits.GuildMessageReactions,
     ],
     // Partials.Channel is required to receive MESSAGE_CREATE in DM channels
     // that are not yet in the cache. Message/Reaction/User partials keep
-    // messageReactionAdd flowing for replies that have fallen out of the
-    // cache — the handler reads only ids and fetches full structures before
-    // acting, so partial payloads are safe.
+    // messageReactionAdd flowing for memory confirmations on messages that
+    // have fallen out of the cache — the handler reads only ids and fetches
+    // full structures before acting, so partial payloads are safe.
     partials: [Partials.Channel, Partials.Message, Partials.Reaction, Partials.User],
   });
 
@@ -104,17 +104,27 @@ async function main(): Promise<void> {
   client.on("messageReactionAdd", (reaction, user) => {
     // Fire-and-forget: the handler catches and logs internally; awaiting
     // would block the gateway's event dispatch.
-    void handleReactionAdd(reaction, user, env, queue, client, registry, confirms);
+    void handleReactionAdd(reaction, user, env, confirms);
   });
 
   client.on("interactionCreate", (interaction) => {
     // Receipt log: without it, an interaction that is dropped here (wrong
-    // type, unrouted command) fails silently as "did not respond" in Discord.
+    // type, unrouted command or component) fails silently as "did not
+    // respond" in Discord.
     const command =
       interaction.isChatInputCommand() || interaction.isContextMenuCommand()
         ? interaction.commandName
         : null;
-    console.log(JSON.stringify({ event: "interaction_received", type: interaction.type, command }));
+    const customId = interaction.isMessageComponent() ? interaction.customId : null;
+    console.log(
+      JSON.stringify({ event: "interaction_received", type: interaction.type, command, customId }),
+    );
+    if (interaction.isMessageComponent()) {
+      // Fire-and-forget: the handler catches and logs internally; awaiting
+      // would block the gateway's event dispatch.
+      void handleComponentInteraction(interaction, env, queue, client, registry, confirms);
+      return;
+    }
     if (!interaction.isChatInputCommand()) return;
     // Fire-and-forget: the handler catches and logs internally; awaiting
     // would block the gateway's event dispatch.
@@ -251,29 +261,37 @@ async function runGeneration(
     }),
   );
 
-  await executeGeneration(
-    channel,
-    request,
-    env,
-    { regenerate: false, controls: "full" },
-    registry,
-    confirms,
-  );
+  await executeGeneration(channel, request, env, { regenerate: false }, registry, confirms);
 }
 
-/** How a generation run claims dedup and which affordances its reply gets. */
+/** How a generation run claims dedup and where its reply lands. */
 interface GenerationRun {
-  /** True marks a regenerate: dedup claims the once-per-trigger slot. */
+  /** True marks a regenerate: dedup claims the Worker's regenerate lease. */
   regenerate: boolean;
-  controls: ReplyControls;
+  /**
+   * Present when an existing reply is regenerated in place (ADR-015): the
+   * run edits the tracked head message instead of posting fresh, restores it
+   * on failure, and re-enables its buttons on success.
+   */
+  target?: RegenTarget;
+}
+
+/** The reply a regenerate edits in place, plus how to reach its clicker. */
+interface RegenTarget {
+  entry: ReplyEntry;
+  /** Head chunk message of the reply being replaced. */
+  head: Message;
+  /** Ephemeral side-channel to the clicker (interaction follow-up). */
+  notify: (text: string) => Promise<void>;
 }
 
 /**
  * Serialized generation execution: one typing indicator, call the Worker,
- * post the result with its reaction affordances. Long runs get a staged
- * status placeholder (ADR-003 amendment) that the final reply replaces.
- * Runs inside the per-container queue; regenerates re-run a previously
- * built request with the same shape.
+ * post the result with its button controls. Long runs get a staged status
+ * placeholder (ADR-003 amendment) that the final reply replaces; a
+ * regenerate reuses the existing reply's head message as that placeholder
+ * (ADR-015). Runs inside the per-container queue; regenerates re-run a
+ * previously built request with the same shape.
  */
 async function executeGeneration(
   channel: SendableChannels,
@@ -298,8 +316,12 @@ async function executeGeneration(
 
   // Staged status placeholder for long generations (ADR-003 amendment):
   // posts after ~8s, escalates at coarse milestones, and is replaced by the
-  // final reply or failure notice.
-  const staged = new StagedStatus(channel, { milestones: stagedMilestones(language) });
+  // final reply or failure notice. A regenerate stages onto the existing
+  // reply's head message instead (ADR-015).
+  const staged = new StagedStatus(channel, {
+    milestones: stagedMilestones(language),
+    ...(run.target ? { placeholder: run.target.head } : {}),
+  });
   staged.start();
 
   const wireRequest: GenerationRequest = run.regenerate
@@ -321,6 +343,10 @@ async function executeGeneration(
         error: String(error),
       }),
     );
+    if (run.target) {
+      await restoreRegeneratedReply(run.target, staged, language, generationTexts.failure);
+      return;
+    }
     await staged.settle(generationTexts.failure).catch((e) => {
       console.log(
         JSON.stringify({
@@ -336,7 +362,7 @@ async function executeGeneration(
   clearInterval(typingInterval);
   await applyGenerationResult(result, {
     request,
-    controls: run.controls,
+    ...(run.target ? { regen: run.target } : {}),
     registry,
     confirms,
     staged,
@@ -346,10 +372,11 @@ async function executeGeneration(
   });
 }
 
-/** Context for posting a result: what the reaction controls need. */
+/** Context for posting a result: what the reply controls need. */
 interface PostContext {
   request: GenerationRequest;
-  controls: ReplyControls;
+  /** Present when this run regenerates a tracked reply in place (ADR-015). */
+  regen?: RegenTarget;
   registry: ReplyRegistry;
   /** Pending memory confirmations for this runtime (ADR-013). */
   confirms: MemoryConfirmRegistry;
@@ -364,8 +391,10 @@ interface PostContext {
 
 /**
  * Post the Worker result (or a fallback message) to the channel, settling the
- * staged status placeholder (if any) with the outcome text. DM-scope results
- * never log content previews (ADR-011 privacy posture).
+ * staged status placeholder (if any) with the outcome text. A regenerate
+ * replaces its tracked reply in place; any failed or rejected re-run
+ * restores the previous reply instead of posting a notice over it.
+ * DM-scope results never log content previews (ADR-011 privacy posture).
  */
 async function applyGenerationResult(result: GenerationResult, ctx: PostContext): Promise<void> {
   const messageId = ctx.request.messageId;
@@ -393,15 +422,24 @@ async function applyGenerationResult(result: GenerationResult, ctx: PostContext)
       );
       if (replyLength === 0 || content === "") {
         console.log(JSON.stringify({ event: "empty_reply", messageId }));
-        await ctx.staged.settle(messages(ctx.language).generation.failure).catch((e) => {
-          console.log(
-            JSON.stringify({
-              event: "post_reply_error",
-              messageId,
-              error: String(e),
-            }),
+        if (ctx.regen) {
+          await restoreRegeneratedReply(
+            ctx.regen,
+            ctx.staged,
+            ctx.language,
+            messages(ctx.language).generation.failure,
           );
-        });
+        } else {
+          await ctx.staged.settle(messages(ctx.language).generation.failure).catch((e) => {
+            console.log(
+              JSON.stringify({
+                event: "post_reply_error",
+                messageId,
+                error: String(e),
+              }),
+            );
+          });
+        }
         return;
       }
       const posted = await ctx.staged
@@ -428,7 +466,11 @@ async function applyGenerationResult(result: GenerationResult, ctx: PostContext)
           return undefined;
         });
       if (posted !== undefined) {
-        await addReplyControls(posted, ctx);
+        if (ctx.regen) {
+          await finishRegeneratedReply(posted, ctx);
+        } else {
+          await attachReplyControls(posted, ctx);
+        }
       }
       // Memory proposals from this generation (ADR-013): post the
       // ✅/❌ confirmation message right after the reply. Count-only logs —
@@ -453,16 +495,29 @@ async function applyGenerationResult(result: GenerationResult, ctx: PostContext)
     }
     case "rejected":
       // duplicate / disabled → silent; budget_exceeded → courteous notice.
+      // A regenerate is restored either way: the previous answer must not be
+      // destroyed by a failed re-run, and a silent path never posts notices.
       if (result.code === "budget_exceeded") {
-        await ctx.staged.settle(messages(ctx.language).generation.rateLimited).catch((e) => {
-          console.log(
-            JSON.stringify({
-              event: "post_reply_error",
-              messageId,
-              error: String(e),
-            }),
+        if (ctx.regen) {
+          await restoreRegeneratedReply(
+            ctx.regen,
+            ctx.staged,
+            ctx.language,
+            messages(ctx.language).generation.rateLimited,
           );
-        });
+        } else {
+          await ctx.staged.settle(messages(ctx.language).generation.rateLimited).catch((e) => {
+            console.log(
+              JSON.stringify({
+                event: "post_reply_error",
+                messageId,
+                error: String(e),
+              }),
+            );
+          });
+        }
+      } else if (ctx.regen) {
+        await restoreRegeneratedReply(ctx.regen, ctx.staged, ctx.language, null);
       } else {
         // Silent rejection still must not leave a stale placeholder.
         await ctx.staged.dismiss();
@@ -485,79 +540,134 @@ async function applyGenerationResult(result: GenerationResult, ctx: PostContext)
           retryable: result.retryable,
         }),
       );
-      await ctx.staged.settle(messages(ctx.language).generation.failure).catch((e) => {
-        console.log(
-          JSON.stringify({
-            event: "post_reply_error",
-            messageId,
-            error: String(e),
-          }),
+      if (ctx.regen) {
+        await restoreRegeneratedReply(
+          ctx.regen,
+          ctx.staged,
+          ctx.language,
+          messages(ctx.language).generation.failure,
         );
-      });
+      } else {
+        await ctx.staged.settle(messages(ctx.language).generation.failure).catch((e) => {
+          console.log(
+            JSON.stringify({
+              event: "post_reply_error",
+              messageId,
+              error: String(e),
+            }),
+          );
+        });
+      }
       return;
   }
 }
 
 /**
- * React to the head chunk of a freshly posted reply with its affordances and
- * register it for the reaction handler. Best-effort: a failed react is
- * logged, never fatal — the reply itself is already delivered.
+ * Terminate a regenerated run without new content: stop staging, put the
+ * previous reply back with its buttons re-enabled, and — when `notice` is
+ * set — tell the clicker why through the ephemeral side-channel.
  */
-async function addReplyControls(posted: readonly Message[], ctx: PostContext): Promise<void> {
+async function restoreRegeneratedReply(
+  target: RegenTarget,
+  staged: StagedStatus,
+  language: UiLanguage,
+  notice: string | null,
+): Promise<void> {
+  staged.abort();
+  target.entry.busy = false;
+  const row = buildReplyControlsRow(messages(language).replyControls, target.head.id);
+  await target.head
+    .edit({ content: target.entry.headContent, components: [row] })
+    .catch((error) => {
+      console.log(
+        JSON.stringify({
+          event: "regen_restore_error",
+          messageId: target.head.id,
+          error: String(error),
+        }),
+      );
+    });
+  if (notice !== null) await target.notify(notice);
+}
+
+/**
+ * Finish a successful regenerate: drop the surplus chunks of the replaced
+ * reply (continuations the new content no longer occupies) and hand the
+ * edited reply back to the registry with its buttons re-enabled.
+ */
+async function finishRegeneratedReply(posted: readonly Message[], ctx: PostContext): Promise<void> {
+  const target = ctx.regen;
+  if (target === undefined) return;
+  const newHead = posted[0];
+  if (newHead !== undefined) {
+    // The settle fallback may have already removed the old head itself; a
+    // failed delete is logged and ignored either way.
+    for (const id of target.entry.chunkIds) {
+      if (id === newHead.id) continue;
+      await ctx.channel.messages.delete(id).catch((error) => {
+        console.log(
+          JSON.stringify({
+            event: "reply_chunk_delete_error",
+            messageId: id,
+            error: String(error),
+          }),
+        );
+      });
+    }
+    if (newHead.id !== target.head.id) ctx.registry.remove(target.head.id);
+  }
+  console.log(
+    JSON.stringify({
+      event: "reply_regenerated",
+      messageId: target.head.id,
+      newHeadId: newHead?.id ?? null,
+      chunks: posted.length,
+    }),
+  );
+  await attachReplyControls(posted, ctx);
+}
+
+/**
+ * Register a posted reply for the control buttons and attach the action row
+ * to its head chunk. Best-effort: a failed components edit is logged, never
+ * fatal — the reply itself is already delivered, and a reply without
+ * registered buttons fails closed (ephemeral expiry on click).
+ */
+async function attachReplyControls(posted: readonly Message[], ctx: PostContext): Promise<void> {
   const head = posted[0];
   if (head === undefined) return;
   ctx.registry.register(head.id, {
     request: ctx.request,
     chunkIds: posted.map((message) => message.id),
-    regenerable: ctx.controls === "full",
+    headContent: head.content,
+    language: ctx.language,
+    busy: false,
   });
-  const emojis = ctx.controls === "full" ? [REGENERATE_EMOJI, DELETE_EMOJI] : [DELETE_EMOJI];
-  for (const emoji of emojis) {
-    await head.react(emoji).catch((error) => {
-      console.log(
-        JSON.stringify({
-          event: "reply_control_react_error",
-          messageId: head.id,
-          emoji,
-          error: String(error),
-        }),
-      );
-    });
-  }
+  const row = buildReplyControlsRow(messages(ctx.language).replyControls, head.id);
+  await head.edit({ components: [row] }).catch((error) => {
+    console.log(
+      JSON.stringify({
+        event: "reply_control_attach_error",
+        messageId: head.id,
+        error: String(error),
+      }),
+    );
+  });
 }
 
 /**
- * messageReactionAdd entry point for the reply affordances: 🔁 regenerates
- * the answer for the original trigger, 🗑 deletes the reply.
- *
- * The bot's own reactions are ignored — that includes the affordances it
- * adds itself. Only the triggering user may act: 🔁 spends generation budget
- * and 🗑 removes the answer they asked for, so restricting both to them stops
- * third parties from burning the shared 24h budget or deleting other members'
- * answers; moderators keep Discord's native message-deletion path.
+ * messageReactionAdd entry point for the memory confirmations (ADR-013).
+ * The reply affordances moved to buttons and arrive as interactions
+ * (ADR-015).
  */
 async function handleReactionAdd(
   reaction: MessageReaction | PartialMessageReaction,
   user: User | PartialUser,
   env: EnvConfig,
-  queue: ConversationQueue,
-  client: Client,
-  registry: ReplyRegistry,
   confirms: MemoryConfirmRegistry,
 ): Promise<void> {
   try {
-    // Memory confirmations are a separate message family from reply
-    // affordances; ids never overlap, so order is irrelevant.
     await handleMemoryConfirmReaction(reaction, user, env, confirms);
-    const entry = registry.get(reaction.message.id);
-    const action = resolveAffordanceAction(entry, reaction.emoji?.name, user.id, user.bot);
-    if (action === "regenerate" && entry) {
-      await startRegenerate(reaction, entry, env, queue, client, registry, confirms);
-      return;
-    }
-    if (action === "delete" && entry) {
-      await deleteReply(reaction, entry, client, registry);
-    }
   } catch (error) {
     console.log(
       JSON.stringify({
@@ -570,13 +680,82 @@ async function handleReactionAdd(
 }
 
 /**
- * Consume the reply's regenerate affordance and enqueue a re-run of the
- * frozen original request (same shape, plus the wire `regenerateOf` marker
- * the Worker dedups on). The regenerated reply gets delete-only controls:
- * the once-per-trigger regenerate claim is spent.
+ * interactionCreate entry point for the reply-control buttons (ADR-015):
+ * 🔁 Regenerate re-runs the frozen request and edits the reply in place,
+ * 🗑 Delete removes the whole reply.
+ *
+ * Only the triggering user may act — regenerating spends budget and deleting
+ * removes the answer they asked for, so restricting both to them stops third
+ * parties from burning the shared 24h budget or destroying other members'
+ * answers; anyone else gets an ephemeral refusal. Any button this process
+ * cannot resolve — restart, registry eviction, unknown customId — fails
+ * closed with an ephemeral expiry notice: no crash, no action.
+ */
+async function handleComponentInteraction(
+  interaction: MessageComponentInteraction,
+  env: EnvConfig,
+  queue: ConversationQueue,
+  client: Client,
+  registry: ReplyRegistry,
+  confirms: MemoryConfirmRegistry,
+): Promise<void> {
+  try {
+    const messageId = interaction.message.id;
+    const entry = registry.get(messageId);
+    const decision = resolveControlAction(
+      entry,
+      interaction.customId,
+      messageId,
+      interaction.user.id,
+    );
+    if (decision === null || decision.action === "rejected") {
+      // Unknown customId or unresolvable one — either way this process
+      // cannot act on the button, so fail closed with a graceful ephemeral
+      // notice: no crash, no action (ADR-015 restart safety).
+      const reason = decision === null ? "expired" : decision.reason;
+      const texts = messages(
+        await resolveUiLanguageBounded(interaction.user.id, env, 1_000),
+      ).replyControls;
+      const content =
+        reason === "not-owner" ? texts.notOwner : reason === "busy" ? texts.busy : texts.expired;
+      await interaction.reply({ content, flags: MessageFlags.Ephemeral }).catch((error) => {
+        console.log(
+          JSON.stringify({
+            event: "component_reject_reply_error",
+            messageId,
+            error: String(error),
+          }),
+        );
+      });
+      return;
+    }
+    if (entry === undefined) return;
+    if (decision.action === "delete") {
+      await deleteReply(interaction, entry, client, registry);
+      return;
+    }
+    await startRegenerate(interaction, entry, env, queue, client, registry, confirms);
+  } catch (error) {
+    console.log(
+      JSON.stringify({
+        event: "component_handler_error",
+        messageId: interaction.message.id,
+        error: String(error),
+      }),
+    );
+  }
+}
+
+/**
+ * Regenerate a reply in place (ADR-015): acknowledge the click by disabling
+ * the buttons, then enqueue a re-run of the frozen request that edits the
+ * same head message with the new content. The frozen request keeps its wire
+ * `regenerateOf` marker, which now claims the Worker's short-lived
+ * regenerate lease. A racing second click is refused while the re-run is in
+ * flight (`entry.busy`); the lease is the durable backstop.
  */
 async function startRegenerate(
-  reaction: MessageReaction | PartialMessageReaction,
+  interaction: MessageComponentInteraction,
   entry: ReplyEntry,
   env: EnvConfig,
   queue: ConversationQueue,
@@ -584,14 +763,42 @@ async function startRegenerate(
   registry: ReplyRegistry,
   confirms: MemoryConfirmRegistry,
 ): Promise<void> {
-  // Consume before enqueuing: one attempt per reply, even if the re-run
-  // fails. The Worker's claimRegenerate is the durable cross-restart bound.
-  registry.remove(reaction.message.id);
-  await clearAffordances(reaction, entry.request.userId);
+  const messageId = interaction.message.id;
+  entry.busy = true;
+  // Acknowledge and disable both buttons in one call, using the language
+  // the reply was posted with (no settings fetch on the ack path). A failure
+  // here means the message is gone — nothing to regenerate, stand down.
+  const disabledRow = buildReplyControlsRow(messages(entry.language).replyControls, messageId, {
+    disabled: true,
+  });
+  const acknowledged = await interaction.update({ components: [disabledRow] }).then(
+    () => true,
+    (error) => {
+      console.log(
+        JSON.stringify({ event: "regen_acknowledge_error", messageId, error: String(error) }),
+      );
+      return false;
+    },
+  );
+  if (!acknowledged) {
+    entry.busy = false;
+    return;
+  }
+  // Ephemeral side-channel to the clicker for the re-run's failure notices.
+  const notify = (text: string): Promise<void> =>
+    interaction.followUp({ content: text, flags: MessageFlags.Ephemeral }).then(
+      () => undefined,
+      (error) => {
+        console.log(
+          JSON.stringify({ event: "regen_notify_error", messageId, error: String(error) }),
+        );
+      },
+    );
 
   queue.enqueue(entry.request.containerId, async () => {
-    const channel = await client.channels.fetch(entry.request.channelId);
+    const channel = await client.channels.fetch(entry.request.channelId).catch(() => undefined);
     if (!channel?.isSendable()) {
+      entry.busy = false;
       console.log(
         JSON.stringify({
           event: "regenerate_channel_unavailable",
@@ -600,39 +807,46 @@ async function startRegenerate(
       );
       return;
     }
+    const head = await channel.messages.fetch(messageId).catch(() => undefined);
+    if (head === undefined) {
+      entry.busy = false;
+      console.log(JSON.stringify({ event: "regenerate_target_missing", messageId }));
+      return;
+    }
     await executeGeneration(
       channel,
       entry.request,
       env,
-      { regenerate: true, controls: "delete-only" },
+      { regenerate: true, target: { entry, head, notify } },
       registry,
       confirms,
     );
   });
 }
 
-/** Delete the reply: head chunk plus every chunk continuation message. */
+/** Delete the reply a control fired on: head chunk plus every continuation. */
 async function deleteReply(
-  reaction: MessageReaction | PartialMessageReaction,
+  interaction: MessageComponentInteraction,
   entry: ReplyEntry,
   client: Client,
   registry: ReplyRegistry,
 ): Promise<void> {
-  registry.remove(reaction.message.id);
-
-  const channel = await client.channels.fetch(reaction.message.channelId);
-  if (!channel?.isSendable()) {
+  const messageId = interaction.message.id;
+  registry.remove(messageId);
+  // Acknowledge first (the deletion itself is the visible outcome); the
+  // buttons die with the message.
+  await interaction.deferUpdate().catch((error) => {
     console.log(
-      JSON.stringify({
-        event: "reply_delete_channel_unavailable",
-        messageId: reaction.message.id,
-      }),
+      JSON.stringify({ event: "component_defer_error", messageId, error: String(error) }),
     );
+  });
+
+  const channel = await client.channels.fetch(interaction.message.channelId);
+  if (!channel?.isSendable()) {
+    console.log(JSON.stringify({ event: "reply_delete_channel_unavailable", messageId }));
     return;
   }
 
-  // Head first so the affordances disappear immediately; the reactions die
-  // with the message, so no explicit clear is needed here.
   for (const id of entry.chunkIds) {
     await channel.messages.delete(id).catch((error) => {
       console.log(
@@ -643,41 +857,10 @@ async function deleteReply(
   console.log(
     JSON.stringify({
       event: "reply_deleted",
-      messageId: reaction.message.id,
+      messageId,
       chunks: entry.chunkIds.length,
     }),
   );
-}
-
-/**
- * Remove the affordance reactions from a reply once it has been acted on, so
- * stale buttons don't accumulate. Removes the bot's own instances and the
- * actor's click (the latter needs MANAGE_MESSAGES; both are best-effort).
- */
-async function clearAffordances(
-  reaction: MessageReaction | PartialMessageReaction,
-  actorId: string,
-): Promise<void> {
-  try {
-    const fetched = reaction.message.partial ? await reaction.message.fetch() : reaction.message;
-    if (!fetched) return;
-    for (const emoji of [REGENERATE_EMOJI, DELETE_EMOJI]) {
-      const affordance = fetched.reactions.cache.find((r) =>
-        isAffordanceEmoji(r.emoji?.name, emoji),
-      );
-      if (!affordance) continue;
-      await affordance.remove().catch(() => undefined);
-      await affordance.users.remove(actorId).catch(() => undefined);
-    }
-  } catch (error) {
-    console.log(
-      JSON.stringify({
-        event: "clear_affordances_error",
-        messageId: reaction.message.id,
-        error: String(error),
-      }),
-    );
-  }
 }
 
 /** Build the wire `reference` from a reply, if any. */

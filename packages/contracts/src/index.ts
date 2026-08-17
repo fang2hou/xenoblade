@@ -78,8 +78,10 @@ export interface GenerationRequest {
   searchHint?: boolean;
   /**
    * When set, this request regenerates the reply for the given original
-   * message id. Dedup claims the once-per-message regenerate slot instead of
-   * `messageId`, so exactly one re-run is allowed per original trigger.
+   * message id. The Worker takes a short-lived lease on the regenerate slot
+   * instead of the message-id dedup claim, so racing duplicate deliveries
+   * are rejected while sequential re-runs stay allowed; the rolling
+   * generation budget (reserve/finalize) remains the real bound on totals.
    */
   regenerateOf?: string;
 }

@@ -17,6 +17,12 @@ const zh = {
     failure: "这次处理失败了，请稍后重试。",
     rateLimited: "请求过于频繁，请稍后再试。",
   },
+  replyControls: {
+    regenerate: "重新生成",
+    notOwner: "只有发起这条消息的用户可以操作。",
+    expired: "该操作已失效（机器人可能已重启）。",
+    busy: "正在重新生成，请稍候。",
+  },
   stagedMilestones: [
     "还在处理中…",
     "仍在生成中，请稍候…",
@@ -110,6 +116,12 @@ const zh = {
 export type Messages = {
   status: { ok: string };
   generation: { failure: string; rateLimited: string };
+  replyControls: {
+    regenerate: string;
+    notOwner: string;
+    expired: string;
+    busy: string;
+  };
   stagedMilestones: readonly string[];
   context: {
     truncateSuccess: string;
@@ -179,6 +191,12 @@ const en: Messages = {
   generation: {
     failure: "That request failed. Please try again later.",
     rateLimited: "You're sending requests too fast — please wait a moment.",
+  },
+  replyControls: {
+    regenerate: "Regenerate",
+    notOwner: "Only the user who triggered this reply can control it.",
+    expired: "This control has expired (the bot may have restarted).",
+    busy: "A regeneration is already running — please wait.",
   },
   stagedMilestones: [
     "Still working…",

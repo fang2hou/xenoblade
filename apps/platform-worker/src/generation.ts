@@ -11,6 +11,7 @@ import type {
 import {
   claimMessage,
   claimRegenerate,
+  releaseRegenerate,
   DM_SCOPE,
   finishGeneration,
   GenerationBudgetExceededError,
@@ -77,8 +78,11 @@ export async function generate(env: Env, req: GenerationRequest): Promise<Genera
   const now = Date.now();
   const requestId = crypto.randomUUID();
 
-  // 1. Dedup — a regenerate claims the once-per-original-message slot
-  // instead of the message id itself (already claimed by the original run).
+  // Dedup — a regenerate claims a short-lived lease on the original
+  // message instead of the message-id claim, so racing duplicate deliveries
+  // are rejected while sequential re-runs stay allowed (ADR-015); the
+  // rolling budget below remains the real bound on totals.
+  let isRegenerate = false;
   try {
     const claimed =
       req.regenerateOf !== undefined
@@ -87,6 +91,7 @@ export async function generate(env: Env, req: GenerationRequest): Promise<Genera
     if (!claimed) {
       return { status: "rejected", requestId, code: "duplicate" };
     }
+    isRegenerate = req.regenerateOf !== undefined;
   } catch (error) {
     return {
       status: "error",
@@ -97,13 +102,42 @@ export async function generate(env: Env, req: GenerationRequest): Promise<Genera
     };
   }
 
-  // 2. Runtime gate
+  if (!isRegenerate) return runGenerationPipeline(env, req, requestId, now);
+  // Release the lease whatever the outcome — the next deliberate re-run
+  // must not wait out the TTL. A failed release self-heals at expiry.
+  try {
+    return await runGenerationPipeline(env, req, requestId, now);
+  } finally {
+    const originalMessageId = req.regenerateOf;
+    if (originalMessageId !== undefined) {
+      try {
+        await releaseRegenerate(env.DB, originalMessageId);
+      } catch (error) {
+        console.log(
+          JSON.stringify({
+            event: "regen_lease_release_error",
+            messageId: originalMessageId,
+            error: String(error),
+          }),
+        );
+      }
+    }
+  }
+}
+
+async function runGenerationPipeline(
+  env: Env,
+  req: GenerationRequest,
+  requestId: string,
+  now: number,
+): Promise<GenerationResult> {
+  // Runtime gate
   const runtime = await getRuntimeConfig(env.DB, req.scopeId, req.channelId);
   if (!runtime.enabled || !runtime.channelAllowed) {
     return { status: "rejected", requestId, code: "disabled" };
   }
 
-  // 3. Budget
+  // Budget
   let reservationId: number;
   try {
     reservationId = (await reserveGeneration(env.DB, req.containerId, now)).reservationId;
@@ -120,7 +154,7 @@ export async function generate(env: Env, req: GenerationRequest): Promise<Genera
     };
   }
 
-  // 4. Context + prompt
+  // Context + prompt
   const state = await getUserContextState(env.DB, {
     scopeId: req.scopeId,
     containerId: req.containerId,
@@ -149,16 +183,16 @@ export async function generate(env: Env, req: GenerationRequest): Promise<Genera
     await getRecentSources(env.DB, { containerId: req.containerId, now }),
   );
 
-  // 5. Tools — ALL models get ALL tools (MCP + first-party + vision)
+  // Tools — ALL models get ALL tools (MCP + first-party + vision)
   const firstPartyTools = createFirstPartyTools(env);
   const mcpResult = await connectMcpServers(env);
   const allTools = { ...firstPartyTools, ...mcpResult.tools };
 
-  // 6. Messages — primary gets images natively, fallback uses text refs + vision tool
+  // Messages — primary gets images natively, fallback uses text refs + vision tool
   const messagesWithImages = buildGenerationMessages(req, contextDecision, sourcesBlock);
   const messagesTextOnly = buildTextOnlyGenerationMessages(req, contextDecision, sourcesBlock);
 
-  // 7. Model chain — try each model until one produces a response
+  // Model chain — try each model until one produces a response
   const chain = getModelChain(env, "generation");
   const sessionId = `xenoblade:${req.containerId}`;
 
@@ -233,7 +267,7 @@ export async function generate(env: Env, req: GenerationRequest): Promise<Genera
 
   if (!result) throw new Error("unreachable: no generation result");
 
-  // 8. Telemetry
+  // Telemetry
   const usage: GenerationUsage = {
     model: usedModel,
     inputTokens: result.usage.inputTokens ?? 0,
@@ -271,7 +305,7 @@ export async function generate(env: Env, req: GenerationRequest): Promise<Genera
     console.log(JSON.stringify({ event: "mark_interaction_error", error: String(error) }));
   }
 
-  // 9. Tool audit
+  // Tool audit
   try {
     for (const tr of result.toolResults ?? []) {
       const output: unknown = tr.output;

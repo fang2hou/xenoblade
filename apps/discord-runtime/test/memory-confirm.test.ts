@@ -3,7 +3,9 @@ import type { Message, MessageReaction, SendableChannels, User } from "discord.j
 import type { MemoryProposal } from "@xenoblade/contracts";
 
 import {
+  CANCEL_EMOJI,
   handleMemoryConfirmReaction,
+  isAffordanceEmoji,
   MemoryConfirmRegistry,
   postMemoryConfirmation,
   renderConfirmation,
@@ -63,6 +65,21 @@ describe("resolveConfirmAction", () => {
     expect(resolveConfirmAction(entry, "👍", "user-1", false)).toBeNull();
     expect(resolveConfirmAction({ ...entry, settled: true }, "✅", "user-1", false)).toBeNull();
     expect(resolveConfirmAction(undefined, "✅", "user-1", false)).toBeNull();
+  });
+});
+
+describe("isAffordanceEmoji", () => {
+  it("matches confirm/cancel emoji with or without the variation selector", () => {
+    expect(isAffordanceEmoji("✅", "✅")).toBe(true);
+    expect(isAffordanceEmoji("❌", CANCEL_EMOJI)).toBe(true);
+    expect(isAffordanceEmoji("❤", "❤️")).toBe(true);
+    expect(isAffordanceEmoji("❤️", "❤")).toBe(true);
+  });
+
+  it("rejects missing names and other emoji", () => {
+    expect(isAffordanceEmoji(null, "✅")).toBe(false);
+    expect(isAffordanceEmoji(undefined, "✅")).toBe(false);
+    expect(isAffordanceEmoji("👍", "✅")).toBe(false);
   });
 });
 

@@ -131,27 +131,60 @@ export async function claimMessage(
   return res.meta.changes > 0;
 }
 
+// ── Regenerate leases (ADR-015) ───────────────────────────────────────────
+
 /**
- * Claim the single allowed regenerate for an original message. Returns true
- * the first time a regenerate is requested for that message, false after.
+ * How long an unreleased regenerate lease keeps blocking re-claims: a
+ * concurrency guard that outlives any single run (ADR-003 milestones top
+ * out at 90s plus model-chain retries), short enough that a crashed or
+ * evicted run's lease self-heals without operator action.
+ */
+export const REGEN_LEASE_TTL_MS = 15 * 60 * 1000;
+
+/**
+ * Claim the regenerate lease for an original message: a concurrency/race
+ * guard, not a lifetime cap. Returns true when this caller owns the re-run —
+ * either a fresh insert, or a takeover of a lease whose holder never
+ * released (crash, eviction). Racing duplicate deliveries are rejected;
+ * sequential re-runs are always allowed and bounded only by the rolling
+ * generation budget (reserve/finalize).
  *
- * This is the durable bound on reaction-driven re-runs: the Runtime's reply
- * registry is in-memory and dies with the process, but `processed_messages`
- * persists, so "max 1 regenerate per reply" survives restarts and races.
+ * The Worker releases the lease via {@link releaseRegenerate} once the run
+ * settles; the TTL is the crash backstop.
  */
 export async function claimRegenerate(
   db: D1Database,
   originalMessageId: string,
   now: number,
 ): Promise<boolean> {
-  const claimId = `regen:${originalMessageId}`;
-  const res = await db
+  const expiresAt = now + REGEN_LEASE_TTL_MS;
+  const inserted = await db
     .prepare(
-      "INSERT OR IGNORE INTO processed_messages (message_id, claim_key, created_at) VALUES (?1, ?2, ?3)",
+      "INSERT OR IGNORE INTO regenerate_leases (original_message_id, expires_at) VALUES (?1, ?2)",
     )
-    .bind(claimId, claimId, now)
+    .bind(originalMessageId, expiresAt)
     .run();
-  return res.meta.changes > 0;
+  if (inserted.meta.changes > 0) return true;
+  // Row exists: claim only when its holder's lease has expired.
+  const taken = await db
+    .prepare(
+      "UPDATE regenerate_leases SET expires_at = ?2 WHERE original_message_id = ?1 AND expires_at <= ?3",
+    )
+    .bind(originalMessageId, expiresAt, now)
+    .run();
+  return taken.meta.changes > 0;
+}
+
+/**
+ * Release a regenerate lease after its run settles, so the next deliberate
+ * re-run is not stuck behind the TTL. Best-effort by the caller: a failed
+ * release only means the lease lingers until expiry.
+ */
+export async function releaseRegenerate(db: D1Database, originalMessageId: string): Promise<void> {
+  await db
+    .prepare("DELETE FROM regenerate_leases WHERE original_message_id = ?1")
+    .bind(originalMessageId)
+    .run();
 }
 
 // ── Generation budget ─────────────────────────────────────────────────────
