@@ -1,5 +1,3 @@
-import { ApplicationCommandOptionType, REST, Routes } from "discord.js";
-
 import type { EnvConfig } from "./env";
 
 /**
@@ -31,7 +29,7 @@ export const SLASH_COMMANDS = [
     description_localizations: { "zh-CN": "切换提示语言（聊天回复语言始终自动跟随对话）" },
     options: [
       {
-        type: ApplicationCommandOptionType.String,
+        type: 3,
         name: "value",
         description: "Notice language",
         required: true,
@@ -45,17 +43,39 @@ export const SLASH_COMMANDS = [
   },
 ] as const;
 
+const DISCORD_API_BASE = "https://discord.com/api/v10";
+
+/** Shape of the injectable registrar (tests substitute a fake). */
+export interface CommandRegistrar {
+  put(route: string, options: { body: unknown }): Promise<unknown>;
+}
+
 /**
  * Register the global slash commands (idempotent, best-effort). A registration
  * failure is logged, never fatal — the client stays up and retries on next
- * start. `rest` is injectable for tests.
+ * start. The default registrar PUTs via plain fetch: it must send the body
+ * verbatim, and the discord.js REST layer was observed dropping
+ * `description_localizations` from raw command payloads.
  */
 export async function registerSlashCommands(
   env: EnvConfig,
-  rest: Pick<REST, "put"> = new REST({ version: "10" }).setToken(env.discordBotToken),
+  put: CommandRegistrar["put"] = async (route, options) => {
+    const response = await fetch(`${DISCORD_API_BASE}${route}`, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bot ${env.discordBotToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(options.body),
+    });
+    if (!response.ok) {
+      throw new Error(`Discord API ${response.status}: ${(await response.text()).slice(0, 200)}`);
+    }
+    return response.json();
+  },
 ): Promise<void> {
   try {
-    await rest.put(Routes.applicationCommands(env.discordApplicationId), {
+    await put(`/applications/${env.discordApplicationId}/commands`, {
       body: SLASH_COMMANDS,
     });
     console.log(JSON.stringify({ event: "slash_commands_registered" }));
