@@ -1,12 +1,15 @@
 import { describe, it, expect } from "vitest";
+import { ButtonStyle } from "discord.js";
 import type { GenerationRequest } from "@xenoblade/contracts";
 
 import {
+  buildReplyControlsRow,
   DELETE_EMOJI,
-  isAffordanceEmoji,
+  parseControlCustomId,
   REGENERATE_EMOJI,
   ReplyRegistry,
-  resolveAffordanceAction,
+  controlCustomId,
+  resolveControlAction,
   type ReplyEntry,
 } from "../src/reply-controls";
 
@@ -27,50 +30,114 @@ function request(userId = "u1"): GenerationRequest {
 }
 
 function entry(overrides: Partial<ReplyEntry> = {}): ReplyEntry {
-  return { request: request(), chunkIds: ["r1", "r2"], regenerable: true, ...overrides };
+  return {
+    request: request(),
+    chunkIds: ["r1", "r2"],
+    headContent: "answer head",
+    language: "zh",
+    busy: false,
+    ...overrides,
+  };
 }
 
-describe("isAffordanceEmoji", () => {
-  it("matches affordance emoji with or without the variation selector", () => {
-    expect(isAffordanceEmoji(REGENERATE_EMOJI, REGENERATE_EMOJI)).toBe(true);
-    expect(isAffordanceEmoji(DELETE_EMOJI, DELETE_EMOJI)).toBe(true);
-    expect(isAffordanceEmoji("🗑", DELETE_EMOJI)).toBe(true);
-    expect(isAffordanceEmoji("🗑️", DELETE_EMOJI)).toBe(true);
+describe("controlCustomId", () => {
+  it("encodes the scheme xbl:<action>:<messageId>", () => {
+    expect(controlCustomId("regenerate", "123")).toBe("xbl:regen:123");
+    expect(controlCustomId("delete", "123")).toBe("xbl:del:123");
   });
 
-  it("rejects missing names and other emoji", () => {
-    expect(isAffordanceEmoji(null, DELETE_EMOJI)).toBe(false);
-    expect(isAffordanceEmoji(undefined, DELETE_EMOJI)).toBe(false);
-    expect(isAffordanceEmoji("👍", DELETE_EMOJI)).toBe(false);
+  it("round-trips through parseControlCustomId", () => {
+    expect(parseControlCustomId(controlCustomId("regenerate", "123"))).toBe("regenerate");
+    expect(parseControlCustomId(controlCustomId("delete", "123"))).toBe("delete");
+  });
+
+  it("rejects foreign prefixes, verbs, shapes, and empty ids", () => {
+    expect(parseControlCustomId("other:regen:123")).toBeNull();
+    expect(parseControlCustomId("xbl:edit:123")).toBeNull();
+    expect(parseControlCustomId("xbl:regen")).toBeNull();
+    expect(parseControlCustomId("xbl:regen:")).toBeNull();
+    expect(parseControlCustomId("xbl:regen:123:extra")).toBeNull();
+    expect(parseControlCustomId("")).toBeNull();
+  });
+});
+describe("buildReplyControlsRow", () => {
+  type ButtonData = {
+    custom_id: string;
+    label?: string;
+    emoji?: { name?: string };
+    style: number;
+    disabled?: boolean;
+  };
+
+  function rowButtons(texts: { regenerate: string }, disabled = false): ButtonData[] {
+    const row = buildReplyControlsRow(texts, "r1", { disabled });
+    // Test-side view of the serialized buttons; SKU-link variants don't occur here.
+    return row.toJSON().components.map((button) => button as unknown as ButtonData);
+  }
+
+  it("renders Regenerate (label + emoji, Secondary) and Delete (emoji, Danger)", () => {
+    const [regen, del] = rowButtons({ regenerate: "重新生成" });
+    expect(regen?.custom_id).toBe("xbl:regen:r1");
+    expect(regen?.label).toBe("重新生成");
+    expect(regen?.emoji?.name).toBe(REGENERATE_EMOJI);
+    expect(regen?.style).toBe(ButtonStyle.Secondary);
+    expect(del?.custom_id).toBe("xbl:del:r1");
+    expect(del?.label).toBeUndefined();
+    expect(del?.emoji?.name).toBe(DELETE_EMOJI);
+    expect(del?.style).toBe(ButtonStyle.Danger);
+  });
+
+  it("can render both buttons disabled", () => {
+    for (const button of rowButtons({ regenerate: "Regenerate" }, true)) {
+      expect(button.disabled).toBe(true);
+    }
   });
 });
 
-describe("resolveAffordanceAction", () => {
-  it("maps the trigger author's affordance clicks to actions", () => {
-    expect(resolveAffordanceAction(entry(), REGENERATE_EMOJI, "u1", false)).toBe("regenerate");
-    expect(resolveAffordanceAction(entry(), DELETE_EMOJI, "u1", false)).toBe("delete");
+describe("resolveControlAction", () => {
+  it("maps the trigger author's button clicks to actions", () => {
+    expect(resolveControlAction(entry(), "xbl:regen:r1", "r1", "u1")).toEqual({
+      action: "regenerate",
+    });
+    expect(resolveControlAction(entry(), "xbl:del:r1", "r1", "u1")).toEqual({ action: "delete" });
   });
 
-  it("ignores bot reactions — including the bot's own affordance adds", () => {
-    expect(resolveAffordanceAction(entry(), REGENERATE_EMOJI, "u1", true)).toBeNull();
-    expect(resolveAffordanceAction(entry(), DELETE_EMOJI, "bot", true)).toBeNull();
+  it("rejects buttons whose customId does not match the message they fired on", () => {
+    expect(resolveControlAction(entry(), "xbl:regen:r1", "other-message", "u1")).toBeNull();
   });
 
-  it("ignores untracked messages and non-affordance emoji", () => {
-    expect(resolveAffordanceAction(undefined, REGENERATE_EMOJI, "u1", false)).toBeNull();
-    expect(resolveAffordanceAction(entry(), "👍", "u1", false)).toBeNull();
-    expect(resolveAffordanceAction(entry(), null, "u1", false)).toBeNull();
+  it("rejects foreign customIds with null (caller shows the expired notice)", () => {
+    expect(resolveControlAction(entry(), "other:regen:r1", "r1", "u1")).toBeNull();
+    expect(resolveControlAction(undefined, "xbl:del:r1", "r1", "u2")).toEqual({
+      action: "rejected",
+      reason: "expired",
+    });
   });
 
-  it("ignores users other than the trigger author", () => {
-    expect(resolveAffordanceAction(entry(), REGENERATE_EMOJI, "u2", false)).toBeNull();
-    expect(resolveAffordanceAction(entry(), DELETE_EMOJI, "u2", false)).toBeNull();
+  it("expires buttons the process cannot resolve (restart, eviction)", () => {
+    expect(resolveControlAction(undefined, "xbl:regen:r1", "r1", "u1")).toEqual({
+      action: "rejected",
+      reason: "expired",
+    });
   });
 
-  it("downgrades delete-only replies: 🔁 ignored, 🗑 still deletable", () => {
-    const spent = entry({ regenerable: false });
-    expect(resolveAffordanceAction(spent, REGENERATE_EMOJI, "u1", false)).toBeNull();
-    expect(resolveAffordanceAction(spent, DELETE_EMOJI, "u1", false)).toBe("delete");
+  it("refuses users other than the trigger author", () => {
+    expect(resolveControlAction(entry(), "xbl:regen:r1", "r1", "u2")).toEqual({
+      action: "rejected",
+      reason: "not-owner",
+    });
+  });
+
+  it("refuses clicks while a regenerate is in flight", () => {
+    const busy = entry({ busy: true });
+    expect(resolveControlAction(busy, "xbl:regen:r1", "r1", "u1")).toEqual({
+      action: "rejected",
+      reason: "busy",
+    });
+    expect(resolveControlAction(busy, "xbl:del:r1", "r1", "u1")).toEqual({
+      action: "rejected",
+      reason: "busy",
+    });
   });
 });
 

@@ -17,7 +17,7 @@ lives in D1.
 ## Codebase Map
 
 - **platform-worker** — the Cloudflare Worker: `/internal/v1/*` routes with bearer auth, the generation pipeline (budget, dedup, memory injection, model chains), first-party tools (`web_search`, `web_answer`, `read_url`, `vision_describe`, model-info), MCP clients, and the D1 access layer
-- **discord-runtime** — the self-hosted gateway: discord.js client, trigger policy, per-container conversation queue, staged status, reply affordances (regenerate/delete), slash commands, and the DM control plane
+- **discord-runtime** — the self-hosted gateway: discord.js client, trigger policy, per-container conversation queue, staged status, reply controls (regenerate/delete buttons, ADR-015), slash commands, and the DM control plane
 - **contracts** — wire types for every runtime↔worker call; shared verbatim by both apps
 - **ai** — model chains per role (generation/summarization/transcription/vision) via the OpenRouter provider, system-prompt composition, generation limits
 - **db** — legacy D1 helpers from the pre-split worker; unreferenced
@@ -63,5 +63,6 @@ follow the ADR conflict workflow in the guidelines' architecture governance.
 | [012](docs/adr/012-auto-memory-optin.md)           | Opt-in Auto Memory with Confirmation | Guild-only extraction for opted-in users; pending candidates confirmed in DM, never by default.                             |
 | [013](docs/adr/013-intent-memory-writes.md)        | Intent-Based Memory Writes           | Model-recognized memory intent; reaction-confirmed proposals; stateless until confirmed (amends ADR-012's DM-write clause). |
 | [014](docs/adr/014-undoable-context-truncation.md) | Undoable Context Truncation          | `/context truncate`/`restore` over an undo stack with an irreversible hard-reset floor for clears.                          |
+| [015](docs/adr/015-button-reply-controls.md)       | Button Reply Controls                | Native regenerate/delete buttons; in-place regenerate with restore-on-failure; lease-guarded re-runs bounded by budget.     |
 
 Retired records: **ADR-001** (Chat SDK → discord.js migration) and **ADR-009** (fresh D1 database) were fully executed one-off decisions and have been dropped. The Chat SDK stack was replaced by discord.js on a self-hosted host (ADR-002 records the resulting topology), and the production D1 database (`xenoblade`) was created fresh for the current schema — `apps/platform-worker/migrations/0001_initial.sql` still cites ADR-009 in its header for that history.

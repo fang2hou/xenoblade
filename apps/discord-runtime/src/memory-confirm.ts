@@ -10,13 +10,23 @@ import type { MemoryProposal, MemoryProposalResponse } from "@xenoblade/contract
 
 import { applyMemoryProposals } from "./ai-client";
 import type { EnvConfig } from "./env";
-import { isAffordanceEmoji } from "./reply-controls";
 
 /** Confirm (save/execute) affordance on memory confirmation messages. */
 export const CONFIRM_EMOJI = "✅";
 /** Cancel affordance on memory confirmation messages. */
 export const CANCEL_EMOJI = "❌";
 
+const VARIATION_SELECTOR = /\uFE0F/g;
+
+/**
+ * Compare a reaction emoji name against an affordance emoji, ignoring the
+ * emoji variation selector: clients send emoji with or without U+FE0F
+ * depending on platform, and both must match.
+ */
+export function isAffordanceEmoji(name: string | null | undefined, emoji: string): boolean {
+  if (name === undefined || name === null) return false;
+  return name.replace(VARIATION_SELECTOR, "") === emoji.replace(VARIATION_SELECTOR, "");
+}
 /** How long a confirmation message stays actionable (ADR-013). */
 const CONFIRM_WINDOW_MS = 5 * 60 * 1000;
 

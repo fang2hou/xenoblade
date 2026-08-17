@@ -37,6 +37,8 @@ const DEFAULT_MILESTONES: StatusMilestone[] = stagedMilestones("zh");
 export interface StagedStatusOptions {
   scheduler?: StatusScheduler;
   milestones?: StatusMilestone[];
+  /** Existing message to edit in place instead of posting a placeholder. */
+  placeholder?: Message;
 }
 
 function log(event: string, channelId: string, extra: Record<string, unknown> = {}): void {
@@ -67,6 +69,10 @@ export class StagedStatus {
     this.channel = channel;
     this.scheduler = options.scheduler ?? nodeScheduler;
     this.milestones = options.milestones ?? DEFAULT_MILESTONES;
+    // An externally supplied message (the regenerated reply's head, ADR-015)
+    // starts life as the placeholder: milestones edit it, the settle replaces
+    // its content, and dismiss is never used on it (see abort).
+    this.placeholder = options.placeholder ?? null;
   }
 
   /** Schedule the milestone ladder. Call once, before the generation call. */
@@ -92,7 +98,7 @@ export class StagedStatus {
    *
    * Returns every message making up the final reply, head chunk first — the
    * settled placeholder (or first fresh post) followed by continuations — so
-   * callers can attach reply affordances (🔁/🗑) to it.
+   * callers can attach the reply-control buttons to it.
    */
   settle(content: string): Promise<Message[]> {
     this.settled = true;
@@ -113,6 +119,17 @@ export class StagedStatus {
         });
       }
     });
+  }
+
+  /**
+   * Stop staging without touching Discord: kills pending milestones and
+   * freezes the placeholder where it stands. Used when a regenerated reply's
+   * run fails and the caller restores the previous content (ADR-015) —
+   * dismiss would delete the externally owned message.
+   */
+  abort(): void {
+    this.settled = true;
+    this.clearTimers();
   }
 
   private clearTimers(): void {
