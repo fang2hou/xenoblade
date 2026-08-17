@@ -53,9 +53,13 @@ export interface CommandRegistrar {
 /**
  * Register the global slash commands (idempotent, best-effort). A registration
  * failure is logged, never fatal — the client stays up and retries on next
- * start. The default registrar PUTs via plain fetch: it must send the body
- * verbatim, and the discord.js REST layer was observed dropping
- * `description_localizations` from raw command payloads.
+ * start. The default registrar PUTs via plain fetch so the body is sent
+ * verbatim with no library transformation.
+ *
+ * Verification note: Discord's GET /applications/{id}/commands OMITS
+ * `description_localizations` unless called with `?with_localizations=true`.
+ * A bare GET showing no localizations is NOT evidence of a stripped or failed
+ * registration — do not re-diagnose from it.
  */
 export async function registerSlashCommands(
   env: EnvConfig,
