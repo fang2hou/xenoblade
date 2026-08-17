@@ -2,9 +2,8 @@ import type { ChatInputCommandInteraction } from "discord.js";
 
 import { clearContext } from "./ai-client";
 import type { EnvConfig } from "./env";
-
-const CLEAR_SUCCESS_REPLY = "已清除你在此频道的对话上下文。";
-const CLEAR_FAILURE_REPLY = "清除上下文失败，请稍后重试。";
+import { messages } from "./i18n";
+import { resolveUiLanguage } from "./language";
 
 /** /clear-context → call the Worker context-clear endpoint. */
 export async function handleClearContext(
@@ -28,6 +27,9 @@ export async function handleClearContext(
   // the final result into the deferred reply.
   await interaction.deferReply();
   try {
+    // Fail-open: notices still render (in zh) when settings are unreadable.
+    const language = await resolveUiLanguage(interaction.user.id, env);
+    const table = messages(language).clearContext;
     const result = await clearContext(
       {
         userId: interaction.user.id,
@@ -39,7 +41,7 @@ export async function handleClearContext(
       env.internalApiToken,
     );
     await interaction.editReply({
-      content: result.status === "ok" ? CLEAR_SUCCESS_REPLY : CLEAR_FAILURE_REPLY,
+      content: result.status === "ok" ? table.success : table.failure,
     });
   } catch (error) {
     console.log(
@@ -50,6 +52,8 @@ export async function handleClearContext(
         error: String(error),
       }),
     );
-    await interaction.editReply({ content: CLEAR_FAILURE_REPLY }).catch(() => undefined);
+    await interaction
+      .editReply({ content: messages("zh").clearContext.failure })
+      .catch(() => undefined);
   }
 }

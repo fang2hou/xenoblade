@@ -1,6 +1,7 @@
 import type {
   ContextClearRequest,
   MemoryCategory,
+  UiLanguage,
   SummonKind,
   UsageSubjectSummary,
   UsageSummary,
@@ -579,12 +580,13 @@ type SettingsRow = {
   learnOptin: number;
   chatOptinAt: number | null;
   learnOptinAt: number | null;
+  language: string;
 };
 
 /**
  * Read a user's opt-in settings. Fail-closed: a missing row or any D1 error
  * returns all-off defaults, so DM chat (ADR-011) never enables on a read
- * failure.
+ * failure. Language falls back to zh on any unreadable value.
  */
 export async function getUserSettings(db: D1Database, userId: string): Promise<UserSettings> {
   const off: UserSettings = {
@@ -592,12 +594,14 @@ export async function getUserSettings(db: D1Database, userId: string): Promise<U
     learnOptin: false,
     chatOptinAt: null,
     learnOptinAt: null,
+    language: "zh",
   };
   try {
     const row = await db
       .prepare(
         `SELECT chat_optin AS chatOptin, learn_optin AS learnOptin,
-                chat_optin_at AS chatOptinAt, learn_optin_at AS learnOptinAt
+                chat_optin_at AS chatOptinAt, learn_optin_at AS learnOptinAt,
+                language AS language
          FROM user_settings WHERE user_id = ?1`,
       )
       .bind(userId)
@@ -608,6 +612,7 @@ export async function getUserSettings(db: D1Database, userId: string): Promise<U
       learnOptin: row.learnOptin === 1,
       chatOptinAt: row.chatOptinAt ?? null,
       learnOptinAt: row.learnOptinAt ?? null,
+      language: row.language === "en" ? "en" : "zh",
     };
   } catch (error) {
     console.log(JSON.stringify({ event: "settings_read_error", error: String(error) }));
@@ -618,17 +623,18 @@ export async function getUserSettings(db: D1Database, userId: string): Promise<U
 /**
  * Atomically upsert the opt-in flags present in `entry` (absent flags keep
  * their current value). Enabling stamps `*_optin_at = now`; disabling clears
- * it back to NULL, keeping flag ⇔ timestamp consistent.
+ * it back to NULL, keeping flag ⇔ timestamp consistent. An absent `language`
+ * keeps the stored language (zh on first insert).
  */
 export async function setUserSettings(
   db: D1Database,
-  entry: { userId: string; chatOptin?: boolean; learnOptin?: boolean },
+  entry: { userId: string; chatOptin?: boolean; learnOptin?: boolean; language?: UiLanguage },
 ): Promise<void> {
   const now = Date.now();
   await db
     .prepare(
-      `INSERT INTO user_settings (user_id, chat_optin, learn_optin, chat_optin_at, learn_optin_at)
-       VALUES (?1, ?2, ?3, ?4, ?5)
+      `INSERT INTO user_settings (user_id, chat_optin, learn_optin, chat_optin_at, learn_optin_at, language)
+       VALUES (?1, ?2, ?3, ?4, ?5, COALESCE(?10, 'zh'))
        ON CONFLICT(user_id) DO UPDATE SET
          chat_optin = COALESCE(?6, chat_optin),
          chat_optin_at = CASE
@@ -641,7 +647,8 @@ export async function setUserSettings(
            WHEN ?7 = 1 THEN ?9
            WHEN ?7 = 0 THEN NULL
            ELSE learn_optin_at
-         END`,
+         END,
+         language = COALESCE(?10, language)`,
     )
     .bind(
       entry.userId,
@@ -653,6 +660,7 @@ export async function setUserSettings(
       toFlag(entry.learnOptin),
       now,
       now,
+      entry.language ?? null,
     )
     .run();
 }

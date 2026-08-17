@@ -63,12 +63,13 @@ Ask first:
 
 ## Confirmed Language Policy
 
-| Item                      | Value                                                                                     |
-| ------------------------- | ----------------------------------------------------------------------------------------- |
-| Conversation              | Follows the user                                                                          |
-| Code / comments / commits | English                                                                                   |
-| UI language               | Bot replies match each user's language; DM control-plane notices are Chinese (Simplified) |
-| Tone                      | Concise, casual                                                                           |
+| Item                      | Value                                                                                           |
+| ------------------------- | ----------------------------------------------------------------------------------------------- |
+| Conversation              | Follows the user                                                                                |
+| Code / comments / commits | English                                                                                         |
+| Chat replies              | Always follow the conversation language automatically                                           |
+| UI notices                | Staged status, command replies, DM control plane: the user's `/language` setting (`zh` default) |
+| Tone                      | Concise, casual                                                                                 |
 
 Do not infer UI language from conversation language.
 

@@ -18,11 +18,12 @@ export async function handleSettings(
       return { status: "ok", settings: await getUserSettings(db, req.userId) };
     }
 
-    if (req.chatOptin !== undefined || req.learnOptin !== undefined) {
+    if (req.chatOptin !== undefined || req.learnOptin !== undefined || req.language !== undefined) {
       await setUserSettings(db, {
         userId: req.userId,
         chatOptin: req.chatOptin,
         learnOptin: req.learnOptin,
+        language: req.language,
       });
     }
     return { status: "ok", settings: await getUserSettings(db, req.userId) };
