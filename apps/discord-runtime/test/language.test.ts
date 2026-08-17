@@ -9,6 +9,7 @@ import {
   rememberUiLanguage,
   resetLanguageCache,
   resolveUiLanguage,
+  resolveUiLanguageBounded,
 } from "../src/language";
 
 const env: EnvConfig = {
@@ -98,6 +99,34 @@ describe("resolveUiLanguage", () => {
     rememberUiLanguage("u1", "en");
     expect(await resolveUiLanguage("u1", env)).toBe("en");
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("resolveUiLanguageBounded", () => {
+  it("returns the resolved language when the settings call is fast", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<() => Promise<Response>>(async () => new Response("{}", { status: 200 })),
+    );
+
+    await expect(resolveUiLanguageBounded("u1", env, 1_000)).resolves.toBe("zh");
+  });
+
+  it("falls back to zh after the delay cap without waiting for a hung call", async () => {
+    vi.useFakeTimers();
+    const { promise: hungFetch, resolve: releaseFetch } = Promise.withResolvers<Response>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<() => Promise<Response>>(async () => hungFetch),
+    );
+    try {
+      const pending = resolveUiLanguageBounded("u2", env, 50);
+      await vi.advanceTimersByTimeAsync(60);
+      await expect(pending).resolves.toBe("zh");
+    } finally {
+      releaseFetch(new Response("{}", { status: 200 }));
+      vi.useRealTimers();
+    }
   });
 });
 

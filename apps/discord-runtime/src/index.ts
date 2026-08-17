@@ -37,7 +37,7 @@ import { generate } from "./ai-client";
 import { handleDmMessage } from "./dm-commands";
 import { ConversationQueue } from "./conversation-queue";
 import { registerSlashCommands } from "./slash-commands";
-import { handleLanguageCommand, resolveUiLanguage } from "./language";
+import { handleLanguageCommand, resolveUiLanguageBounded } from "./language";
 import { messages, stagedMilestones } from "./i18n";
 import { handleClearContext } from "./clear-context";
 import { handleUsageCommand } from "./usage";
@@ -266,7 +266,10 @@ async function executeGeneration(
 
   // UI language for this user's notices (staged status, failure texts);
   // chat reply language stays conversation-driven and never comes from here.
-  const language = await resolveUiLanguage(request.userId, env);
+  // Bounded wait: a cold/slow settings fetch must never delay the placeholder
+  // or the generation call — zh covers the degraded case, and the underlying
+  // resolve keeps populating the cache for the next run.
+  const language = await resolveUiLanguageBounded(request.userId, env, 1_000);
   const generationTexts = messages(language).generation;
 
   // Staged status placeholder for long generations (ADR-003 amendment):

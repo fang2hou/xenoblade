@@ -44,6 +44,25 @@ export function resetLanguageCache(): void {
   cache.clear();
 }
 
+/**
+ * Resolve the UI language with a hard delay cap: a slow or cold settings
+ * call must never hold back the staged-status placeholder or the generation
+ * call. Falls back to zh when the cap hits; the underlying resolve keeps
+ * running and populates the cache for the next run.
+ */
+export function resolveUiLanguageBounded(
+  userId: string,
+  env: EnvConfig,
+  maxDelayMs: number,
+): Promise<UiLanguage> {
+  return Promise.race([
+    resolveUiLanguage(userId, env),
+    new Promise<UiLanguage>((resolve) => {
+      setTimeout(() => resolve("zh"), maxDelayMs).unref();
+    }),
+  ]);
+}
+
 /** /language → persist the user's UI language and confirm ephemerally. */
 export async function handleLanguageCommand(
   interaction: ChatInputCommandInteraction,
