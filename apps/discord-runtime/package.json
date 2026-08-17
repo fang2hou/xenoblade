@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --sourcemap --banner:js=\"import {createRequire} from 'module';const require=createRequire(import.meta.url);\"",
+    "build": "rolldown -c",
     "start": "node --enable-source-maps dist/index.js",
     "dev": "tsx src/index.ts",
     "test": "vitest run"
@@ -15,7 +15,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
-    "esbuild": "^0.28.1",
+    "rolldown": "^1.2.4",
     "tsx": "^4.20.5"
   }
 }

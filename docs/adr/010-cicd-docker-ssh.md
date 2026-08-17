@@ -1,7 +1,7 @@
 # ADR-010: CI/CD with Docker Registry and SSH
 
 - **Status**: Accepted
-- **Date**: 2026-08-12 (updated 2026-08-16 to record the split-CI workflow reality)
+- **Date**: 2026-08-12 (updated 2026-08-16 to record the split-CI workflow reality; amended 2026-08-17 — see [Amendment](#amendment-2026-08-17))
 
 ## Context
 
@@ -55,6 +55,10 @@ A hard operational constraint: Discord allows **one active Gateway session per b
 **Negative:** SSH key and registry credentials live in GitHub secrets and need rotation discipline; QEMU cross-builds are slower than native ARM64; no automatic rollback — a failed health check needs manual intervention.
 
 **Neutral:** deploy targets are selectable (`worker`, `runtime`, `all`) for partial rollouts; the runtime's health endpoint binds to localhost only.
+
+## Amendment (2026-08-17)
+
+The runtime bundle step now uses rolldown instead of esbuild (branch `feat/rolldown-bundler`). Same contract otherwise: one self-contained ESM file, node platform, sourcemap, `createRequire` banner. The pipeline shape (local `scripts/deploy.sh` and `deploy-runtime` job both call the package build script) is unchanged.
 
 ## Review Triggers
 
