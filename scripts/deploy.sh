@@ -61,7 +61,7 @@ deploy_gateway() {
 
   cd "$PROJECT_ROOT"
 
-  # Bundle discord-runtime with esbuild before Docker build.
+  # Bundle discord-runtime with rolldown before Docker build.
   log "Bundling discord-runtime..."
   pnpm --filter @xenoblade/discord-runtime build
 
