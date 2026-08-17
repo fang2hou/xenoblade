@@ -1,16 +1,19 @@
 import type {
   ContextClearRequest,
+  ContextRestoreRequest,
+  ContextTruncateRequest,
   GenerationRequest,
   HealthResponse,
+  MemoryProposalRequest,
   MemoryRequest,
-  UsageSummaryResponse,
   SettingsRequest,
+  UsageSummaryResponse,
 } from "@xenoblade/contracts";
 
 import { isInternalAuthorized } from "./auth";
-import { clearUserContext, getUsageSummary } from "./db";
+import { clearUserContext, getUsageSummary, restoreUserContext, truncateUserContext } from "./db";
 import { generate } from "./generation";
-import { handleMemory } from "./memory";
+import { handleMemory, handleMemoryProposals } from "./memory";
 import { handleSettings } from "./settings";
 
 const INTERNAL_PREFIX = "/internal/v1/";
@@ -92,6 +95,44 @@ export default {
       }
     }
 
+    // POST /internal/v1/context/truncate (ADR-014: undo-able truncation)
+    if (request.method === "POST" && path === "/internal/v1/context/truncate") {
+      const req = await readJson<ContextTruncateRequest>(request);
+      if (req === null) {
+        return json({ status: "error", code: "invalid_body" }, 400);
+      }
+      try {
+        const outcome = await truncateUserContext(env.DB, {
+          scopeId: req.scopeId,
+          containerId: req.containerId,
+          userId: req.userId,
+        });
+        return json({ status: "ok", ...outcome });
+      } catch (error) {
+        console.log(JSON.stringify({ event: "context_truncate_failed", error: String(error) }));
+        return json({ status: "error", code: "context_truncate_failed" });
+      }
+    }
+
+    // POST /internal/v1/context/restore (ADR-014: pop the newest truncation)
+    if (request.method === "POST" && path === "/internal/v1/context/restore") {
+      const req = await readJson<ContextRestoreRequest>(request);
+      if (req === null) {
+        return json({ status: "error", code: "invalid_body" }, 400);
+      }
+      try {
+        const outcome = await restoreUserContext(env.DB, {
+          scopeId: req.scopeId,
+          containerId: req.containerId,
+          userId: req.userId,
+        });
+        return json({ status: "ok", ...outcome });
+      } catch (error) {
+        console.log(JSON.stringify({ event: "context_restore_failed", error: String(error) }));
+        return json({ status: "error", code: "context_restore_failed" });
+      }
+    }
+
     // GET /internal/v1/usage?userId=&scopeId=
     if (request.method === "GET" && path === "/internal/v1/usage") {
       const params = new URL(request.url).searchParams;
@@ -118,6 +159,15 @@ export default {
         return json({ status: "error", code: "invalid_body" }, 400);
       }
       return json(await handleMemory(env.DB, req));
+    }
+
+    // POST /internal/v1/memory/proposals (ADR-013: confirmed intent writes)
+    if (request.method === "POST" && path === "/internal/v1/memory/proposals") {
+      const req = await readJson<MemoryProposalRequest>(request);
+      if (req === null) {
+        return json({ status: "error", code: "invalid_body" }, 400);
+      }
+      return json(await handleMemoryProposals(env.DB, req));
     }
 
     // POST /internal/v1/settings

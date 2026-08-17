@@ -1,6 +1,6 @@
 # ADR-012: Opt-in Auto Memory with Confirmation
 
-- **Status**: Accepted
+- **Status**: Accepted (the "explicit commands only" clause of decision 2 is amended by ADR-013, which adds reaction-confirmed intent writes; everything else stands)
 - **Date**: 2026-08-16
 
 ## Context

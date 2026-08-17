@@ -14,24 +14,32 @@ import {
   DM_SCOPE,
   finishGeneration,
   GenerationBudgetExceededError,
+  getRecentSources,
   getRuntimeConfig,
   getUserContextState,
   getUserMemory,
   markUserInteraction,
   recordInteraction,
+  recordInteractionSources,
   recordToolInvocation,
   reserveGeneration,
   type InteractionRecord,
 } from "./db";
 import { buildContext } from "./context";
-import { buildGenerationMessages, buildTextOnlyGenerationMessages, SAFETY_SYSTEM } from "./prompt";
+import { extractMemoryProposals } from "./memory-proposals";
 import { extractSources } from "./sources";
+import {
+  buildGenerationMessages,
+  buildTextOnlyGenerationMessages,
+  MEMORY_GUIDANCE,
+  SAFETY_SYSTEM,
+  formatSourcesBlock,
+} from "./prompt";
 import { createFirstPartyTools, connectMcpServers, closeMcpClients } from "./tools";
 
 function formatMemoryBlock(displayName: string, memories: readonly UserMemory[]): string {
-  const relevant = memories.filter((m) => m.category === "persona" || m.category === "preference");
-  if (relevant.length === 0) return "";
-  const lines = relevant.map((m) => `- ${m.key}: ${m.value}`);
+  if (memories.length === 0) return "";
+  const lines = memories.map((m) => `- ${m.key}: ${m.value}`);
   return [
     `What you already know about ${displayName} (weave in naturally; never list or cite this):`,
     ...lines,
@@ -127,7 +135,19 @@ export async function generate(env: Env, req: GenerationRequest): Promise<Genera
   } catch (error) {
     console.log(JSON.stringify({ event: "memory_read_error", error: String(error) }));
   }
-  const system = composeSystemPrompt({ safety: SAFETY_SYSTEM, persona, now: new Date(now) });
+  const system = composeSystemPrompt({
+    safety: SAFETY_SYSTEM,
+    base: MEMORY_GUIDANCE,
+    persona,
+    now: new Date(now),
+  });
+
+  // Reference block of sources cited in earlier replies of this container, so
+  // "where is the source" follow-ups stay answerable without a rendered
+  // footer (ADR-007 amendment). Best-effort read; empty on any failure.
+  const sourcesBlock = formatSourcesBlock(
+    await getRecentSources(env.DB, { containerId: req.containerId, now }),
+  );
 
   // 5. Tools — ALL models get ALL tools (MCP + first-party + vision)
   const firstPartyTools = createFirstPartyTools(env);
@@ -135,8 +155,8 @@ export async function generate(env: Env, req: GenerationRequest): Promise<Genera
   const allTools = { ...firstPartyTools, ...mcpResult.tools };
 
   // 6. Messages — primary gets images natively, fallback uses text refs + vision tool
-  const messagesWithImages = buildGenerationMessages(req, contextDecision);
-  const messagesTextOnly = buildTextOnlyGenerationMessages(req, contextDecision);
+  const messagesWithImages = buildGenerationMessages(req, contextDecision, sourcesBlock);
+  const messagesTextOnly = buildTextOnlyGenerationMessages(req, contextDecision, sourcesBlock);
 
   // 7. Model chain — try each model until one produces a response
   const chain = getModelChain(env, "generation");
@@ -274,6 +294,13 @@ export async function generate(env: Env, req: GenerationRequest): Promise<Genera
   await closeMcpClients(mcpResult.clients);
 
   const sources = extractSources(result.toolResults ?? []);
+  const memoryProposals = extractMemoryProposals(result.toolResults ?? []);
+  await recordInteractionSources(env.DB, {
+    interactionId: requestId,
+    containerId: req.containerId,
+    sources,
+    now: Date.now(),
+  });
 
   console.log(
     JSON.stringify({
@@ -286,8 +313,16 @@ export async function generate(env: Env, req: GenerationRequest): Promise<Genera
       toolCalls: (result.toolResults ?? []).length,
       steps: result.steps.length,
       sources: sources.length,
+      memoryProposals: memoryProposals.length,
     }),
   );
 
-  return { status: "completed", requestId, reply: result.text, usage, sources };
+  return {
+    status: "completed",
+    requestId,
+    reply: result.text,
+    usage,
+    sources,
+    ...(memoryProposals.length > 0 ? { memoryProposals } : {}),
+  };
 }

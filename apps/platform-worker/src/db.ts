@@ -422,55 +422,196 @@ export async function getUserContextState(
 }
 
 /**
- * Persistently clear context, setting `reset_at` forward and nulling
- * `last_interaction_at` for every matching row. Only rows whose current
- * `reset_at` is older than the threshold are affected (a harder reset is never
- * relaxed). Returns the number of rows cleared.
+ * Persistently clear context. Two effects per matching row:
+ *
+ * 1. `reset_at` moves forward (guarded: a stronger watermark is never
+ *    relaxed) and `last_interaction_at` is nulled — the visibility change.
+ * 2. `hard_reset_at` is stamped with the threshold unconditionally for every
+ *    row in scope — the irreversibility floor. Even when the watermark guard
+ *    skips a row (its `reset_at` already sits above the threshold, e.g. after
+ *    a stricter truncation), the clear still asserts "history below the
+ *    threshold is gone" for that row, and `/context restore` must not be able
+ *    to walk the watermark back past it (ADR-014).
  *
  * - `scope: "user"` — this user in this container.
  * - `scope: "channel"` — every user in this container.
  * - `scope: "all"` — this user across every container/scope.
  *
  * `beforeMs`, when set, clears only messages older than `now - beforeMs` by
- * using that cutoff as the threshold instead of `now`.
+ * using that cutoff as the threshold instead of `now`. Returns the number of
+ * rows whose visibility actually changed.
  */
 export async function clearUserContext(db: D1Database, req: ContextClearRequest): Promise<number> {
   const now = Date.now();
   const threshold = req.beforeMs !== undefined ? now - req.beforeMs : now;
 
-  const stmt =
+  const scopePredicate =
     req.scope === "user"
-      ? db
-          .prepare(
-            `UPDATE user_context_state
-               SET reset_at = ?4, last_interaction_at = NULL
-             WHERE scope_id = ?1 AND container_id = ?2 AND user_id = ?3
-               AND reset_at < ?4`,
-          )
-          .bind(req.scopeId, req.containerId, req.userId, threshold)
+      ? {
+          where: "scope_id = ?1 AND container_id = ?2 AND user_id = ?3",
+          binds: [req.scopeId, req.containerId, req.userId],
+        }
       : req.scope === "channel"
-        ? db
-            .prepare(
-              `UPDATE user_context_state
-                 SET reset_at = ?3, last_interaction_at = NULL
-               WHERE scope_id = ?1 AND container_id = ?2 AND reset_at < ?3`,
-            )
-            .bind(req.scopeId, req.containerId, threshold)
-        : db
-            .prepare(
-              `UPDATE user_context_state
-                 SET reset_at = ?2, last_interaction_at = NULL
-               WHERE user_id = ?1 AND reset_at < ?2`,
-            )
-            .bind(req.userId, threshold);
+        ? { where: "scope_id = ?1 AND container_id = ?2", binds: [req.scopeId, req.containerId] }
+        : { where: "user_id = ?1", binds: [req.userId] };
+  // Threshold takes the next parameter number after the scope binds.
+  const thresholdParam = `?${scopePredicate.binds.length + 1}`;
 
   try {
-    const res = await stmt.run();
+    // Floor first, unconditionally for the whole scope.
+    await db
+      .prepare(
+        `UPDATE user_context_state
+            SET hard_reset_at = MAX(hard_reset_at, ${thresholdParam})
+          WHERE ${scopePredicate.where}`,
+      )
+      .bind(...scopePredicate.binds, threshold)
+      .run();
+    const res = await db
+      .prepare(
+        `UPDATE user_context_state
+            SET reset_at = ${thresholdParam}, last_interaction_at = NULL
+          WHERE ${scopePredicate.where} AND reset_at < ${thresholdParam}`,
+      )
+      .bind(...scopePredicate.binds, threshold)
+      .run();
     return res.meta.changes;
   } catch (error) {
     console.log(JSON.stringify({ event: "context_clear_error", error: String(error) }));
     return 0;
   }
+}
+
+// ── Undoable context truncation (ADR-014) ─────────────────────────────────
+
+/** Context key shared by truncate and restore. */
+export interface ContextKey {
+  scopeId: string;
+  containerId: string;
+  userId: string;
+}
+
+async function countTruncations(db: D1Database, key: ContextKey): Promise<number> {
+  const res = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM context_truncations
+       WHERE scope_id = ?1 AND container_id = ?2 AND user_id = ?3`,
+    )
+    .bind(key.scopeId, key.containerId, key.userId)
+    .first<{ n: number }>();
+  return res?.n ?? 0;
+}
+
+/**
+ * Push an undo-able truncation: one `context_truncations` event at `now`,
+ * plus the same watermark forward-move a clear performs (floor untouched).
+ * Returns the cutoff set and how many truncations now sit on the undo stack.
+ */
+export async function truncateUserContext(
+  db: D1Database,
+  key: ContextKey,
+): Promise<{ truncatedAt: number; remainingUndos: number }> {
+  const now = Date.now();
+  await db
+    .prepare(
+      `INSERT INTO context_truncations
+         (scope_id, container_id, user_id, truncated_at, created_at)
+       VALUES (?1, ?2, ?3, ?4, ?4)`,
+    )
+    .bind(key.scopeId, key.containerId, key.userId, now)
+    .run();
+  await db
+    .prepare(
+      `INSERT INTO user_context_state
+         (scope_id, container_id, user_id, reset_at, last_interaction_at)
+       VALUES (?1, ?2, ?3, ?4, NULL)
+       ON CONFLICT(scope_id, container_id, user_id) DO UPDATE SET
+         reset_at = excluded.reset_at,
+         last_interaction_at = NULL
+       WHERE user_context_state.reset_at < excluded.reset_at`,
+    )
+    .bind(key.scopeId, key.containerId, key.userId, now)
+    .run();
+  return { truncatedAt: now, remainingUndos: await countTruncations(db, key) };
+}
+
+/**
+ * Pop the newest truncation event and recompute the effective cutoff as
+ * `max(hard_reset_at, max(remaining truncated_at))` — a restore can walk back
+ * undoable truncations but never crosses the hard floor a clear left behind.
+ * `restored` is true only when the effective cutoff actually moved back.
+ *
+ * Concurrency: the recompute is one atomic UPDATE whose subqueries read the
+ * live tables, so a racing truncate can never be clobbered by a stale
+ * restore value (the old read→compute→write sequence could write a cutoff
+ * computed before the truncate landed). The event delete targets the id
+ * selected up front; if a racing restore already removed it, this delete is
+ * a no-op and the watermark stays wherever the atomic recompute put it. The
+ * floor is recomputed inside the statement, so the privacy invariant holds
+ * under every interleaving; the worst race outcome is transient
+ * over-exclusion that the next restore or truncate corrects.
+ */
+export async function restoreUserContext(
+  db: D1Database,
+  key: ContextKey,
+): Promise<{ restored: boolean; remainingUndos: number }> {
+  const latest = await db
+    .prepare(
+      `SELECT id FROM context_truncations
+       WHERE scope_id = ?1 AND container_id = ?2 AND user_id = ?3
+       ORDER BY id DESC LIMIT 1`,
+    )
+    .bind(key.scopeId, key.containerId, key.userId)
+    .first<{ id: number }>();
+  if (latest === null) {
+    return { restored: false, remainingUndos: 0 };
+  }
+
+  const before = await readResetAt(db, key);
+
+  // Atomic recompute excluding the event this restore is about to pop. The
+  // subqueries read the tables as of this statement, so concurrent writers
+  // compose: truncates only raise the watermark, and the floor is always
+  // taken from the row itself, never from a stale JS-side snapshot.
+  await db
+    .prepare(
+      `INSERT INTO user_context_state
+         (scope_id, container_id, user_id, reset_at, last_interaction_at)
+       VALUES (?1, ?2, ?3,
+               MAX(COALESCE((SELECT hard_reset_at FROM user_context_state
+                              WHERE scope_id = ?1 AND container_id = ?2 AND user_id = ?3), 0),
+                   COALESCE((SELECT MAX(truncated_at) FROM context_truncations
+                              WHERE scope_id = ?1 AND container_id = ?2 AND user_id = ?3
+                                AND id <> ?4), 0)),
+               NULL)
+       ON CONFLICT(scope_id, container_id, user_id) DO UPDATE SET
+         reset_at = MAX(COALESCE(user_context_state.hard_reset_at, 0),
+                        COALESCE((SELECT MAX(truncated_at) FROM context_truncations
+                                   WHERE scope_id = ?1 AND container_id = ?2 AND user_id = ?3
+                                     AND id <> ?4), 0))`,
+    )
+    .bind(key.scopeId, key.containerId, key.userId, latest.id)
+    .run();
+
+  await db.prepare(`DELETE FROM context_truncations WHERE id = ?1`).bind(latest.id).run();
+
+  const after = await readResetAt(db, key);
+  return {
+    restored: after < before,
+    remainingUndos: await countTruncations(db, key),
+  };
+}
+
+/** Current materialized watermark for a key; 0 when no row exists. */
+async function readResetAt(db: D1Database, key: ContextKey): Promise<number> {
+  const state = await db
+    .prepare(
+      `SELECT reset_at AS resetAt FROM user_context_state
+       WHERE scope_id = ?1 AND container_id = ?2 AND user_id = ?3`,
+    )
+    .bind(key.scopeId, key.containerId, key.userId)
+    .first<{ resetAt: number }>();
+  return state?.resetAt ?? 0;
 }
 
 /**
@@ -567,10 +708,91 @@ export async function clearUserMemory(
         ? db
             .prepare("DELETE FROM user_memory WHERE user_id = ?1 AND category = ?2")
             .bind(entry.userId, entry.category)
-        : db.prepare("DELETE FROM user_memory WHERE user_id = ?1").bind(entry.userId);
+        : entry.key !== undefined
+          ? db
+              .prepare("DELETE FROM user_memory WHERE user_id = ?1 AND key = ?2")
+              .bind(entry.userId, entry.key)
+          : db.prepare("DELETE FROM user_memory WHERE user_id = ?1").bind(entry.userId);
 
   const res = await stmt.run();
   return res.meta.changes;
+}
+
+// ── Interaction sources (durable citation index, ADR-007 amendment) ───────
+
+export interface StoredSource {
+  title: string;
+  url: string;
+}
+
+/**
+ * Persist one generation's extracted sources (best-effort: a failure is
+ * logged and swallowed — the reply is already delivered and only later
+ * "where is the source" follow-ups lose coverage).
+ */
+export async function recordInteractionSources(
+  db: D1Database,
+  entry: {
+    interactionId: string;
+    containerId: string;
+    sources: readonly StoredSource[];
+    now: number;
+  },
+): Promise<void> {
+  if (entry.sources.length === 0) return;
+  try {
+    for (const [i, source] of entry.sources.entries()) {
+      await db
+        .prepare(
+          `INSERT INTO interaction_sources
+             (interaction_id, container_id, idx, title, url, created_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6)`,
+        )
+        .bind(entry.interactionId, entry.containerId, i + 1, source.title, source.url, entry.now)
+        .run();
+    }
+  } catch (error) {
+    console.log(JSON.stringify({ event: "sources_record_error", error: String(error) }));
+  }
+}
+
+/** How far back follow-up generations can still resolve cited sources. */
+const SOURCES_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** Cap on re-injected sources per generation (most recent first). */
+const SOURCES_INJECT_LIMIT = 15;
+
+/**
+ * Recently cited sources for a container, oldest first, deduplicated by URL.
+ * Injected into later generations so "where is the source" questions stay
+ * answerable without any rendered footer.
+ */
+export async function getRecentSources(
+  db: D1Database,
+  key: { containerId: string; now: number },
+): Promise<StoredSource[]> {
+  try {
+    const { results } = await db
+      .prepare(
+        `SELECT title, url FROM interaction_sources
+          WHERE container_id = ?1 AND created_at >= ?2
+          ORDER BY created_at DESC, idx ASC
+          LIMIT 200`,
+      )
+      .bind(key.containerId, key.now - SOURCES_WINDOW_MS)
+      .all<{ title: string; url: string }>();
+    const seen = new Set<string>();
+    const recent: StoredSource[] = [];
+    for (const row of results ?? []) {
+      if (seen.has(row.url)) continue;
+      seen.add(row.url);
+      recent.push({ title: row.title, url: row.url });
+      if (recent.length >= SOURCES_INJECT_LIMIT) break;
+    }
+    return recent.toReversed();
+  } catch (error) {
+    console.log(JSON.stringify({ event: "sources_read_error", error: String(error) }));
+    return [];
+  }
 }
 
 // ── User settings (opt-in flags) ──────────────────────────────────────────

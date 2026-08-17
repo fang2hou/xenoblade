@@ -1,11 +1,6 @@
 import { describe, it, expect } from "vitest";
-import type { GenerationSource } from "@xenoblade/contracts";
 
 import { renderReply, stripModelSourcesFooter } from "../src/citations";
-
-function source(index: number, title: string, url: string): GenerationSource {
-  return { index, title, url };
-}
 
 describe("stripModelSourcesFooter", () => {
   it("strips a single-line bold footer", () => {
@@ -43,23 +38,39 @@ describe("stripModelSourcesFooter", () => {
 });
 
 describe("renderReply", () => {
-  it("appends a single canonical footer from structured sources", () => {
-    const text = renderReply("See [1] and [2].", [
-      source(1, "A", "https://a"),
-      source(2, "B", "https://b"),
-    ]);
-    expect(text).toBe("See [1] and [2].\n\n**Sources:** [1] [A](https://a) · [2] [B](https://b)");
+  it("returns the body with no footer and no masking needed", () => {
+    expect(renderReply("Plain answer.")).toBe("Plain answer.");
   });
 
-  it("replaces a model-rendered footer with the canonical one", () => {
-    const text = renderReply("Answer [1].\n**Sources:**\n[1] Some Site — https://a", [
-      source(1, "Some Site", "https://a"),
-    ]);
-    expect(text).toBe("Answer [1].\n\n**Sources:** [1] [Some Site](https://a)");
+  it("strips a model-rendered footer and zh 来源 footers", () => {
+    expect(renderReply("Answer [来源](https://a).\n**Sources:**\n[1] A — https://a")).toBe(
+      "Answer [来源](https://a).",
+    );
+    expect(renderReply("回答。\n来源：https://a")).toBe("回答。");
   });
 
-  it("adds no footer when the source list is empty", () => {
-    expect(renderReply("Plain answer.", [])).toBe("Plain answer.");
-    expect(renderReply("Plain answer.\n**Sources:** [a](https://a)", [])).toBe("Plain answer.");
+  it("masks bare URLs so Discord renders no preview cards", () => {
+    expect(renderReply("Read https://example.com/page for details.")).toBe(
+      "Read [https://example.com/page](https://example.com/page) for details.",
+    );
+  });
+
+  it("keeps sentence punctuation outside the masked URL", () => {
+    expect(renderReply("See https://example.com/a, then https://example.com/b!")).toBe(
+      "See [https://example.com/a](https://example.com/a), then [https://example.com/b](https://example.com/b)!",
+    );
+  });
+
+  it("leaves masked links and angle-bracket URLs untouched", () => {
+    const text = "See [来源](https://a/x?y=1) and <https://b/z>.";
+    expect(renderReply(text)).toBe(text);
+  });
+
+  it("leaves URLs inside code fences and inline code verbatim", () => {
+    const fenced = "Example:\n```\ncurl https://example.com/api\n```\ndone";
+    expect(renderReply(fenced)).toBe(fenced);
+    expect(renderReply("run `npm view https://example.com` now")).toBe(
+      "run `npm view https://example.com` now",
+    );
   });
 });

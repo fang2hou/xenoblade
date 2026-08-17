@@ -55,8 +55,8 @@ export function sliceIntoChunks(text: string, max: number): string[] {
         chunks.push(current);
         current = "";
       }
-      for (let i = 0; i < paragraph.length; i += max) {
-        chunks.push(paragraph.slice(i, i + max));
+      for (const offset of hardWrapOffsets(paragraph, max)) {
+        chunks.push(paragraph.slice(offset.start, offset.end));
       }
       continue;
     }
@@ -72,4 +72,38 @@ export function sliceIntoChunks(text: string, max: number): string[] {
 
   if (current) chunks.push(current);
   return chunks;
+}
+
+/** Offsets of one hard-wrapped long line: [start, end) pairs of ≤ max chars. */
+function hardWrapOffsets(paragraph: string, max: number): Array<{ start: number; end: number }> {
+  // Spans of masked links — a cut inside `[label](url)` breaks the link and
+  // resurfaces a bare-URL fragment (and its preview card).
+  const spans: Array<[number, number]> = [];
+  for (const match of paragraph.matchAll(/\[[^\]\n]*\]\([^)\s]*\)/g)) {
+    const start = match.index;
+    if (start === undefined) continue;
+    spans.push([start, start + match[0].length]);
+  }
+
+  const offsets: Array<{ start: number; end: number }> = [];
+  let start = 0;
+  while (paragraph.length - start > max) {
+    let end = start + max;
+    // Never cut inside a masked link: pull the cut back to the link's start.
+    for (const [spanStart, spanEnd] of spans) {
+      if (end > spanStart && end < spanEnd) {
+        end = spanStart;
+        break;
+      }
+    }
+    // Degenerate case (link itself longer than max, or at position 0): cut
+    // anyway — a broken link is better than an unpostable message.
+    if (end <= start) {
+      end = start + max;
+    }
+    offsets.push({ start, end });
+    start = end;
+  }
+  offsets.push({ start, end: paragraph.length });
+  return offsets;
 }

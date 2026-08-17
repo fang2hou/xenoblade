@@ -102,6 +102,10 @@ export type GenerationResult =
       /** Citation sources captured from search tool invocations, in the
        * order the model saw them; `index` matches inline [n] markers. */
       sources: GenerationSource[];
+      /** Memory changes the model proposed via the remember/forget tools,
+       * awaiting the user's reaction confirmation (ADR-013). The Runtime
+       * posts one confirmation message and executes nothing until confirmed. */
+      memoryProposals?: MemoryProposal[];
     }
   | {
       status: "rejected";
@@ -116,7 +120,7 @@ export type GenerationResult =
       retryable: boolean;
     };
 
-/** One citation source, numbered in the order the model saw search results. */
+/** One citation source, numbered in the order the model saw them. */
 export interface GenerationSource {
   index: number;
   title: string;
@@ -182,6 +186,36 @@ export type MemoryResponse =
   | { status: "ok"; memories: UserMemory[] }
   | { status: "error"; code: string };
 
+// ── Memory Proposals (intent-based writes, ADR-013) ───────────────────────
+
+/** One memory change the model proposed during a generation. */
+export interface MemoryProposal {
+  /** Client-side id for matching confirmation results back to proposals. */
+  id: string;
+  action: "save" | "forget";
+  /** Required for `save` (fact or preference). Omit on `forget` to delete
+   * the key in every category. */
+  category?: MemoryCategory;
+  /** Stable memory key; `save` upserts, `forget` deletes matching rows. */
+  key: string;
+  /** New content for `save` proposals; absent on `forget`. */
+  value?: string;
+}
+
+/** Execute confirmed proposals against `user_memory` (reaction-gated). */
+export type MemoryProposalRequest = {
+  userId: string;
+  proposals: MemoryProposal[];
+};
+
+export type MemoryProposalResponse =
+  | {
+      status: "ok";
+      /** One outcome per request proposal, request order preserved. */
+      results: Array<{ id: string; ok: boolean; code?: string }>;
+    }
+  | { status: "error"; code: string };
+
 // ── User Settings ─────────────────────────────────────────────────────────
 
 /** UI language for runtime-rendered notices. Chat replies are NOT affected. */
@@ -229,6 +263,30 @@ export interface ContextClearRequest {
 
 export type ContextClearResult =
   | { status: "ok"; cleared: number }
+  | { status: "error"; code: string };
+
+// ── Context Truncate / Restore (ADR-014) ──────────────────────────────────
+
+/** Push an undo-able truncation: messages older than now leave context. */
+export interface ContextTruncateRequest {
+  userId: string;
+  scopeId: string;
+  containerId: string;
+}
+
+export type ContextTruncateResult =
+  | { status: "ok"; truncatedAt: number; remainingUndos: number }
+  | { status: "error"; code: string };
+
+/** Pop the newest undo-able truncation; never crosses a hard-reset floor. */
+export interface ContextRestoreRequest {
+  userId: string;
+  scopeId: string;
+  containerId: string;
+}
+
+export type ContextRestoreResult =
+  | { status: "ok"; restored: boolean; remainingUndos: number }
   | { status: "error"; code: string };
 
 // ── Health ────────────────────────────────────────────────────────────────
