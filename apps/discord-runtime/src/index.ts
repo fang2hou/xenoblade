@@ -53,6 +53,7 @@ import { handleUsageCommand } from "./usage";
 import {
   buildReplyControlsRow,
   ReplyRegistry,
+  replyControlsEdit,
   resolveControlAction,
   type ReplyEntry,
 } from "./reply-controls";
@@ -239,6 +240,9 @@ async function runGeneration(
     containerId,
     scopeId,
     channelId: message.channelId,
+    // A thread passes its parent so the Worker's channel allowlist admits it
+    // when the parent channel is listed.
+    parentChannelId: message.channel.isThread() ? message.channel.parentId : null,
     userId: message.author.id,
     userDisplayName:
       message.member?.displayName || message.author.displayName || message.author.username,
@@ -575,9 +579,10 @@ async function restoreRegeneratedReply(
 ): Promise<void> {
   staged.abort();
   target.entry.busy = false;
-  const row = buildReplyControlsRow(messages(language).replyControls, target.head.id);
   await target.head
-    .edit({ content: target.entry.headContent, components: [row] })
+    .edit(
+      replyControlsEdit(messages(language).replyControls, target.head.id, target.entry.headContent),
+    )
     .catch((error) => {
       console.log(
         JSON.stringify({
@@ -643,16 +648,17 @@ async function attachReplyControls(posted: readonly Message[], ctx: PostContext)
     language: ctx.language,
     busy: false,
   });
-  const row = buildReplyControlsRow(messages(ctx.language).replyControls, head.id);
-  await head.edit({ components: [row] }).catch((error) => {
-    console.log(
-      JSON.stringify({
-        event: "reply_control_attach_error",
-        messageId: head.id,
-        error: String(error),
-      }),
-    );
-  });
+  await head
+    .edit(replyControlsEdit(messages(ctx.language).replyControls, head.id))
+    .catch((error) => {
+      console.log(
+        JSON.stringify({
+          event: "reply_control_attach_error",
+          messageId: head.id,
+          error: String(error),
+        }),
+      );
+    });
 }
 
 /**

@@ -28,7 +28,7 @@ const DEFAULT_CHAINS: Record<ModelRole, ModelConfig[]> = {
 };
 
 export const GENERATION_LIMITS = {
-  maxOutputTokens: 1024,
+  maxOutputTokens: 4096,
   timeout: { totalMs: 60_000, firstChunkMs: 15_000, chunkMs: 5_000 },
 } as const;
 

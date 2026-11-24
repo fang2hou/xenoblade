@@ -1,7 +1,10 @@
 /**
  * Reply rendering for link hygiene (ADR-007 amendment): no sources footer is
- * appended — citations are the model's inline masked links. Bare URLs are
- * wrapped into masked links so Discord never renders preview cards for them.
+ * appended — citations are the model's inline masked links. Discord renders a
+ * preview card for every URL it can unfurl in message content — bare URLs and
+ * `[label](url)` masked links alike — unless the target sits in angle brackets
+ * or the message carries `SuppressEmbeds`. This module puts every URL outside
+ * code behind angle brackets; the send path adds the flag (see `replyPayload`).
  */
 
 /**
@@ -19,26 +22,43 @@ export function stripModelSourcesFooter(reply: string): string {
   return reply.replace(MODEL_SOURCES_FOOTER_RE, "").trimEnd();
 }
 
-/** One bare URL; the lookbehinds skip masked-link targets and `<...>` forms. */
-const BARE_URL_RE = /(?<!\]\()(?<!<)(https?:\/\/[^\s<>]+)/g;
+/**
+ * One masked link or bare URL, leftmost first: a URL used as its own link
+ * label is consumed with that link instead of being masked a second time. A
+ * link target may contain one level of balanced parentheses
+ * (Wikipedia-style); the bare branch's lookbehinds skip `<...>` forms and
+ * targets the link branch rejected (whitespace in the destination).
+ */
+const LINK_OR_URL_RE =
+  /\[([^\]\n]*)\]\((<?)(https?:\/\/[^\s<>()]*(?:\([^\s()<>]*\)[^\s<>()]*)*)>?\)|(?<!\]\()(?<!<)(https?:\/\/[^\s<>]+)/g;
 
 /** Punctuation that belongs to the sentence, not the URL. */
 const TRAILING_PUNCTUATION = ".,;:!?)】」』";
 
 /**
- * Wrap bare URLs in masked-link markdown (`url` → `[url](url)`). Discord
- * renders a large preview card for every bare URL but not for masked links,
- * so this is the guarantee layer behind the model's own linking discipline.
- * URLs already inside `[label](url)` or `<...>` are left alone, and code
- * spans / fenced blocks are skipped so their contents stay verbatim.
+ * Put every URL outside code behind angle brackets: bare URLs become masked
+ * links (`url` → `[url](<url>)`) and a model-written `[label](url)` becomes
+ * `[label](<url>)`. Discord renders a preview card for both forms as-is; the
+ * angle brackets are what stop it. Links already using `<...>` are left
+ * alone, and code spans / fenced blocks are skipped so their contents stay
+ * verbatim.
  */
 export function maskBareUrls(text: string): string {
   return text
     .split(/(```[\s\S]*?```|`[^`\n]*`)/g)
-    .map((segment, i) =>
-      i % 2 === 1 ? segment : segment.replace(BARE_URL_RE, (match) => maskUrl(match)),
-    )
+    .map((segment, i) => (i % 2 === 1 ? segment : segment.replace(LINK_OR_URL_RE, maskLinkOrUrl)))
     .join("");
+}
+
+function maskLinkOrUrl(
+  match: string,
+  label: string | undefined,
+  angle: string | undefined,
+  url: string | undefined,
+  bare: string | undefined,
+): string {
+  if (bare !== undefined) return maskUrl(bare);
+  return angle === "<" ? match : `[${label}](<${url}>)`;
 }
 
 function maskUrl(url: string): string {
@@ -48,7 +68,7 @@ function maskUrl(url: string): string {
   }
   const core = url.slice(0, end);
   const trailing = url.slice(end);
-  return `[${core}](${core})${trailing}`;
+  return `[${core}](<${core}>)${trailing}`;
 }
 
 /**

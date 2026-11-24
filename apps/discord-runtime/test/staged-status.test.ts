@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MessageFlags } from "discord.js";
 import type { SendableChannels } from "discord.js";
 
 import { StagedStatus, type StatusMilestone } from "../src/staged-status";
@@ -9,9 +10,15 @@ const RATE_LIMIT_ERROR = Object.assign(new Error("rate limited"), {
   status: 429,
 });
 
+/** Options `send` and `edit` receive for reply text. */
+interface ReplyOptions {
+  content: string;
+  flags?: number;
+}
+
 interface FakeMessage {
   id: string;
-  edit(text: string): Promise<FakeMessage>;
+  edit(options: ReplyOptions): Promise<FakeMessage>;
   delete(): Promise<FakeMessage>;
 }
 
@@ -21,6 +28,8 @@ interface Harness {
   /** Every message object `send` created, in send order. */
   sentMessages: FakeMessage[];
   edits: string[];
+  /** Flags of every send and edit, in call order. */
+  flags: Array<number | undefined>;
   deleted: number;
 }
 
@@ -33,14 +42,16 @@ function harness(failEdits: Error[] = []): Harness {
   const sends: string[] = [];
   const sentMessages: FakeMessage[] = [];
   const edits: string[] = [];
+  const flags: Array<number | undefined> = [];
   const state = { deleted: 0, nextFailure: 0, seq: 0 };
   const makeMessage = (): FakeMessage => {
     const message: FakeMessage = {
       id: `m${state.seq++}`,
-      edit: async (text: string) => {
+      edit: async (options: ReplyOptions) => {
         const failure = failEdits[state.nextFailure++];
         if (failure !== undefined) throw failure;
-        edits.push(text);
+        edits.push(options.content);
+        flags.push(options.flags);
         return message;
       },
       delete: async () => {
@@ -52,8 +63,9 @@ function harness(failEdits: Error[] = []): Harness {
   };
   const channel = {
     id: "channel-test",
-    send: async (text: string) => {
-      sends.push(text);
+    send: async (options: ReplyOptions) => {
+      sends.push(options.content);
+      flags.push(options.flags);
       const message = makeMessage();
       sentMessages.push(message);
       return message;
@@ -64,6 +76,7 @@ function harness(failEdits: Error[] = []): Harness {
     sends,
     sentMessages,
     edits,
+    flags,
     get deleted() {
       return state.deleted;
     },
@@ -116,12 +129,12 @@ describe("StagedStatus milestones", () => {
     let sendShouldFail = true;
     const channel = {
       id: "channel-test",
-      send: async (text: string) => {
+      send: async (options: ReplyOptions) => {
         if (sendShouldFail) {
           sendShouldFail = false;
           throw new Error("network down");
         }
-        h.sends.push(text);
+        h.sends.push(options.content);
         return { edit: async () => {}, delete: async () => {} };
       },
     } as unknown as SendableChannels;
@@ -156,6 +169,16 @@ describe("StagedStatus milestones", () => {
     await vi.advanceTimersByTimeAsync(2_000);
     // Later milestones still run; the placeholder stays at the posted stage.
     expect(h.sends).toEqual(["s1"]);
+  });
+
+  it("posts and escalates the placeholder with SuppressEmbeds", async () => {
+    const h = harness();
+    staged(h);
+    await vi.advanceTimersByTimeAsync(2_500);
+    // The placeholder post and the first escalation edit.
+    expect(h.sends).toEqual(["s1"]);
+    expect(h.edits).toEqual(["s2"]);
+    expect(h.flags).toEqual([MessageFlags.SuppressEmbeds, MessageFlags.SuppressEmbeds]);
   });
 });
 
@@ -256,6 +279,19 @@ describe("StagedStatus settle", () => {
     const h = harness();
     const instance = staged(h);
     await expect(instance.settle("   ")).rejects.toThrow(/empty after trim/);
+  });
+
+  it("edits the head and posts continuations with SuppressEmbeds", async () => {
+    const h = harness();
+    const instance = staged(h);
+    await vi.advanceTimersByTimeAsync(1_500);
+    await instance.settle(["a".repeat(1_500), "b".repeat(1_500)].join("\n"));
+
+    // Placeholder post, settle edit, continuation post — all flagged.
+    expect(h.edits).toHaveLength(1);
+    expect(h.sends).toHaveLength(2);
+    expect(h.flags).toHaveLength(3);
+    for (const flags of h.flags) expect(flags).toBe(MessageFlags.SuppressEmbeds);
   });
 });
 

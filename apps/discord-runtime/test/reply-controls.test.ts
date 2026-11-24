@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { ButtonStyle } from "discord.js";
+import {
+  ButtonStyle,
+  MessageFlags,
+  MessagePayload,
+  type Message,
+  type MessageEditOptions,
+} from "discord.js";
 import type { GenerationRequest } from "@xenoblade/contracts";
 
 import {
@@ -8,10 +14,30 @@ import {
   parseControlCustomId,
   REGENERATE_EMOJI,
   ReplyRegistry,
+  replyControlsEdit,
   controlCustomId,
   resolveControlAction,
   type ReplyEntry,
 } from "../src/reply-controls";
+
+/** The fields of an edit body this suite reads. */
+interface EditBody {
+  content?: string | null;
+  flags?: number;
+  components?: Array<{ components: WireButton[] }>;
+}
+
+type WireButton = { custom_id?: string; disabled?: boolean };
+
+/**
+ * The request body discord.js builds for a message edit — the same path
+ * `Message#edit` takes — so the assertions cover what reaches Discord.
+ */
+function editBody(options: MessageEditOptions): EditBody | null {
+  const message = { client: { options: {} } } as unknown as Message;
+  const body = MessagePayload.create(message, options).resolveBody().body;
+  return body as unknown as EditBody | null;
+}
 
 function request(userId = "u1"): GenerationRequest {
   return {
@@ -91,6 +117,33 @@ describe("buildReplyControlsRow", () => {
     for (const button of rowButtons({ regenerate: "Regenerate" }, true)) {
       expect(button.disabled).toBe(true);
     }
+  });
+});
+
+describe("replyControlsEdit", () => {
+  it("attaches both buttons and keeps embeds suppressed", () => {
+    const body = editBody(replyControlsEdit({ regenerate: "重新生成" }, "r1"));
+    expect(body?.flags).toBe(MessageFlags.SuppressEmbeds);
+    expect(body?.content).toBeUndefined();
+    expect(
+      body?.components?.map((row) => row.components.map((button) => button.custom_id)),
+    ).toEqual([["xbl:regen:r1", "xbl:del:r1"]]);
+  });
+
+  it("restores the previous head content with both buttons enabled", () => {
+    const body = editBody(replyControlsEdit({ regenerate: "Regenerate" }, "r1", "previous head"));
+    expect(body?.content).toBe("previous head");
+    expect(body?.flags).toBe(MessageFlags.SuppressEmbeds);
+    const buttons = body?.components?.[0]?.components ?? [];
+    expect(buttons.map((button) => button.custom_id)).toEqual(["xbl:regen:r1", "xbl:del:r1"]);
+    expect(buttons.every((button) => !button.disabled)).toBe(true);
+  });
+
+  it("leaves message flags out of the body when an edit changes only components", () => {
+    // The regenerate ack (`interaction.update({ components })`) relies on this:
+    // an omitted `flags` field leaves SuppressEmbeds as the message has it.
+    const row = buildReplyControlsRow({ regenerate: "Regenerate" }, "r1", { disabled: true });
+    expect(editBody({ components: [row] })?.flags).toBeUndefined();
   });
 });
 

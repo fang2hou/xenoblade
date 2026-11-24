@@ -1,4 +1,5 @@
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle } from "discord.js";
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags } from "discord.js";
+import type { MessageEditOptions } from "discord.js";
 
 import type { GenerationRequest, UiLanguage } from "@xenoblade/contracts";
 
@@ -92,6 +93,25 @@ export interface ControlTexts {
 export interface ControlRowOptions {
   /** Render both buttons unclickable (regenerate in flight). */
   disabled?: boolean;
+}
+
+/**
+ * Message edit that (re)attaches the control row to a reply's head chunk,
+ * optionally replacing its text — a failed regenerate puts the previous head
+ * back this way. `SuppressEmbeds` is re-asserted on every such edit: Discord
+ * re-scans edited content for link preview cards, and a reply must never
+ * regain them through a controls edit.
+ */
+export function replyControlsEdit(
+  texts: ControlTexts,
+  headMessageId: string,
+  content?: string,
+): MessageEditOptions {
+  return {
+    ...(content === undefined ? {} : { content }),
+    components: [buildReplyControlsRow(texts, headMessageId)],
+    flags: MessageFlags.SuppressEmbeds,
+  };
 }
 
 /**

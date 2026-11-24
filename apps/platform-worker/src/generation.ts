@@ -1,4 +1,4 @@
-import { generateText, isStepCount } from "ai";
+import { generateText, isStepCount, type ToolSet } from "ai";
 
 import { composeSystemPrompt, createModel, GENERATION_LIMITS, getModelChain } from "@xenoblade/ai";
 import type {
@@ -74,6 +74,17 @@ function sleep(ms: number): Promise<void> {
   return promise;
 }
 
+/**
+ * Attribute a tool call to its MCP server, or `"builtin"` for a first-party
+ * tool. MCP tools are registered as `<server>_<tool>` (see
+ * `connectMcpServers`), and a first-party name such as `web_search` must not
+ * be read as a call to a server named `web`.
+ */
+function toolServer(toolName: string, firstPartyTools: ToolSet): string {
+  if (Object.hasOwn(firstPartyTools, toolName)) return "builtin";
+  return toolName.split("_")[0] ?? "builtin";
+}
+
 export async function generate(
   env: Env,
   req: GenerationRequest,
@@ -137,7 +148,7 @@ async function runGenerationPipeline(
   ctx: ExecutionContext | undefined,
 ): Promise<GenerationResult> {
   // Runtime gate
-  const runtime = await getRuntimeConfig(env.DB, req.scopeId, req.channelId);
+  const runtime = await getRuntimeConfig(env.DB, req.scopeId, req.channelId, req.parentChannelId);
   if (!runtime.enabled || !runtime.channelAllowed) {
     return { status: "rejected", requestId, code: "disabled" };
   }
@@ -219,6 +230,9 @@ async function runGenerationPipeline(
           stopWhen: isStepCount(5),
           maxRetries: 1,
           timeout: GENERATION_LIMITS.timeout.totalMs,
+          maxOutputTokens: config.maxOutputTokens ?? GENERATION_LIMITS.maxOutputTokens,
+          // Omitted, not defaulted: reasoning models reject any temperature but their own.
+          ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
         });
 
         usedModel = config.id;
@@ -320,7 +334,7 @@ async function runGenerationPipeline(
         id: crypto.randomUUID(),
         interactionId: requestId,
         toolName: tr.toolName,
-        server: tr.toolName.includes("_") ? (tr.toolName.split("_")[0] ?? "builtin") : "builtin",
+        server: toolServer(tr.toolName, firstPartyTools),
         status: isError ? "error" : "ok",
         inputSize: JSON.stringify(tr.input).length,
         outputSize: JSON.stringify(tr.output).length,

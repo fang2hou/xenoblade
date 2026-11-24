@@ -1,6 +1,6 @@
 import type { Message, SendableChannels } from "discord.js";
 
-import { MAX_MESSAGE_LENGTH, postReply, sliceIntoChunks } from "./output";
+import { MAX_MESSAGE_LENGTH, postReply, replyPayload, sliceIntoChunks } from "./output";
 import { stagedMilestones } from "./i18n";
 
 /**
@@ -151,7 +151,7 @@ export class StagedStatus {
     if (this.settled) return;
     if (!this.placeholder) {
       try {
-        this.placeholder = await this.channel.send(text);
+        this.placeholder = await this.channel.send(replyPayload(text));
         log("staged_placeholder_posted", this.channel.id);
       } catch (error) {
         // Cosmetic; the next milestone retries with its own stage text.
@@ -180,7 +180,9 @@ export class StagedStatus {
     if (head !== undefined && (await this.editPlaceholder(placeholder, head))) {
       log("staged_placeholder_settled", this.channel.id, { edits: this.edits });
       const posted: Message[] = [placeholder];
-      for (const chunk of chunks.slice(1)) posted.push(await this.channel.send(chunk));
+      for (const chunk of chunks.slice(1)) {
+        posted.push(await this.channel.send(replyPayload(chunk)));
+      }
       return posted;
     }
     // Never leave the user without the reply or a stale placeholder.
@@ -204,7 +206,7 @@ export class StagedStatus {
         });
       }
       try {
-        await message.edit(text);
+        await message.edit(replyPayload(text));
         this.edits += 1;
         return true;
       } catch (error) {
