@@ -154,7 +154,7 @@ async function openClient(
   waitUntil: McpConnectOptions["waitUntil"],
 ): Promise<MCPClient> {
   let sessionId: string | undefined;
-  const fetchFn = withBoundedSessionDelete(fetch.bind(globalThis));
+  const sessionFetch = createSessionFetch(fetch.bind(globalThis));
 
   try {
     return await createMCPClient({
@@ -167,7 +167,7 @@ async function openClient(
         //    the SDK stores globalThis.fetch as a bare reference
         // 2. redirect: "follow" — Workers rejects the SDK default "error"
         redirect: "follow",
-        fetch: fetchFn,
+        fetch: sessionFetch.fetch,
         onSessionIdChange: (id) => {
           sessionId = id;
         },
@@ -178,7 +178,10 @@ async function openClient(
     // Once the deadline aborts the handshake, the SDK tears its transport down
     // without the session DELETE, so a session the server already opened is ended here.
     if (sessionId !== undefined && signal.aborted) {
-      cleanupInBackground(deleteSession(fetchFn, config, sessionId), waitUntil);
+      cleanupInBackground(
+        sessionFetch.deleteSession(config.url, config.headers, sessionId),
+        waitUntil,
+      );
     }
     throw error;
   }
@@ -194,26 +197,38 @@ function cleanupInBackground(
 }
 
 /**
- * The SDK deletes the server session on close() without any signal. Cap every
- * session DELETE so a server that stopped answering cannot hold up teardown.
+ * The SDK deletes the server session on close() without any signal, so every
+ * DELETE is capped here. The wrapper also notes the protocol version the SDK
+ * last spoke, for a session DELETE that has to be sent without a client.
  */
-function withBoundedSessionDelete(fetchFn: typeof fetch): typeof fetch {
-  return (input, init) =>
-    init?.method === "DELETE"
-      ? fetchFn(input, { ...init, signal: AbortSignal.timeout(MCP_SESSION_DELETE_TIMEOUT_MS) })
-      : fetchFn(input, init);
-}
+function createSessionFetch(baseFetch: typeof fetch) {
+  let protocolVersion: string | undefined;
 
-async function deleteSession(
-  fetchFn: typeof fetch,
-  config: McpServerConfig,
-  sessionId: string,
-): Promise<void> {
-  await fetchFn(config.url, {
-    method: "DELETE",
-    headers: { ...config.headers, "mcp-session-id": sessionId },
-    redirect: "follow",
-  });
+  const transportFetch: typeof fetch = (input, init) => {
+    const requestedVersion = new Headers(init?.headers).get("mcp-protocol-version");
+    if (requestedVersion !== null) protocolVersion = requestedVersion;
+    return init?.method === "DELETE"
+      ? baseFetch(input, { ...init, signal: AbortSignal.timeout(MCP_SESSION_DELETE_TIMEOUT_MS) })
+      : baseFetch(input, init);
+  };
+
+  async function deleteSession(
+    url: string,
+    headers: Record<string, string> | undefined,
+    sessionId: string,
+  ): Promise<void> {
+    await transportFetch(url, {
+      method: "DELETE",
+      headers: {
+        ...headers,
+        ...(protocolVersion === undefined ? {} : { "mcp-protocol-version": protocolVersion }),
+        "mcp-session-id": sessionId,
+      },
+      redirect: "follow",
+    });
+  }
+
+  return { fetch: transportFetch, deleteSession };
 }
 
 function exposeAllowedTools(

@@ -7,6 +7,7 @@ const CONTEXT7 = "https://mcp.context7.com/mcp";
 const GITHUB = "https://api.githubcopilot.com/mcp/";
 const CONNECT_DEADLINE_MS = 3_000;
 const SESSION_DELETE_TIMEOUT_MS = 2_000;
+const NEGOTIATED_PROTOCOL_VERSION = "2025-06-18";
 const ENV_WITH_GITHUB = { GITHUB_MCP_TOKEN: "test-token" } as Env;
 
 interface JsonRpcMessage {
@@ -167,7 +168,15 @@ describe("connectMcpServers", () => {
         [CONTEXT7]: healthyServer(["resolve-library-id"]),
         [GITHUB]: hangingOn(method, ["get_me"]),
       });
-      network.respondTo(GITHUB, "DELETE", (init) => hangUntilAborted(init?.signal));
+      const deleteStatuses: number[] = [];
+      // A strict server ends a session only for a client speaking the negotiated protocol version.
+      network.respondTo(GITHUB, "DELETE", (init) => {
+        const speaksNegotiatedVersion =
+          new Headers(init?.headers).get("mcp-protocol-version") === NEGOTIATED_PROTOCOL_VERSION;
+        const status = speaksNegotiatedVersion ? 200 : 400;
+        deleteStatuses.push(status);
+        return new Response(null, { status });
+      });
 
       await connectPastDeadline(() => connectMcpServers(ENV_WITH_GITHUB));
 
@@ -178,8 +187,10 @@ describe("connectMcpServers", () => {
       const deleteHeaders = Object.fromEntries(new Headers(sessionDeletes[0]?.headers));
       expect(deleteHeaders).toMatchObject({
         authorization: "Bearer test-token",
+        "mcp-protocol-version": NEGOTIATED_PROTOCOL_VERSION,
         "mcp-session-id": "session",
       });
+      expect(deleteStatuses).toEqual([200]);
       expect(logs.events()).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
@@ -376,7 +387,7 @@ function healthyServer(toolNames: string[], beforeAnswering?: () => Promise<void
         return jsonResponse(
           message.id,
           {
-            protocolVersion: "2025-06-18",
+            protocolVersion: NEGOTIATED_PROTOCOL_VERSION,
             capabilities: { tools: {} },
             serverInfo: { name: "fake", version: "1.0.0" },
           },
