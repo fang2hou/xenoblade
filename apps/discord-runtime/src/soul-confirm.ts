@@ -1,4 +1,10 @@
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags } from "discord.js";
+import {
+  ActionRowBuilder,
+  AttachmentBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  MessageFlags,
+} from "discord.js";
 import type {
   Message,
   MessageComponentInteraction,
@@ -11,7 +17,7 @@ import { applySoulProposal } from "./ai-client";
 import type { EnvConfig } from "./env";
 import { messages, type Messages } from "./i18n";
 import { resolveUiLanguageBounded } from "./language";
-import { replyPayload } from "./output";
+import { MAX_MESSAGE_LENGTH } from "./output";
 
 /** How long a confirmation card stays actionable. */
 export const SOUL_CONFIRM_WINDOW_MS = 5 * 60 * 1000;
@@ -21,6 +27,15 @@ const MAX_TRACKED_CONFIRMS = 128;
 
 /** Family prefix of every soul-confirmation customId: `xbl:soul:<choice>:<proposalId>`. */
 const CUSTOM_ID_FAMILY = "xbl:soul";
+
+/** File name of the full new soul when it does not fit in the card's message. */
+export const SOUL_ATTACHMENT_NAME = "soul-proposal.txt";
+
+/**
+ * Mentions are never parsed on a confirmation card. The summary and the soul
+ * are model-written text and may contain `@everyone` or a role mention.
+ */
+const NO_MENTIONS = { parse: [] };
 
 /** Strings the confirmation flow renders (from the i18n table). */
 export type SoulConfirmTexts = Messages["soulConfirm"];
@@ -95,15 +110,56 @@ export function parseSoulCustomId(
   return { choice, proposalId };
 }
 
-/** Render the card: the question, the proposed change, and what the buttons do. */
-export function renderSoulConfirmation(texts: SoulConfirmTexts, proposal: SoulProposal): string {
-  const summary = proposal.summary.trim();
-  return [
-    texts.header,
-    ...(summary === "" ? [] : ["", texts.summary(summary)]),
+/** A confirmation card ready to post. */
+export interface SoulConfirmCard {
+  /** The question, the change, and either the full new soul or a pointer to `attachment`. */
+  content: string;
+  /** The full new soul as a UTF-8 file, when it does not fit in the message. */
+  attachment: AttachmentBuilder | undefined;
+}
+
+/** `label`, then the soul in a code block that no line of the soul can close. */
+function soulCodeBlock(label: string, soul: string): string {
+  const longestRun = (soul.match(/`+/g) ?? []).reduce(
+    (longest, run) => Math.max(longest, run.length),
+    0,
+  );
+  const fence = "`".repeat(Math.max(3, longestRun + 1));
+  return `${label}\n${fence}\n${soul}\n${fence}`;
+}
+
+/**
+ * Build the confirmation card for a soul proposal.
+ *
+ * The summary is kept to one line and the full new soul follows verbatim in a
+ * code block, so the user confirms exactly the text that will be stored. When
+ * that does not fit in one message, the soul travels as a UTF-8 file holding
+ * the same bytes, and the message says so.
+ */
+export function buildSoulConfirmCard(
+  texts: SoulConfirmTexts,
+  proposal: SoulProposal,
+): SoulConfirmCard {
+  // One line: a line break would let a fenced block open inside the summary
+  // and pass for the full soul shown below it.
+  const summary = proposal.summary.replace(/\s+/g, " ").trim();
+  const head = [texts.header, ...(summary === "" ? [] : ["", texts.summary(summary)])];
+  const inline = [
+    ...head,
+    "",
+    soulCodeBlock(texts.fullContent, proposal.content),
     "",
     texts.footer,
   ].join("\n");
+  if (inline.length <= MAX_MESSAGE_LENGTH) {
+    return { content: inline, attachment: undefined };
+  }
+  return {
+    content: [...head, "", texts.attachmentNote, "", texts.footer].join("\n"),
+    attachment: new AttachmentBuilder(Buffer.from(proposal.content, "utf8"), {
+      name: SOUL_ATTACHMENT_NAME,
+    }),
+  };
 }
 
 /** Build the card's button row: 是 (Primary) confirms, 不是 (Secondary) declines. */
@@ -127,10 +183,16 @@ export function buildSoulConfirmRow(
  * Message edit that settles a card: replaces its text and removes the
  * buttons. `SuppressEmbeds` is re-asserted on every edit because Discord
  * re-scans edited content for link preview cards, and a summary may quote a
- * URL.
+ * URL; mention parsing stays off for the same kind of reason — the summary
+ * may also quote a mention.
  */
 export function soulConfirmEdit(content: string): MessageEditOptions {
-  return { content, components: [], flags: MessageFlags.SuppressEmbeds };
+  return {
+    content,
+    components: [],
+    flags: MessageFlags.SuppressEmbeds,
+    allowedMentions: NO_MENTIONS,
+  };
 }
 
 /** What a soul-confirmation click should do, as decided by {@link resolveSoulConfirmAction}. */
@@ -197,11 +259,11 @@ function expire(message: Message, entry: SoulConfirmEntry, registry: SoulConfirm
 
 /**
  * Post the confirmation card for a generation's soul proposal — the question,
- * the proposed change, and the 是 / 不是 buttons — and arm the expiry timer.
- * Best-effort: a failed post is logged and never breaks the already-delivered
- * reply. The entry is registered before the send, so a click that races the
- * send fails closed (the card's message id is not known yet) instead of
- * meeting a proposal nobody tracks.
+ * the proposed change, the full new soul, and the 是 / 不是 buttons — and arm
+ * the expiry timer. Best-effort: a failed post is logged and never breaks the
+ * already-delivered reply. The entry is registered before the send, so a
+ * click that races the send fails closed (the card's message id is not known
+ * yet) instead of meeting a proposal nobody tracks.
  */
 export async function postSoulConfirmation(
   channel: SendableChannels,
@@ -220,11 +282,15 @@ export async function postSoulConfirmation(
   };
   registry.register(proposal.id, entry);
 
+  const card = buildSoulConfirmCard(texts, proposal);
   let message: Message;
   try {
     message = await channel.send({
-      ...replyPayload(renderSoulConfirmation(texts, proposal)),
+      content: card.content,
+      flags: MessageFlags.SuppressEmbeds,
+      allowedMentions: NO_MENTIONS,
       components: [buildSoulConfirmRow(texts, proposal.id)],
+      ...(card.attachment === undefined ? {} : { files: [card.attachment] }),
     });
   } catch (error) {
     registry.remove(proposal.id);

@@ -25,9 +25,25 @@ export function isThreadContainer(containerId: string): boolean {
   return containerId.split(":").length >= 4;
 }
 
-/** Rough token estimate (~4 Unicode chars/token) for context budgeting only. */
+/**
+ * Scripts whose characters take roughly one token each. Every other
+ * character counts as Latin-style text, about four to a token.
+ */
+const ONE_TOKEN_SCRIPTS = /\p{scx=Han}|\p{scx=Hiragana}|\p{scx=Katakana}|\p{scx=Hangul}/u;
+
+/**
+ * Rough token estimate for context budgeting only. Counting every character
+ * as a quarter of a token under-budgeted Chinese conversations fourfold, so
+ * CJK characters count as one token each.
+ */
 function estimateTokens(text: string): number {
-  return Math.ceil(Array.from(text).length / 4);
+  let cjk = 0;
+  let other = 0;
+  for (const char of text) {
+    if (ONE_TOKEN_SCRIPTS.test(char)) cjk += 1;
+    else other += 1;
+  }
+  return cjk + Math.ceil(other / 4);
 }
 
 /**

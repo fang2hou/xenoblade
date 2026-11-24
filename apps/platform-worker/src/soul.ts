@@ -69,7 +69,9 @@ export async function getBotSoul(db: D1Database, scopeId: string): Promise<BotSo
 
 /**
  * Trimmed soul text, cut to {@link MAX_SOUL_CHARS} code points; null when
- * nothing remains. The single normalization every soul write goes through.
+ * nothing remains. The single normalization every soul write goes through,
+ * applied once when `soul_update` creates a proposal: the confirmation card
+ * shows that result verbatim, and applying it stores the same bytes.
  */
 export function normalizeSoul(content: string): string | null {
   const chars = Array.from(content.trim());
@@ -187,11 +189,13 @@ function isSoulApplyRequest(value: unknown): value is SoulApplyRequest {
 
 /**
  * Execute a user-confirmed soul proposal. The Runtime calls this only after
- * the user clicked 是 on the confirmation card. The chat flow can only ever
- * target a guild, so the two reserved scope keys are refused: `"dm"` never
- * owns a row, and the global `default` soul is operator-managed, not
- * something a chat confirmation may overwrite. Never throws — a failure
- * returns `{ status: "error", code }`.
+ * the user clicked 是 on the confirmation card, which showed
+ * `proposal.content` verbatim — so exactly those bytes are stored; content
+ * that is not already normalized is refused, never quietly rewritten. The
+ * chat flow can only ever target a guild, so the two reserved scope keys are
+ * refused: `"dm"` never owns a row, and the global `default` soul is
+ * operator-managed, not something a chat confirmation may overwrite. Never
+ * throws — a failure returns `{ status: "error", code }`.
  */
 export async function handleSoulApply(db: D1Database, req: unknown): Promise<SoulApplyResponse> {
   if (!isSoulApplyRequest(req)) return { status: "error", code: "invalid_body" };
@@ -199,7 +203,11 @@ export async function handleSoulApply(db: D1Database, req: unknown): Promise<Sou
   if (proposal.scopeId === DM_SCOPE || proposal.scopeId === DEFAULT_SOUL_SCOPE) {
     return { status: "error", code: "invalid_scope" };
   }
-  if (normalizeSoul(proposal.content) === null) {
+  // The card showed `proposal.content` exactly, and `normalizeSoul` is the
+  // one normalization the tool already applied when it created the proposal:
+  // content that is not already in that form was never shown to the user, so
+  // it is refused rather than quietly stored in a different form.
+  if (normalizeSoul(proposal.content) !== proposal.content) {
     return { status: "error", code: "invalid_content" };
   }
   try {

@@ -57,6 +57,9 @@ const zh = {
   soulConfirm: {
     header: "确实要更新本服务器的助手人设（soul）吗？",
     summary: (summary: string) => `变更摘要：${summary}`,
+    fullContent: "新的人设全文（确认后原样保存）：",
+    attachmentNote:
+      "全文放不进一条消息，完整内容见附件 soul-proposal.txt（确认后原样保存附件里的内容）。",
     footer: "点击后才会生效（5 分钟内有效）。",
     yes: "是",
     no: "不是",
@@ -161,6 +164,8 @@ export type Messages = {
   soulConfirm: {
     header: string;
     summary: (summary: string) => string;
+    fullContent: string;
+    attachmentNote: string;
     footer: string;
     yes: string;
     no: string;
@@ -262,6 +267,9 @@ const en: Messages = {
   soulConfirm: {
     header: "Update this server's assistant persona (soul)?",
     summary: (summary: string) => `Change: ${summary}`,
+    fullContent: "Full new soul (saved exactly as shown):",
+    attachmentNote:
+      "The full text is too long to show here. It is attached as soul-proposal.txt and will be saved exactly as shown in that file.",
     footer: "Nothing changes until you choose (valid for 5 minutes).",
     yes: "Yes",
     no: "No",

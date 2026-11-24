@@ -301,8 +301,10 @@ async function runGenerationPipeline(
             messages: isPrimary ? messagesWithImages : messagesTextOnly,
             tools: allTools,
             stopWhen: isStepCount(MAX_STEPS),
-            // The final step offers no tools, so the model cannot end the run
-            // on a tool call and leave the user with an empty reply.
+            // Step 8, the last one, offers no tools to push the model into a
+            // final synthesis instead of another tool call. A provider that
+            // still answers with empty text is caught by the empty-reply check
+            // below and falls through to the next model as usual.
             prepareStep: ({ stepNumber }) =>
               stepNumber >= MAX_STEPS - 1 ? { activeTools: [] } : undefined,
             maxRetries: 1,

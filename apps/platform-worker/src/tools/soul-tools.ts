@@ -59,7 +59,7 @@ export function createSoulUpdateTool(scopeId: string) {
       "Propose a new soul for this server: the persona and voice you will follow in every later reply here. " +
       "Call it only when the user explicitly asks to change your persona, character, or tone, and only in a server — it is refused in DMs. " +
       "Nothing changes until the user confirms a follow-up card with a 是 / 不是 button, so never claim the soul is updated before they do. " +
-      "content is the complete new soul (it replaces the current one); summary is all the user sees before confirming, so make it short, specific, and honest.",
+      "The card shows the user the full content and the summary, and the content is saved exactly as written there: content is the complete new soul (it replaces the current one), and summary is one or two short, specific, honest sentences in the user's language saying what changes about your persona or tone.",
     inputSchema: jsonSchema<{ content: string; summary: string }>({
       type: "object",
       properties: {

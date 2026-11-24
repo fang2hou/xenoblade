@@ -3,6 +3,7 @@ import {
   ButtonStyle,
   MessageFlags,
   MessagePayload,
+  type AttachmentBuilder,
   type Message,
   type MessageComponentInteraction,
   type MessageEditOptions,
@@ -11,22 +12,25 @@ import {
 import type { SoulProposal, UiLanguage } from "@xenoblade/contracts";
 
 import {
+  buildSoulConfirmCard,
   buildSoulConfirmRow,
   handleSoulConfirmInteraction,
   isSoulConfirmCustomId,
   parseSoulCustomId,
   postSoulConfirmation,
-  renderSoulConfirmation,
   resolveSoulConfirmAction,
+  SOUL_ATTACHMENT_NAME,
   SOUL_CONFIRM_WINDOW_MS,
   SoulConfirmRegistry,
   soulConfirmEdit,
   soulCustomId,
+  type SoulConfirmCard,
   type SoulConfirmEntry,
   type SoulConfirmTexts,
 } from "../src/soul-confirm";
 import { messages } from "../src/i18n";
 import { resetLanguageCache } from "../src/language";
+import { MAX_MESSAGE_LENGTH } from "../src/output";
 import type { EnvConfig } from "../src/env";
 import { parseControlCustomId } from "../src/reply-controls";
 
@@ -56,16 +60,37 @@ interface EditCall {
   content: string;
   components: unknown[];
   flags: number;
+  allowedMentions: { parse: string[] };
 }
 
 /** Options the channel's `send` received for the card. */
 interface SendCall {
   content: string;
   flags: number;
+  allowedMentions?: unknown;
+  files?: AttachmentBuilder[];
   components: Array<{ toJSON: () => { components: Array<WireButton> } }>;
 }
 
 type WireButton = { custom_id?: string; label?: string; style: number };
+
+/** The fields of a message request body this suite reads, as discord.js puts them on the wire. */
+interface WireBody {
+  content?: string | null;
+  flags?: number;
+  components?: unknown[];
+  allowed_mentions?: { parse?: string[] };
+}
+
+/** What settling a card sends: new text, no buttons, no embeds, no mention parsing. */
+function settledCard(content: string): EditCall {
+  return {
+    content,
+    components: [],
+    flags: MessageFlags.SuppressEmbeds,
+    allowedMentions: { parse: [] },
+  };
+}
 
 function fakeMessage(id: string, edits: MessageEditOptions[]): Message {
   const message = {
@@ -244,43 +269,122 @@ describe("buildSoulConfirmRow", () => {
 });
 
 describe("soulConfirmEdit", () => {
-  it("replaces the text, removes the buttons, and keeps embeds suppressed", () => {
+  it("replaces the text, removes the buttons, and keeps embeds and mentions off", () => {
     const message = { client: { options: {} } } as unknown as Message;
-    const body = MessagePayload.create(message, soulConfirmEdit("Settled.")).resolveBody().body as
-      | (Omit<EditCall, "components"> & { components?: unknown[] })
-      | null
-      | undefined;
-    if (body === null || body === undefined) throw new Error("discord.js built no edit body");
+    const body = MessagePayload.create(message, soulConfirmEdit("Settled.")).resolveBody()
+      .body as WireBody | null;
+    if (body === null) throw new Error("discord.js built no edit body");
     expect(body.content).toBe("Settled.");
     expect(body.flags).toBe(MessageFlags.SuppressEmbeds);
     expect(body.components).toEqual([]);
+    expect(body.allowed_mentions).toEqual({ parse: [] });
   });
 });
 
-describe("renderSoulConfirmation", () => {
-  it("asks the question, shows the change, and says when it takes effect", () => {
-    const card = renderSoulConfirmation(TEXTS, PROPOSAL);
-    expect(card).toBe(
+/** The UTF-8 bytes a card carries as its attachment; throws when it has none. */
+function attachedSoul(card: SoulConfirmCard): { name: string | null; bytes: Buffer } {
+  if (card.attachment === undefined) throw new Error("the card carries no attachment");
+  const file = card.attachment.attachment;
+  if (!Buffer.isBuffer(file)) throw new Error("the attachment is not a buffer");
+  return { name: card.attachment.name, bytes: Buffer.from(file) };
+}
+
+describe("buildSoulConfirmCard", () => {
+  it("asks the question, shows the change, and shows the full new soul verbatim", () => {
+    const card = buildSoulConfirmCard(TEXTS, PROPOSAL);
+    expect(card.attachment).toBeUndefined();
+    expect(card.content).toBe(
       [
         "确实要更新本服务器的助手人设（soul）吗？",
         "",
         "变更摘要：Calm down the tone.",
+        "",
+        "新的人设全文（确认后原样保存）：",
+        "```",
+        "Be calm and precise.",
+        "```",
         "",
         TEXTS.footer,
       ].join("\n"),
     );
   });
 
+  it("shows the soul byte for byte, including markdown and mentions that would otherwise render", () => {
+    const content = "**bold** @everyone <@&123>\n- a list item\n\tindented with a tab\n> quote";
+    const card = buildSoulConfirmCard(TEXTS, { ...PROPOSAL, content });
+
+    expect(card.content).toContain(`\`\`\`\n${content}\n\`\`\``);
+  });
+
+  it("uses a fence the soul itself cannot close when it contains backticks", () => {
+    const content = "Before\n```\ninner block\n```\n````\nlonger\n````\nAfter";
+    const card = buildSoulConfirmCard(TEXTS, { ...PROPOSAL, content });
+
+    expect(card.content).toContain(
+      "\n`````\nBefore\n```\ninner block\n```\n````\nlonger\n````\nAfter\n`````\n",
+    );
+  });
+
+  it("keeps the summary on one line, so it cannot open a block that passes for the full soul", () => {
+    const card = buildSoulConfirmCard(TEXTS, {
+      ...PROPOSAL,
+      summary: "Looks harmless\n```\nfake soul\n```\n新的人设全文（确认后原样保存）：",
+    });
+
+    expect(card.content.split("\n")[2]).toBe(
+      "变更摘要：Looks harmless ``` fake soul ``` 新的人设全文（确认后原样保存）：",
+    );
+    // No block opens inside the summary, and the real full soul is shown once.
+    expect(card.content).not.toContain("\n```\nfake soul\n```\n");
+    expect(card.content.split("\n```\nBe calm and precise.\n```\n")).toHaveLength(2);
+  });
+
   it("still renders when the model gave no summary", () => {
-    const card = renderSoulConfirmation(TEXTS, { ...PROPOSAL, summary: "  " });
-    expect(card).toContain(TEXTS.header);
-    expect(card).not.toContain("变更摘要：");
-    expect(card.endsWith(TEXTS.footer)).toBe(true);
+    const card = buildSoulConfirmCard(TEXTS, { ...PROPOSAL, summary: "  " });
+    expect(card.content).toContain(TEXTS.header);
+    expect(card.content).not.toContain("变更摘要：");
+    expect(card.content.endsWith(TEXTS.footer)).toBe(true);
+  });
+
+  it("attaches the full soul as a UTF-8 file when it does not fit in one message", () => {
+    const content = "保持冷静，结论先行。😀".repeat(200).slice(0, 2_000);
+    const card = buildSoulConfirmCard(TEXTS, { ...PROPOSAL, content });
+
+    expect(card.content.length).toBeLessThanOrEqual(MAX_MESSAGE_LENGTH);
+    expect(card.content).toContain("变更摘要：Calm down the tone.");
+    expect(card.content).toContain(TEXTS.attachmentNote);
+    expect(card.content).not.toContain("保持冷静");
+    // The file carries exactly the bytes that will be stored, encoded as UTF-8.
+    const file = attachedSoul(card);
+    expect(file.name).toBe(SOUL_ATTACHMENT_NAME);
+    expect(file.bytes.equals(Buffer.from(content, "utf8"))).toBe(true);
+    expect(file.bytes.toString("utf8")).toBe(content);
+  });
+
+  it("keeps a soul that just fits in the message inline", () => {
+    // The inline card is header + summary + label + fences + soul + footer; find the
+    // largest soul that still fits and make sure it is not sent as a file.
+    const probe = buildSoulConfirmCard(TEXTS, PROPOSAL);
+    const overhead = probe.content.length - PROPOSAL.content.length;
+    const content = "字".repeat(MAX_MESSAGE_LENGTH - overhead);
+    const card = buildSoulConfirmCard(TEXTS, { ...PROPOSAL, content });
+
+    expect(card.attachment).toBeUndefined();
+    expect(card.content).toHaveLength(MAX_MESSAGE_LENGTH);
+    expect(
+      buildSoulConfirmCard(TEXTS, { ...PROPOSAL, content: `${content}字` }).attachment,
+    ).toBeDefined();
+  });
+
+  it("follows the user's UI language", () => {
+    const card = buildSoulConfirmCard(messages("en").soulConfirm, PROPOSAL);
+    expect(card.content).toContain("Change: Calm down the tone.");
+    expect(card.content).toContain("Full new soul (saved exactly as shown):");
   });
 });
 
 describe("postSoulConfirmation", () => {
-  it("posts the card with suppressed embeds and both buttons, and tracks it by proposal id", async () => {
+  it("posts the card with the full soul, no mention parsing, suppressed embeds, both buttons, and tracks it", async () => {
     vi.useFakeTimers();
     const registry = new SoulConfirmRegistry();
     const { channel, sent } = fakeChannel([]);
@@ -290,6 +394,10 @@ describe("postSoulConfirmation", () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]?.content).toContain(TEXTS.header);
     expect(sent[0]?.content).toContain("变更摘要：Calm down the tone.");
+    expect(sent[0]?.content).toContain("\n```\nBe calm and precise.\n```\n");
+    // A proposed soul may contain `@everyone` or a role mention.
+    expect(sent[0]?.allowedMentions).toEqual({ parse: [] });
+    expect(sent[0]?.files).toBeUndefined();
     expect(sent[0]?.flags).toBe(MessageFlags.SuppressEmbeds);
     expect(sent[0]?.components[0]?.toJSON().components.map((button) => button.custom_id)).toEqual([
       "xbl:soul:yes:p-1",
@@ -301,6 +409,27 @@ describe("postSoulConfirmation", () => {
       proposal: PROPOSAL,
       busy: false,
     });
+  });
+
+  it("sends the full soul as a UTF-8 file when it does not fit in the message", async () => {
+    vi.useFakeTimers();
+    const registry = new SoulConfirmRegistry();
+    const content = "字".repeat(2_000);
+    const { channel, sent } = fakeChannel([]);
+
+    await postSoulConfirmation(channel, OWNER, { ...PROPOSAL, content }, TEXTS, registry);
+
+    expect(sent[0]?.content.length).toBeLessThanOrEqual(MAX_MESSAGE_LENGTH);
+    expect(sent[0]?.content).toContain(TEXTS.attachmentNote);
+    expect(sent[0]?.allowedMentions).toEqual({ parse: [] });
+
+    // What discord.js puts on the wire for the attachment: its name and its bytes.
+    const payload = await MessagePayload.create({ client: { options: {} } } as unknown as Message, {
+      files: sent[0]?.files,
+    }).resolveFiles();
+    expect(payload.files).toHaveLength(1);
+    expect(payload.files?.[0]?.name).toBe(SOUL_ATTACHMENT_NAME);
+    expect(payload.files?.[0]?.data).toEqual(Buffer.from(content, "utf8"));
   });
 
   it("untracks the proposal when the card cannot be posted", async () => {
@@ -324,9 +453,7 @@ describe("postSoulConfirmation", () => {
     expect(cardEdits).toEqual([]);
 
     await vi.advanceTimersByTimeAsync(1);
-    expect(cardEdits.map(asEdit)).toEqual([
-      { content: TEXTS.expired, components: [], flags: MessageFlags.SuppressEmbeds },
-    ]);
+    expect(cardEdits.map(asEdit)).toEqual([settledCard(TEXTS.expired)]);
     expect(registry.get(PROPOSAL.id)).toBeUndefined();
 
     const late = click(soulCustomId("yes", PROPOSAL.id));
@@ -466,9 +593,7 @@ describe("SoulConfirmRegistry", () => {
     });
 
     await vi.advanceTimersByTimeAsync(SOUL_CONFIRM_WINDOW_MS);
-    expect(cardEdits.map(asEdit)).toEqual([
-      { content: TEXTS.expired, components: [], flags: MessageFlags.SuppressEmbeds },
-    ]);
+    expect(cardEdits.map(asEdit)).toEqual([settledCard(TEXTS.expired)]);
   });
 });
 
@@ -489,9 +614,7 @@ describe("handleSoulConfirmInteraction", () => {
     ]);
     expect(yes.deferUpdate).toHaveBeenCalledTimes(1);
     expect(yes.reply).not.toHaveBeenCalled();
-    expect(yes.edits.map(asEdit)).toEqual([
-      { content: TEXTS.applied, components: [], flags: MessageFlags.SuppressEmbeds },
-    ]);
+    expect(yes.edits.map(asEdit)).toEqual([settledCard(TEXTS.applied)]);
     expect(registry.get(PROPOSAL.id)).toBeUndefined();
   });
 
@@ -527,9 +650,7 @@ describe("handleSoulConfirmInteraction", () => {
 
     expect(fetchMock).not.toHaveBeenCalled();
     expect(no.deferUpdate).toHaveBeenCalledTimes(1);
-    expect(no.edits.map(asEdit)).toEqual([
-      { content: TEXTS.cancelled, components: [], flags: MessageFlags.SuppressEmbeds },
-    ]);
+    expect(no.edits.map(asEdit)).toEqual([settledCard(TEXTS.cancelled)]);
     expect(registry.get(PROPOSAL.id)).toBeUndefined();
   });
 
@@ -553,9 +674,7 @@ describe("handleSoulConfirmInteraction", () => {
 
     await handleSoulConfirmInteraction(yes.interaction, env, registry);
 
-    expect(yes.edits.map(asEdit)).toEqual([
-      { content: TEXTS.failed, components: [], flags: MessageFlags.SuppressEmbeds },
-    ]);
+    expect(yes.edits.map(asEdit)).toEqual([settledCard(TEXTS.failed)]);
     expect(registry.get(PROPOSAL.id)).toBeUndefined();
   });
 
@@ -587,9 +706,7 @@ describe("handleSoulConfirmInteraction", () => {
     pending.resolve();
     await run;
     expect(applyCalls(calls)).toHaveLength(1);
-    expect(first.edits.map(asEdit)).toEqual([
-      { content: TEXTS.applied, components: [], flags: MessageFlags.SuppressEmbeds },
-    ]);
+    expect(first.edits.map(asEdit)).toEqual([settledCard(TEXTS.applied)]);
   });
 
   it("refuses anyone but the owner, leaving the card pending", async () => {
@@ -667,8 +784,6 @@ describe("handleSoulConfirmInteraction", () => {
 
     await vi.advanceTimersByTimeAsync(SOUL_CONFIRM_WINDOW_MS + 1);
 
-    expect(yes.edits.map(asEdit)).toEqual([
-      { content: TEXTS.applied, components: [], flags: MessageFlags.SuppressEmbeds },
-    ]);
+    expect(yes.edits.map(asEdit)).toEqual([settledCard(TEXTS.applied)]);
   });
 });

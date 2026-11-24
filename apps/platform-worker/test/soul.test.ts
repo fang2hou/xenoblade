@@ -371,6 +371,46 @@ describe("handleSoulApply", () => {
     expect(await soulRows(db)).toEqual([]);
   });
 
+  it("stores exactly the bytes the tool proposed, character for character", async () => {
+    const db = createTestD1();
+    // The tool normalizes once, when the proposal is created: surrounding
+    // whitespace goes, and the text is cut to the cap in code points.
+    const proposed = await updateSoul("g1", {
+      content: "\n  😀 Be calm. 结论先行.\n\nKeep @everyone out of it.  ",
+      summary: "Calmer.",
+    });
+    const clamped = await updateSoul("g1", {
+      content: "字".repeat(MAX_SOUL_CHARS + 25),
+      summary: "Shorter.",
+    });
+    if (proposed.status !== "proposed" || clamped.status !== "proposed") {
+      throw new Error("expected both calls to propose");
+    }
+    expect(Array.from(clamped.proposal.content)).toHaveLength(MAX_SOUL_CHARS);
+
+    // The card shows each `content` as it comes back here; apply stores the same.
+    for (const { proposal: shown } of [proposed, clamped]) {
+      expect(await handleSoulApply(db, { proposal: shown, updatedBy: "u9" })).toEqual({
+        status: "ok",
+        scopeId: "g1",
+      });
+      const row = await db
+        .prepare("SELECT content FROM bot_soul WHERE scope_id = 'g1'")
+        .first<{ content: string }>();
+      expect(row?.content).toBe(shown.content);
+    }
+  });
+
+  it("refuses content that is not the normalized text the card showed, rather than storing another form", async () => {
+    const db = createTestD1();
+    for (const content of [" padded ", "line\n\n", "字".repeat(MAX_SOUL_CHARS + 1)]) {
+      expect(
+        await handleSoulApply(db, { proposal: { ...proposal, content }, updatedBy: "u9" }),
+      ).toEqual({ status: "error", code: "invalid_content" });
+    }
+    expect(await soulRows(db)).toEqual([]);
+  });
+
   it("reports a failed write instead of throwing", async () => {
     expect(await handleSoulApply(failingDb(), confirmed)).toEqual({
       status: "error",

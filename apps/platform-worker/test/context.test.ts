@@ -125,6 +125,26 @@ describe("context limits", () => {
     // would exceed 24,000, so m1 and the older m0 go.
     expect(ids(many(4, "y".repeat(10_000)))).toEqual(["m2", "m3"]);
   });
+
+  it("stops at the token budget for Chinese text that fits the character budget", () => {
+    // Three messages of 5,000 Chinese characters: 15,000 chars fit the 24,000-char
+    // budget, but each character is about a token, and 15,000 do not fit 12,000.
+    expect(ids(many(3, "字".repeat(5_000)))).toEqual(["m1", "m2"]);
+  });
+
+  it("estimates mixed text per script: one token per CJK character, four Latin chars per token", () => {
+    // Each message is 5,000 Chinese characters (5,000 tokens) plus 3,000 Latin ones
+    // (750): 5,750 tokens in 8,000 chars. All three fit the 24,000-char budget and
+    // two fit the 12,000-token budget. Counting every char as a quarter token would
+    // keep all three; counting every char as a whole token would keep only m2.
+    expect(ids(many(3, "字".repeat(5_000) + "x".repeat(3_000)))).toEqual(["m1", "m2"]);
+  });
+
+  it("does not overcount Latin text: two full-budget messages still fit the token budget", () => {
+    // Two messages of 12,000 Latin chars fill the 24,000-char budget at 3,000 tokens
+    // each; at one token per character the second would already bust the budget.
+    expect(ids(many(2, "x".repeat(12_000)))).toEqual(["m0", "m1"]);
+  });
 });
 
 describe("DM container keying (ADR-011 §3)", () => {

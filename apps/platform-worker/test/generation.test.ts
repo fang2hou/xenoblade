@@ -13,7 +13,7 @@ import type {
 import type * as Tools from "../src/tools";
 
 import { generate } from "../src/generation";
-import { DEFAULT_SOUL, formatSoulSegment, setBotSoul } from "../src/soul";
+import { DEFAULT_SOUL, formatSoulSegment, handleSoulApply, setBotSoul } from "../src/soul";
 import { createTestD1 } from "./helpers/d1";
 
 vi.mock("ai", async (importOriginal) => {
@@ -341,7 +341,7 @@ describe("generate history", () => {
       { role: "user", content: "[Bob]: Anyone tried the new API?" },
       { role: "assistant", content: "Yes, it works." },
       { role: "user", content: "[Cara]: It broke for me." },
-      { role: "user", content: "[User]: what did everyone say?" },
+      { role: "user", content: "[User (triggering user)]: what did everyone say?" },
     ]);
   });
 
@@ -361,7 +361,7 @@ describe("generate history", () => {
     );
 
     expect(sentMessages()).toEqual([
-      { role: "user", content: "[Alice]: Anyone tried the new API?" },
+      { role: "user", content: "[Alice (triggering user)]: Anyone tried the new API?" },
       { role: "user", content: "hello" },
     ]);
   });
@@ -381,7 +381,9 @@ describe("generate history", () => {
     const messages = sentMessages();
     const requestMessage = messages.at(-1);
     expect(requestMessage?.role).toBe("user");
-    expect(requestMessage?.content).toContain("[User]: hello\n\n[Recently cited sources");
+    expect(requestMessage?.content).toContain(
+      "[User (triggering user)]: hello\n\n[Recently cited sources",
+    );
     expect(requestMessage?.content).toContain("[1] Docs — https://example.com/docs");
     const wholePrompt = JSON.stringify(messages);
     for (const text of ["Anyone tried the new API?", "Yes, it works.", "It broke for me."]) {
@@ -481,6 +483,16 @@ describe("generate tool loop", () => {
       },
     });
     expect(await storedSouls(env.DB)).toBe(0);
+
+    // What the card shows is what gets stored: the proposal, forwarded as-is.
+    if (result.status !== "completed" || result.soulProposal === undefined) {
+      throw new Error("expected a completed result with a soul proposal");
+    }
+    expect(
+      await handleSoulApply(env.DB, { proposal: result.soulProposal, updatedBy: "u1" }),
+    ).toEqual({ status: "ok", scopeId: "g1" });
+    const row = await env.DB.prepare("SELECT content FROM bot_soul").first<{ content: string }>();
+    expect(row?.content).toBe(result.soulProposal.content);
   });
 
   it("brings back no soul proposal from a DM, where the tool refuses", async () => {
