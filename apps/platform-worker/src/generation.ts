@@ -74,7 +74,11 @@ function sleep(ms: number): Promise<void> {
   return promise;
 }
 
-export async function generate(env: Env, req: GenerationRequest): Promise<GenerationResult> {
+export async function generate(
+  env: Env,
+  req: GenerationRequest,
+  ctx?: ExecutionContext,
+): Promise<GenerationResult> {
   const now = Date.now();
   const requestId = crypto.randomUUID();
 
@@ -102,11 +106,11 @@ export async function generate(env: Env, req: GenerationRequest): Promise<Genera
     };
   }
 
-  if (!isRegenerate) return runGenerationPipeline(env, req, requestId, now);
+  if (!isRegenerate) return runGenerationPipeline(env, req, requestId, now, ctx);
   // Release the lease whatever the outcome — the next deliberate re-run
   // must not wait out the TTL. A failed release self-heals at expiry.
   try {
-    return await runGenerationPipeline(env, req, requestId, now);
+    return await runGenerationPipeline(env, req, requestId, now, ctx);
   } finally {
     const originalMessageId = req.regenerateOf;
     if (originalMessageId !== undefined) {
@@ -130,6 +134,7 @@ async function runGenerationPipeline(
   req: GenerationRequest,
   requestId: string,
   now: number,
+  ctx: ExecutionContext | undefined,
 ): Promise<GenerationResult> {
   // Runtime gate
   const runtime = await getRuntimeConfig(env.DB, req.scopeId, req.channelId);
@@ -185,7 +190,8 @@ async function runGenerationPipeline(
 
   // Tools — ALL models get ALL tools (MCP + first-party + vision)
   const firstPartyTools = createFirstPartyTools(env);
-  const mcpResult = await connectMcpServers(env);
+  // The route tests pass a bare object as the context, so waitUntil is not assumed here.
+  const mcpResult = await connectMcpServers(env, { waitUntil: ctx?.waitUntil?.bind(ctx) });
   const allTools = { ...firstPartyTools, ...mcpResult.tools };
 
   // Messages — primary gets images natively, fallback uses text refs + vision tool

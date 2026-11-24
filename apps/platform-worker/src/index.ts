@@ -43,7 +43,7 @@ async function readJson<T>(request: Request): Promise<T | null> {
 }
 
 export default {
-  async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const path = new URL(request.url).pathname;
 
     // Everything outside /internal/v1/* is opaque to the public internet.
@@ -77,7 +77,7 @@ export default {
           400,
         );
       }
-      return json(await generate(env, req));
+      return json(await generate(env, req, ctx));
     }
 
     // POST /internal/v1/context/clear
