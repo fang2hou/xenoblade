@@ -61,6 +61,17 @@ describe("renderReply", () => {
     );
   });
 
+  it("keeps a balanced closing parenthesis that belongs to the URL", () => {
+    const url = "https://en.wikipedia.org/wiki/Xenoblade_Chronicles_(series)";
+    expect(renderReply(`See ${url}.`)).toBe(`See [${url}](<${url}>).`);
+  });
+
+  it("still strips an unbalanced closing parenthesis after a bare URL", () => {
+    expect(renderReply("(see https://example.com/a)")).toBe(
+      "(see [https://example.com/a](<https://example.com/a>))",
+    );
+  });
+
   it("wraps a model-written masked link target in angle brackets", () => {
     expect(renderReply("See [来源](https://a/x?y=1).")).toBe("See [来源](<https://a/x?y=1>).");
     expect(renderReply("[Foo](https://en.wikipedia.org/wiki/Foo_(bar))")).toBe(
@@ -82,6 +93,23 @@ describe("renderReply", () => {
     expect(renderReply(fenced)).toBe(fenced);
     expect(renderReply("run `npm view https://example.com [a](https://a.com)` now")).toBe(
       "run `npm view https://example.com [a](https://a.com)` now",
+    );
+  });
+
+  it("leaves links inside tilde and longer backtick fences verbatim, terminated or not", () => {
+    const blocks = [
+      "~~~sh\ncurl https://example.com/api\n[a](https://a.com)\n~~~",
+      "````md\n```ts\nopen https://example.com\n```\n````",
+      "```ts\nopen https://example.com",
+    ];
+    for (const block of blocks) {
+      expect(renderReply(block)).toBe(block);
+    }
+  });
+
+  it("still masks the links in the prose around such fences", () => {
+    expect(renderReply("see https://a.com\n~~~\nkeep https://b.com\n~~~\nand https://c.com")).toBe(
+      "see [https://a.com](<https://a.com>)\n~~~\nkeep https://b.com\n~~~\nand [https://c.com](<https://c.com>)",
     );
   });
 });

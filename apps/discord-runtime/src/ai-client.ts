@@ -20,7 +20,8 @@ import type {
  * Timeout for Worker generation calls. The Worker tries each model of the
  * chain in turn, each bounded by its own attempt timeout, while the staged
  * status keeps escalating up to 90s — the client must outlast the whole
- * chain, not a single attempt.
+ * chain, not a single attempt. The Worker caps that chain at 135s, so its
+ * structured answer arrives before this fires.
  */
 export const GENERATION_TIMEOUT_MS = 150_000;
 /** Timeout for short Worker control-plane calls. */

@@ -122,6 +122,59 @@ describe("sliceIntoChunks code fences", () => {
     ]);
   });
 
+  it("treats a fence line indented four or more spaces as code, not as the block's close", () => {
+    const text = ["```", "code", "    ```", "still code", "```", "after"].join("\n");
+
+    expect(sliceIntoChunks(text, 24)).toEqual([
+      "```\ncode\n    ```\n```",
+      "```\nstill code\n```\nafter",
+    ]);
+  });
+
+  it("keeps an exact-width code fence within 2000 characters", () => {
+    // 1990 code characters make the block exactly 2000; one more forces a split.
+    expect(sliceIntoChunks(codeBlock(1990), 2000)).toEqual([codeBlock(1990)]);
+    expect(sliceIntoChunks(codeBlock(1991), 2000)).toEqual([
+      "```ts\n" + "x".repeat(1984) + "\n```",
+      "```ts\n" + "x".repeat(7) + "\n```",
+    ]);
+
+    for (const text of [
+      `Intro.\n${codeBlock(1990)}\nOutro.`,
+      ...[1985, 1995, 2000, 3978, 3979, 3980, 5000].map(codeBlock),
+    ]) {
+      for (const chunk of sliceIntoChunks(text, 2000)) {
+        expect(chunk.length).toBeLessThanOrEqual(2000);
+      }
+    }
+  });
+
+  it("never cuts inside an angle-bracketed link whose URL holds parentheses", () => {
+    const link = "[wiki](<https://en.wikipedia.org/wiki/Xenoblade_Chronicles_(series)>)";
+    const text = "p".repeat(1932) + " " + link + " tail";
+
+    // The 2000 mark falls just past the URL's inner ")" — the link still moves whole.
+    expect(sliceIntoChunks(text, 2000)).toEqual(["p".repeat(1932) + " ", `${link} tail`]);
+  });
+
+  it("chunks a block as plain text when its fence is too long to carry", () => {
+    // Reopening this fence needs 2001 characters: no content could ever share a chunk with it.
+    const opener = "```" + "a".repeat(1993);
+    const chunks = sliceIntoChunks(`${opener}\nconst x = 1;\nconst y = 2;`, 2000);
+
+    expect(chunks).toEqual([opener, "const x = 1;\nconst y = 2;"]);
+    for (const chunk of chunks) expect(chunk.length).toBeLessThanOrEqual(2000);
+  });
+
+  it("chunks a block as plain text when its closing line is too long to carry", () => {
+    // Wrapping a 17-character closer inside a 16-character budget would cut it
+    // into pieces that each read as a fence of their own.
+    const closer = "```" + " ".repeat(14);
+    const chunks = sliceIntoChunks(`\`\`\`\ncode\n${closer}\nafter`, 24);
+
+    expect(chunks).toEqual(["```\ncode", `${closer}\nafter`]);
+  });
+
   it("keeps every chunk within the limit and fence-balanced on mixed content", () => {
     const max = 80;
     const text = [
@@ -158,6 +211,11 @@ describe("sliceIntoChunks code fences", () => {
 });
 
 const FENCE_LINE = /^ {0,3}(([`~])\2{2,})(.*)$/;
+
+/** A ts-fenced block holding `codeLength` code characters. */
+function codeBlock(codeLength: number): string {
+  return "```ts\n" + "x".repeat(codeLength) + "\n```";
+}
 
 describe("sliceIntoChunks blank lines", () => {
   it("never emits a chunk made of blank lines alone", () => {

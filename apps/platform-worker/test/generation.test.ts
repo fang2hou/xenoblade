@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { generateText } from "ai";
 import type * as Ai from "ai";
 import { GENERATION_LIMITS, type ModelConfig } from "@xenoblade/ai";
-import type { GenerationRequest } from "@xenoblade/contracts";
+import type { GenerationRequest, GenerationResult } from "@xenoblade/contracts";
 import type * as Tools from "../src/tools";
 
 import { generate } from "../src/generation";
@@ -160,5 +160,75 @@ describe("generate channel allowlist", () => {
 
     expect(result).toMatchObject({ status: "rejected", code: "disabled" });
     expect(generateText).not.toHaveBeenCalled();
+  });
+});
+
+/** Drive the pipeline through every hang and pause it waits on (fake timers), then read its answer. */
+async function settleRun(run: Promise<GenerationResult>): Promise<GenerationResult> {
+  await vi.advanceTimersByTimeAsync(200_000);
+  return run;
+}
+
+/** Wait `ms` of faked time, as an attempt stuck until its timeout does. */
+function hang(ms: number): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setTimeout(resolve, ms);
+  return promise;
+}
+
+/** The interaction row a single-run test leaves behind. */
+async function recordedRun(db: D1Database): Promise<{ status: string; total_duration_ms: number }> {
+  const { results } = await db
+    .prepare("SELECT status, total_duration_ms FROM interactions")
+    .all<{ status: string; total_duration_ms: number }>();
+  return results[0] ?? { status: "missing", total_duration_ms: -1 };
+}
+
+describe("generate chain deadline", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("gives every attempt only the time the chain has left, and still answers in time", async () => {
+    const env = makeEnv([{ id: "test/a" }, { id: "test/b" }, { id: "test/c" }]);
+    const timeouts: number[] = [];
+    // Each attempt hangs for its whole timeout, as a stuck model would.
+    vi.mocked(generateText).mockImplementation(async ({ timeout }) => {
+      const ms = typeof timeout === "number" ? timeout : 0;
+      timeouts.push(ms);
+      await hang(ms);
+      throw new Error("timed out");
+    });
+
+    const result = await settleRun(generate(env, request()));
+
+    // 135s budget: 60s + 3s pause + 60s + 3s pause leaves 9s for the last model.
+    expect(timeouts).toEqual([60_000, 60_000, 9_000]);
+    expect(result.status).toBe("error");
+    // The Worker answers at its deadline, 15s before the Runtime would give up.
+    expect(await recordedRun(env.DB)).toEqual({ status: "failed", total_duration_ms: 135_000 });
+  });
+
+  it("gives up instead of starting an attempt the chain has no time for", async () => {
+    const env = makeEnv([{ id: "test/a" }, { id: "test/b" }]);
+    // The first attempt outlives its own timeout.
+    vi.mocked(generateText).mockImplementationOnce(async () => {
+      await hang(131_000);
+      throw new Error("hung");
+    });
+
+    const result = await settleRun(generate(env, request()));
+
+    expect(generateText).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      status: "error",
+      code: "GenerationDeadlineError",
+      retryable: true,
+    });
+    expect(await recordedRun(env.DB)).toEqual({ status: "timeout", total_duration_ms: 134_000 });
   });
 });

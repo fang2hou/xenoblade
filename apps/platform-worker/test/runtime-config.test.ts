@@ -21,6 +21,25 @@ describe("getRuntimeConfig channel allowlist", () => {
     });
   });
 
+  it("allows no channel under an empty allowlist, thread or not", async () => {
+    const db = await guildAllowing([]);
+    expect(await getRuntimeConfig(db, "g1", "c1")).toMatchObject({ channelAllowed: false });
+    expect(await getRuntimeConfig(db, "g1", "thread", "parent")).toMatchObject({
+      channelAllowed: false,
+    });
+  });
+
+  it("allows every channel under a NULL allowlist", async () => {
+    // The column is NOT NULL today; a row written under the legacy schema may still hold NULL.
+    const db = {
+      prepare: () => ({
+        bind: () => ({ first: async () => ({ enabled: 1, allow_channels_json: null }) }),
+      }),
+    } as unknown as D1Database;
+
+    expect(await getRuntimeConfig(db, "g1", "c1")).toEqual({ enabled: true, channelAllowed: true });
+  });
+
   it("allows a listed channel and rejects an unlisted one", async () => {
     const db = await guildAllowing(["c1"]);
     expect(await getRuntimeConfig(db, "g1", "c1")).toMatchObject({ channelAllowed: true });

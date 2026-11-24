@@ -7,6 +7,8 @@
  * code behind angle brackets; the send path adds the flag (see `replyPayload`).
  */
 
+import { splitCodeSegments } from "./code-fences";
+
 /**
  * A model-rendered sources footer: a trailing "Sources:" / "来源:" line (bold
  * or plain) followed only by short citation-entry lines. Lines are capped at
@@ -40,12 +42,19 @@ const TRAILING_PUNCTUATION = ".,;:!?)】」』";
  * links (`url` → `[url](<url>)`) and a model-written `[label](url)` becomes
  * `[label](<url>)`. Discord renders a preview card for both forms as-is; the
  * angle brackets are what stop it. Links already using `<...>` are left
- * alone, and code spans / fenced blocks are skipped so their contents stay
- * verbatim.
+ * alone, and code — fenced blocks of any kind, inline spans — is skipped so
+ * its contents stay verbatim.
  */
 export function maskBareUrls(text: string): string {
-  return text
-    .split(/(```[\s\S]*?```|`[^`\n]*`)/g)
+  return splitCodeSegments(text)
+    .map((segment) => (segment.code ? segment.text : maskProse(segment.text)))
+    .join("");
+}
+
+/** Mask the links of a prose run, leaving its inline code spans verbatim. */
+function maskProse(prose: string): string {
+  return prose
+    .split(/(`[^`\n]*`)/g)
     .map((segment, i) => (i % 2 === 1 ? segment : segment.replace(LINK_OR_URL_RE, maskLinkOrUrl)))
     .join("");
 }
@@ -61,9 +70,16 @@ function maskLinkOrUrl(
   return angle === "<" ? match : `[${label}](<${url}>)`;
 }
 
+/**
+ * Mask a bare URL. Sentence punctuation that trails it stays outside the
+ * link, except a `)` that closes an earlier `(` of the URL itself
+ * (Wikipedia-style `...(series)`), which stays part of it.
+ */
 function maskUrl(url: string): string {
   let end = url.length;
   while (end > 0 && TRAILING_PUNCTUATION.includes(url[end - 1] ?? "")) {
+    const head = url.slice(0, end);
+    if (url[end - 1] === ")" && head.split("(").length >= head.split(")").length) break;
     end -= 1;
   }
   const core = url.slice(0, end);

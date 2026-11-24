@@ -1,5 +1,7 @@
 import { MessageFlags, type Message, type SendableChannels } from "discord.js";
 
+import { isClosingFence, parseOpeningFence, type CodeFence } from "./code-fences";
+
 /** Discord's per-message character limit. */
 export const MAX_MESSAGE_LENGTH = 2000;
 
@@ -60,7 +62,10 @@ export async function postReply(target: SendableChannels, content: string): Prom
  *
  * A chunk boundary that falls inside a fenced code block closes the block at
  * the end of the chunk and reopens it — language tag included — at the start
- * of the next one, so every chunk renders as well-formed Markdown.
+ * of the next one, so every chunk renders as well-formed Markdown. A fence
+ * that cannot fit around content — a huge info string, a closing line too
+ * long for a chunk — is not carried: its block is chunked as plain text
+ * instead. Either way no chunk exceeds `max`.
  */
 export function sliceIntoChunks(text: string, max: number): string[] {
   if (text.length <= max) return [text];
@@ -90,10 +95,10 @@ export function sliceIntoChunks(text: string, max: number): string[] {
 }
 
 /**
- * A fenced code block left open where text is cut, holding the two strings
- * that carry it across a chunk boundary.
+ * A fenced code block left open where text is cut: the block as CommonMark
+ * sees it, plus the two strings that carry it across a chunk boundary.
  */
-interface Fence {
+interface Fence extends CodeFence {
   /** What a chunk starting inside the block begins with: the opening line plus a newline, e.g. "```ts\n". */
   reopen: string;
   /** What a chunk ending inside the block is closed with: a newline plus the bare fence characters, e.g. "\n```". */
@@ -113,21 +118,21 @@ interface Unit {
   end: Fence | null;
 }
 
-const OPENING_FENCE_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
-
-/** The fenced block this line opens, or null when it is ordinary text. */
-function parseOpeningFence(line: string): Fence | null {
-  const match = OPENING_FENCE_RE.exec(line);
-  if (match === null) return null;
-  const marker = match[1] ?? "";
-  return { reopen: `${marker}${(match[2] ?? "").trim()}\n`, close: `\n${marker}` };
-}
-
-/** Does this line close `fence`? Same character, at least as long, nothing else. */
-function isClosingFence(line: string, fence: Fence): boolean {
-  const body = line.trim();
-  const marker = fence.close.slice(1);
-  return body.length >= marker.length && body === marker[0]?.repeat(body.length);
+/**
+ * The fenced block this line opens, when the chunker can carry it across
+ * boundaries. A fence is carried only if its opening line fits whole in a
+ * chunk beside the room a piece needs for its own reopen and close; anything
+ * tighter would force a cut through the fence itself. A block that is not
+ * carried is chunked as plain text, which always fits. (`splitUnits` releases
+ * a block whose closing line cannot fit for the same reason.)
+ */
+function carriedFence(line: string, max: number): Fence | null {
+  const opened = parseOpeningFence(line);
+  if (opened === null) return null;
+  const reopen = `${opened.marker}${opened.info}\n`;
+  const close = `\n${opened.marker}`;
+  const roomForContent = max - reopen.length - close.length;
+  return line.length <= roomForContent ? { ...opened, reopen, close } : null;
 }
 
 /**
@@ -138,13 +143,13 @@ function isClosingFence(line: string, fence: Fence): boolean {
  */
 function splitUnits(text: string, max: number): Unit[] {
   const lines = text.split("\n");
-  const units: Unit[] = [];
+  let units: Unit[] = [];
   let open: Fence | null = null;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? "";
     const start = open;
-    const fence: Fence | null = open === null ? parseOpeningFence(line) : null;
+    const fence: Fence | null = open === null ? carriedFence(line, max) : null;
     if (fence !== null) {
       const first = lines[i + 1];
       if (first !== undefined && !isClosingFence(first, fence)) {
@@ -160,12 +165,35 @@ function splitUnits(text: string, max: number): Unit[] {
     units.push({ text: line, sep: "\n", start, end: open });
   }
 
+  // A block whose closing line cannot fit whole in a chunk is not carried
+  // either: hard-wrapping that line would scatter pieces that each read as a
+  // fence of their own.
+  const uncarried = new Set<Fence>();
+  for (const unit of units) {
+    const { start } = unit;
+    if (
+      start !== null &&
+      unit.end === null &&
+      unit.text.length > max - start.reopen.length - start.close.length
+    ) {
+      uncarried.add(start);
+    }
+  }
+  if (uncarried.size > 0) {
+    units = units.map((unit) => ({
+      ...unit,
+      start: unit.start !== null && uncarried.has(unit.start) ? null : unit.start,
+      end: unit.end !== null && uncarried.has(unit.end) ? null : unit.end,
+    }));
+  }
+
   const sized: Unit[] = [];
   for (const unit of units) {
     // The fence spanning the line's interior: every piece after the first reopens inside it.
     const inner = unit.end ?? unit.start;
-    const overhead = inner === null ? 0 : inner.reopen.length + inner.close.length;
-    const budget = Math.max(1, max - overhead);
+    // A piece inside a fence must leave room for its own reopen and close. A
+    // carried fence always leaves some (see carriedFence), so the budget stays positive.
+    const budget = inner === null ? max : max - inner.reopen.length - inner.close.length;
     if (unit.text.length <= budget) {
       sized.push(unit);
       continue;
@@ -185,11 +213,18 @@ function splitUnits(text: string, max: number): Unit[] {
   return sized;
 }
 
+/**
+ * A masked link as one atomic span. An angle-bracketed target may hold
+ * anything but line breaks and angle brackets — Wikipedia URLs with
+ * parentheses, for instance; a bare one may hold balanced parentheses.
+ */
+const MASKED_LINK_RE = /\[[^\]\n]*\]\((?:<[^<>\n]*>|[^\s()]*(?:\([^\s()]*\)[^\s()]*)*)\)/g;
+
 /** Offsets of one hard-wrapped long line: [start, end) pairs of ≤ max chars. */
 function hardWrapOffsets(paragraph: string, max: number): Array<{ start: number; end: number }> {
-  // Spans of masked links — a cut inside `[label](<url>)` breaks the link.
+  // Spans of masked links — a cut inside one breaks it.
   const spans: Array<[number, number]> = [];
-  for (const match of paragraph.matchAll(/\[[^\]\n]*\]\([^)\s]*\)/g)) {
+  for (const match of paragraph.matchAll(MASKED_LINK_RE)) {
     const start = match.index;
     if (start === undefined) continue;
     spans.push([start, start + match[0].length]);
