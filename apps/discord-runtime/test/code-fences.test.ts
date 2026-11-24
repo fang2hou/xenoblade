@@ -12,6 +12,17 @@ describe("parseOpeningFence", () => {
     expect(parseOpeningFence("````md")).toEqual(FOUR_BACKTICKS);
   });
 
+  it("opens on a CRLF line as on an LF line", () => {
+    expect(parseOpeningFence("```ts\r")).toEqual({ marker: "```", info: "ts" });
+    expect(parseOpeningFence("~~~sh\r")).toEqual({ marker: "~~~", info: "sh" });
+  });
+
+  it("opens no backtick fence whose info string holds a backtick", () => {
+    expect(parseOpeningFence("```foo`bar")).toBeNull();
+    // A tilde fence's info string may hold anything.
+    expect(parseOpeningFence("~~~foo`bar")).toEqual({ marker: "~~~", info: "foo`bar" });
+  });
+
   it("opens only with at most three leading spaces", () => {
     expect(parseOpeningFence("   ```ts")).not.toBeNull();
     expect(parseOpeningFence("    ```ts")).toBeNull();
@@ -38,6 +49,12 @@ describe("isClosingFence", () => {
     expect(isClosingFence("   ```", BACKTICKS)).toBe(true);
     expect(isClosingFence("    ```", BACKTICKS)).toBe(false);
   });
+
+  it("closes on a CRLF line as on an LF line", () => {
+    expect(isClosingFence("```\r", BACKTICKS)).toBe(true);
+    expect(isClosingFence("```   \r", BACKTICKS)).toBe(true);
+    expect(isClosingFence("~~~\r", BACKTICKS)).toBe(false);
+  });
 });
 
 describe("splitCodeSegments", () => {
@@ -46,6 +63,20 @@ describe("splitCodeSegments", () => {
       { text: "before\n", code: false },
       { text: "```ts\nlet x;\n```\n", code: true },
       { text: "after", code: false },
+    ]);
+  });
+
+  it("reads a CRLF text the same way, keeping its line endings", () => {
+    expect(splitCodeSegments("before\r\n```ts\r\nlet x;\r\n```\r\nafter")).toEqual([
+      { text: "before\r\n", code: false },
+      { text: "```ts\r\nlet x;\r\n```\r\n", code: true },
+      { text: "after", code: false },
+    ]);
+  });
+
+  it("leaves an inline triple-backtick span holding a backtick as prose", () => {
+    expect(splitCodeSegments("```foo`bar\nsee https://a.com")).toEqual([
+      { text: "```foo`bar\nsee https://a.com", code: false },
     ]);
   });
 

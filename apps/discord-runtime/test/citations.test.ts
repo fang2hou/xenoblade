@@ -112,4 +112,18 @@ describe("renderReply", () => {
       "see [https://a.com](<https://a.com>)\n~~~\nkeep https://b.com\n~~~\nand [https://c.com](<https://c.com>)",
     );
   });
+
+  it("reads CRLF fences as code and still masks the prose around them", () => {
+    expect(
+      renderReply("see https://a.com\r\n```\r\ncurl https://b.com\r\n```\r\nand https://c.com"),
+    ).toBe(
+      "see [https://a.com](<https://a.com>)\r\n```\r\ncurl https://b.com\r\n```\r\nand [https://c.com](<https://c.com>)",
+    );
+  });
+
+  it("does not read a backtick fence with a backtick in its info string as code", () => {
+    expect(renderReply("```foo`bar\nsee https://a.com")).toBe(
+      "```foo`bar\nsee [https://a.com](<https://a.com>)",
+    );
+  });
 });

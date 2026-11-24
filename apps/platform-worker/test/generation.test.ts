@@ -196,21 +196,42 @@ describe("generate chain deadline", () => {
   it("gives every attempt only the time the chain has left, and still answers in time", async () => {
     const env = makeEnv([{ id: "test/a" }, { id: "test/b" }, { id: "test/c" }]);
     const timeouts: number[] = [];
-    // Each attempt hangs for its whole timeout, as a stuck model would.
+    // Each attempt hangs for its whole timeout and then times out, as the SDK does.
     vi.mocked(generateText).mockImplementation(async ({ timeout }) => {
       const ms = typeof timeout === "number" ? timeout : 0;
       timeouts.push(ms);
       await hang(ms);
-      throw new Error("timed out");
+      throw new DOMException(`timeout of ${ms}ms exceeded`, "TimeoutError");
     });
 
     const result = await settleRun(generate(env, request()));
 
     // 135s budget: 60s + 3s pause + 60s + 3s pause leaves 9s for the last model.
     expect(timeouts).toEqual([60_000, 60_000, 9_000]);
-    expect(result.status).toBe("error");
+    expect(result).toMatchObject({ status: "error", code: "TimeoutError", retryable: true });
     // The Worker answers at its deadline, 15s before the Runtime would give up.
-    expect(await recordedRun(env.DB)).toEqual({ status: "failed", total_duration_ms: 135_000 });
+    expect(await recordedRun(env.DB)).toEqual({ status: "timeout", total_duration_ms: 135_000 });
+  });
+
+  it("cuts off an attempt that outlives the chain's deadline", async () => {
+    const env = makeEnv([{ id: "test/a" }, { id: "test/b" }]);
+    // A tool that ignores its abort signal keeps the first attempt hanging
+    // far beyond both its own timeout and the chain's deadline.
+    vi.mocked(generateText).mockImplementationOnce(async () => {
+      await hang(300_000);
+      throw new Error("never reached");
+    });
+
+    const result = await settleRun(generate(env, request()));
+
+    // Cut at the deadline with no pause or second attempt, and still a structured answer.
+    expect(generateText).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      status: "error",
+      code: "GenerationDeadlineError",
+      retryable: true,
+    });
+    expect(await recordedRun(env.DB)).toEqual({ status: "timeout", total_duration_ms: 135_000 });
   });
 
   it("gives up instead of starting an attempt the chain has no time for", async () => {

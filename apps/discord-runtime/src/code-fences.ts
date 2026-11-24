@@ -3,7 +3,7 @@
  * or tildes at the start of a line, indented by at most three spaces; the
  * block ends at a line of the same character, at least as long, holding
  * nothing else. A line indented four or more spaces is code content, never a
- * fence.
+ * fence. Lines are matched with CRLF endings the same as LF.
  */
 
 /** A fenced code block as its opening line declares it. */
@@ -26,14 +26,21 @@ const CLOSING_FENCE_RE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
 
 /** The fenced block this line opens, or null when it is not an opening fence. */
 export function parseOpeningFence(line: string): CodeFence | null {
-  const match = OPENING_FENCE_RE.exec(line);
+  const text = line.endsWith("\r") ? line.slice(0, -1) : line;
+  const match = OPENING_FENCE_RE.exec(text);
   if (match === null) return null;
-  return { marker: match[1] ?? "", info: (match[2] ?? "").trim() };
+  const marker = match[1] ?? "";
+  const info = (match[2] ?? "").trim();
+  // CommonMark: a backtick fence's info string may not contain a backtick.
+  // Such a line is inline code, not the start of a block.
+  if (marker.startsWith("`") && info.includes("`")) return null;
+  return { marker, info };
 }
 
 /** Does this line close `fence`? */
 export function isClosingFence(line: string, fence: CodeFence): boolean {
-  const match = CLOSING_FENCE_RE.exec(line);
+  const text = line.endsWith("\r") ? line.slice(0, -1) : line;
+  const match = CLOSING_FENCE_RE.exec(text);
   if (match === null) return false;
   const marker = match[1] ?? "";
   return marker[0] === fence.marker[0] && marker.length >= fence.marker.length;

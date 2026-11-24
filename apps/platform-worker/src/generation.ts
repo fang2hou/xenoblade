@@ -96,6 +96,33 @@ class GenerationDeadlineError extends Error {
   }
 }
 
+/**
+ * Settle with `attempt`, or reject with {@link GenerationDeadlineError} once
+ * `ms` has passed — whatever the attempt is still waiting on. An attempt's
+ * own timeout does not bound a tool that ignores its abort signal.
+ */
+async function withDeadline<T>(attempt: Promise<T>, ms: number): Promise<T> {
+  const { promise, reject } = Promise.withResolvers<T>();
+  const timer = setTimeout(() => reject(new GenerationDeadlineError()), ms);
+  try {
+    return await Promise.race([attempt, promise]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Did the run stop because it ran out of time — the chain's deadline, or the
+ * attempt's own timeout (the SDK aborts with an error named `TimeoutError`)?
+ */
+function isTimeout(error: unknown): boolean {
+  if (error instanceof GenerationDeadlineError) return true;
+  return (
+    (error instanceof Error || error instanceof DOMException) &&
+    (error.name === "TimeoutError" || error.name === "AbortError")
+  );
+}
+
 function sleep(ms: number): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>();
   setTimeout(resolve, ms);
@@ -256,18 +283,21 @@ async function runGenerationPipeline(
       try {
         const model = createModel(env, config, sessionId);
 
-        result = await generateText({
-          model,
-          system,
-          messages: isPrimary ? messagesWithImages : messagesTextOnly,
-          tools: allTools,
-          stopWhen: isStepCount(5),
-          maxRetries: 1,
-          timeout: Math.min(GENERATION_LIMITS.timeout.totalMs, remainingMs),
-          maxOutputTokens: config.maxOutputTokens ?? GENERATION_LIMITS.maxOutputTokens,
-          // Omitted, not defaulted: reasoning models reject any temperature but their own.
-          ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
-        });
+        result = await withDeadline(
+          generateText({
+            model,
+            system,
+            messages: isPrimary ? messagesWithImages : messagesTextOnly,
+            tools: allTools,
+            stopWhen: isStepCount(5),
+            maxRetries: 1,
+            timeout: Math.min(GENERATION_LIMITS.timeout.totalMs, remainingMs),
+            maxOutputTokens: config.maxOutputTokens ?? GENERATION_LIMITS.maxOutputTokens,
+            // Omitted, not defaulted: reasoning models reject any temperature but their own.
+            ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
+          }),
+          remainingMs,
+        );
 
         usedModel = config.id;
 
@@ -293,6 +323,8 @@ async function runGenerationPipeline(
             error: error instanceof Error ? error.message : String(error),
           }),
         );
+        // The chain's time is gone: nothing is left to try another model with.
+        if (error instanceof GenerationDeadlineError) throw error;
         // Rethrow as-is: everything in this try (createModel, generateText,
         // the empty-text check) throws Error instances, so the terminal
         // failure keeps its original Error shape for the caller.
@@ -302,9 +334,11 @@ async function runGenerationPipeline(
     }
   } catch (error) {
     await closeMcpClients(mcpResult.clients);
-    const outOfTime = error instanceof GenerationDeadlineError;
-    const code = error instanceof Error ? error.name : "GENERATION_FAILED";
-    const errorMsg = error instanceof Error ? error.message : String(error);
+    const outOfTime = isTimeout(error);
+    // A DOMException — how the SDK's timeout arrives — is read like an Error.
+    const named = error instanceof Error || error instanceof DOMException ? error : null;
+    const code = named === null ? "GENERATION_FAILED" : named.name;
+    const errorMsg = named === null ? String(error) : named.message;
     await safeFinish(env.DB, reservationId);
     await safeRecord(env.DB, {
       id: requestId,
