@@ -1,10 +1,12 @@
 import type { GenerationRequest, HistoryMessage } from "@xenoblade/contracts";
 
+import { DM_SCOPE } from "./db";
+
 // ── Context budgets ───────────────────────────────────────────────────────
 
-const MAX_CONTEXT_MESSAGES = 20;
-const MAX_CONTEXT_CHARS = 8000;
-const MAX_CONTEXT_TOKENS = 4000;
+const MAX_CONTEXT_MESSAGES = 40;
+const MAX_CONTEXT_CHARS = 24_000;
+const MAX_CONTEXT_TOKENS = 12_000;
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -60,8 +62,11 @@ function enforceLimits(messages: HistoryMessage[]): HistoryMessage[] {
  * Build context from the history provided in the request.
  *
  * - Excludes the current message and anything older than `resetAt`.
- * - **Thread**: all surviving messages (within limits).
- * - **Channel**: only the requesting user's messages and bot replies.
+ * - **Thread**: every surviving message.
+ * - **Channel**: every surviving message in a guild — when someone asks about
+ *   what another member just said, the whole recent conversation is what makes
+ *   the question answerable. A DM keeps only the requesting user's messages
+ *   and the bot's replies (defense in depth, ADR-011 §3).
  * - An empty result degrades to `mode: "none"` so generation answers only the
  *   current message.
  */
@@ -78,25 +83,14 @@ export function buildContext(req: GenerationRequest, resetAt: number): ContextDe
     return { mode: "none", messages: [] };
   }
 
-  const candidates = isThread
-    ? filtered
-    : filtered.filter((m) => m.isBot || m.authorId === req.userId);
+  const candidates =
+    req.scopeId === DM_SCOPE
+      ? filtered.filter((m) => m.isBot || m.authorId === req.userId)
+      : filtered;
 
   const capped = enforceLimits(candidates);
   if (capped.length === 0) {
     return { mode: "none", messages: [] };
   }
   return { mode: isThread ? "thread" : "channel", messages: capped };
-}
-
-/**
- * Format context messages as an untrusted reference block appended to the
- * final user message. Returns an empty string when there are no messages.
- */
-export function formatContextBlock(messages: readonly HistoryMessage[]): string {
-  if (messages.length === 0) {
-    return "";
-  }
-  const lines = messages.map((m) => `${m.authorName}: ${m.text}`);
-  return `\n\n[Relevant Discord context]\n${lines.join("\n")}`;
 }

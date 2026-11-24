@@ -13,14 +13,21 @@ export interface ModelConfig {
 
 export type ModelRole = "generation" | "summarization" | "transcription" | "vision";
 
-/** Default chains used when MODEL_CONFIG env var is absent. */
+/** Head of the default generation and summarization chains (ADR-004 amendment). */
+const DEFAULT_PRIMARY_MODEL = "deepseek/deepseek-v4.1-flash-1017";
+
+/**
+ * The model chains, and the single source of truth for them: `wrangler.jsonc`
+ * sets no `MODEL_CONFIG`, so production runs these unless an operator
+ * overrides a role explicitly.
+ */
 const DEFAULT_CHAINS: Record<ModelRole, ModelConfig[]> = {
   generation: [
-    { id: "openai/gpt-5.6-luna", temperature: 0.7 },
+    { id: DEFAULT_PRIMARY_MODEL, temperature: 0.7 },
     { id: "deepseek/deepseek-v4-flash-0731", providers: ["DeepSeek", "NovitaAI", "SiliconFlow"] },
   ],
   summarization: [
-    { id: "openai/gpt-5.6-luna" },
+    { id: DEFAULT_PRIMARY_MODEL },
     { id: "deepseek/deepseek-v4-flash-0731", providers: ["DeepSeek", "NovitaAI", "SiliconFlow"] },
   ],
   transcription: [{ id: "openai/gpt-transcribe" }],
@@ -34,7 +41,8 @@ export const GENERATION_LIMITS = {
 
 export interface AiEnv {
   OPENROUTER_API_KEY?: string;
-  /** JSON string of Record<ModelRole, ModelConfig[]>. Overrides defaults. */
+  /** JSON string of a partial Record<ModelRole, ModelConfig[]>. Overrides
+   * the listed roles' chains; unset by default, so DEFAULT_CHAINS apply. */
   MODEL_CONFIG?: string;
 }
 
@@ -86,13 +94,13 @@ export function selectModel(
 ): LanguageModel {
   const role = options?.role ?? "generation";
   const chain = getModelChain(env, role);
-  const config = chain[0] ?? { id: "openai/gpt-5.6-luna" };
+  const config = chain[0] ?? { id: DEFAULT_PRIMARY_MODEL };
   return createModel(env, config, options?.sessionId);
 }
 
 /**
  * Render the request-time clock as a system segment. Kept last so the
- * stable prefix (safety/base/persona) stays cache-friendly; only this
+ * stable prefix (safety/base/soul/persona) stays cache-friendly; only this
  * trailing segment changes day to day.
  */
 function formatNowSegment(now: Date): string {
@@ -108,11 +116,15 @@ function formatNowSegment(now: Date): string {
 export function composeSystemPrompt(parts: {
   safety: string;
   base?: string;
+  /** Persona and voice: who the bot is and how it speaks. Changes only when
+   * the soul is edited, so it belongs to the stable prefix, ahead of the
+   * per-user persona. */
+  soul?: string;
   persona?: string;
   now?: Date;
 }): string {
   const segments: string[] = [];
-  for (const part of [parts.safety, parts.base, parts.persona]) {
+  for (const part of [parts.safety, parts.base, parts.soul, parts.persona]) {
     if (part !== undefined && part.trim() !== "") segments.push(part);
   }
   if (parts.now !== undefined) {

@@ -2,9 +2,13 @@ import type { DMChannel, Message, TextChannel, ThreadChannel } from "discord.js"
 import type { HistoryMessage } from "@xenoblade/contracts";
 
 /** Page size when fetching recent messages from Discord. */
-const FETCH_LIMIT = 25;
-/** Maximum number of messages returned to the Worker. */
-const RETURN_LIMIT = 20;
+const FETCH_LIMIT = 50;
+/**
+ * Maximum number of messages returned to the Worker — the Worker's own
+ * context budget keeps at most 40, so nothing fetched is left unused because
+ * of this cap.
+ */
+const RETURN_LIMIT = 40;
 
 /**
  * Fetch recent channel history and map it to wire {@link HistoryMessage}s.

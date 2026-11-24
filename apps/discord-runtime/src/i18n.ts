@@ -54,6 +54,20 @@ const zh = {
     labelFact: "事实",
     labelPreference: "偏好",
   },
+  soulConfirm: {
+    header: "确实要更新本服务器的助手人设（soul）吗？",
+    summary: (summary: string) => `变更摘要：${summary}`,
+    footer: "点击后才会生效（5 分钟内有效）。",
+    yes: "是",
+    no: "不是",
+    applied: "✅ 已更新本服务器的助手人设（soul）。",
+    cancelled: "已取消，人设未修改。",
+    expired: "⏱️ 未及时确认，人设未修改。",
+    failed: "更新人设失败，请稍后重试。",
+    notOwner: "只有发起这次人设修改的用户可以确认。",
+    busy: "正在更新人设，请稍候。",
+    expiredNotice: "该确认已失效（机器人可能已重启或已超时）。",
+  },
   usage: {
     failure: "加载用量统计失败，请稍后重试。",
     you: (hours: number) => `**你 — 最近 ${hours} 小时**`,
@@ -144,6 +158,20 @@ export type Messages = {
     labelFact: string;
     labelPreference: string;
   };
+  soulConfirm: {
+    header: string;
+    summary: (summary: string) => string;
+    footer: string;
+    yes: string;
+    no: string;
+    applied: string;
+    cancelled: string;
+    expired: string;
+    failed: string;
+    notOwner: string;
+    busy: string;
+    expiredNotice: string;
+  };
   usage: {
     failure: string;
     you: (hours: number) => string;
@@ -230,6 +258,20 @@ const en: Messages = {
     failed: "Failed to save. Please try again later.",
     labelFact: "fact",
     labelPreference: "preference",
+  },
+  soulConfirm: {
+    header: "Update this server's assistant persona (soul)?",
+    summary: (summary: string) => `Change: ${summary}`,
+    footer: "Nothing changes until you choose (valid for 5 minutes).",
+    yes: "Yes",
+    no: "No",
+    applied: "✅ Persona (soul) updated for this server.",
+    cancelled: "Cancelled — the persona was not changed.",
+    expired: "⏱️ Not confirmed in time — the persona was not changed.",
+    failed: "Failed to update the persona. Please try again later.",
+    notOwner: "Only the user who requested this change can confirm it.",
+    busy: "The persona update is already in progress — please wait.",
+    expiredNotice: "This confirmation has expired (the bot may have restarted or timed out).",
   },
   usage: {
     failure: "Failed to load the usage summary. Please try again later.",

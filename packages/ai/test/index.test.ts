@@ -10,12 +10,30 @@ import {
 const baseEnv: AiEnv = { OPENROUTER_API_KEY: "test-key" };
 
 describe("getModelChain", () => {
-  it("returns default generation chain (Luna → DeepSeek)", () => {
+  it("returns the default generation chain (DeepSeek V4.1 Flash → V4 Flash)", () => {
     const chain = getModelChain(baseEnv, "generation");
-    expect(chain.length).toBeGreaterThanOrEqual(2);
-    expect(chain[0]?.id).toBe("openai/gpt-5.6-luna");
-    expect(chain[1]?.id).toBe("deepseek/deepseek-v4-flash-0731");
-    expect(chain[1]?.providers).toEqual(["DeepSeek", "NovitaAI", "SiliconFlow"]);
+    expect(chain).toEqual([
+      { id: "deepseek/deepseek-v4.1-flash-1017", temperature: 0.7 },
+      {
+        id: "deepseek/deepseek-v4-flash-0731",
+        providers: ["DeepSeek", "NovitaAI", "SiliconFlow"],
+      },
+    ]);
+  });
+
+  it("returns the default summarization chain, led by the same model without a temperature", () => {
+    const chain = getModelChain(baseEnv, "summarization");
+    expect(chain).toEqual([
+      { id: "deepseek/deepseek-v4.1-flash-1017" },
+      {
+        id: "deepseek/deepseek-v4-flash-0731",
+        providers: ["DeepSeek", "NovitaAI", "SiliconFlow"],
+      },
+    ]);
+  });
+
+  it("leaves the transcription chain on the speech-to-text model", () => {
+    expect(getModelChain(baseEnv, "transcription")).toEqual([{ id: "openai/gpt-transcribe" }]);
   });
 
   it("vision chain has MiMo with Xiaomi provider", () => {
@@ -32,6 +50,20 @@ describe("getModelChain", () => {
     const chain = getModelChain(env, "generation");
     expect(chain[0]?.id).toBe("custom/model");
   });
+
+  it("falls back to the default chains for roles an override leaves out", () => {
+    const env: AiEnv = {
+      OPENROUTER_API_KEY: "key",
+      MODEL_CONFIG: JSON.stringify({ generation: [{ id: "custom/model" }] }),
+    };
+    expect(getModelChain(env, "summarization")).toEqual(getModelChain(baseEnv, "summarization"));
+    expect(getModelChain(env, "vision")).toEqual(getModelChain(baseEnv, "vision"));
+  });
+
+  it("falls back to the default chains when MODEL_CONFIG is not valid JSON", () => {
+    const env: AiEnv = { OPENROUTER_API_KEY: "key", MODEL_CONFIG: "{not json" };
+    expect(getModelChain(env, "generation")).toEqual(getModelChain(baseEnv, "generation"));
+  });
 });
 
 describe("createModel", () => {
@@ -40,13 +72,23 @@ describe("createModel", () => {
   });
 
   it("succeeds for a basic config", () => {
-    expect(() => createModel(baseEnv, { id: "openai/gpt-5.6-luna" })).not.toThrow();
+    expect(() => createModel(baseEnv, { id: "deepseek/deepseek-v4.1-flash-1017" })).not.toThrow();
   });
 });
 
 describe("selectModel", () => {
-  it("picks first model in generation chain", () => {
-    expect(() => selectModel(baseEnv)).not.toThrow();
+  it("picks the head of the default generation chain", () => {
+    expect(selectModel(baseEnv)).toMatchObject({
+      modelId: "deepseek/deepseek-v4.1-flash-1017",
+    });
+  });
+
+  it("falls back to the primary model when a role's chain is empty", () => {
+    const env: AiEnv = {
+      OPENROUTER_API_KEY: "key",
+      MODEL_CONFIG: JSON.stringify({ generation: [] }),
+    };
+    expect(selectModel(env)).toMatchObject({ modelId: "deepseek/deepseek-v4.1-flash-1017" });
   });
 
   it("picks vision model for vision role", () => {
@@ -64,6 +106,22 @@ describe("composeSystemPrompt", () => {
   it("skips undefined parts", () => {
     expect(composeSystemPrompt({ safety: "Be safe.", persona: "Be concise." })).toBe(
       "Be safe.\n\nBe concise.",
+    );
+  });
+
+  it("places the soul after the base guidance and before the persona", () => {
+    const prompt = composeSystemPrompt({
+      safety: "Safety.",
+      base: "Memory guidance.",
+      soul: "Soul.",
+      persona: "Known about the user.",
+    });
+    expect(prompt).toBe("Safety.\n\nMemory guidance.\n\nSoul.\n\nKnown about the user.");
+  });
+
+  it("skips an empty soul", () => {
+    expect(composeSystemPrompt({ safety: "Safety.", soul: "  ", persona: "Persona." })).toBe(
+      "Safety.\n\nPersona.",
     );
   });
 

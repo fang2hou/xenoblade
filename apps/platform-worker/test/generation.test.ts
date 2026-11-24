@@ -1,16 +1,31 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { generateText } from "ai";
+import { MockLanguageModelV3 } from "ai/test";
 import type * as Ai from "ai";
-import { GENERATION_LIMITS, type ModelConfig } from "@xenoblade/ai";
-import type { GenerationRequest, GenerationResult } from "@xenoblade/contracts";
+import type * as AiPackage from "@xenoblade/ai";
+import { createModel, GENERATION_LIMITS, type ModelConfig } from "@xenoblade/ai";
+import type {
+  GenerationRequest,
+  GenerationResult,
+  HistoryMessage,
+  SoulProposal,
+} from "@xenoblade/contracts";
 import type * as Tools from "../src/tools";
 
 import { generate } from "../src/generation";
+import { DEFAULT_SOUL, formatSoulSegment, setBotSoul } from "../src/soul";
 import { createTestD1 } from "./helpers/d1";
 
 vi.mock("ai", async (importOriginal) => {
   const actual = await importOriginal<typeof Ai>();
   return { ...actual, generateText: vi.fn() };
+});
+
+// `createModel` is swapped for a scripted model where a test must run the real
+// generateText loop; everything else stays real.
+vi.mock("@xenoblade/ai", async (importOriginal) => {
+  const actual = await importOriginal<typeof AiPackage>();
+  return { ...actual, createModel: vi.fn(actual.createModel) };
 });
 
 // MCP connections stay offline; the first-party tools stay real so the audit
@@ -37,17 +52,31 @@ const CALLED_TOOLS = [
   "github_search",
 ];
 
-function stubModel(): void {
+/** Tool results of a run that called each audited tool once. */
+const CALLED_TOOL_RESULTS = CALLED_TOOLS.map((toolName) => ({
+  toolName,
+  input: { query: "x" },
+  output: { ok: true },
+}));
+
+/** Make `generateText` answer with a normal reply and `toolResults`. */
+function stubModel(toolResults: readonly unknown[] = CALLED_TOOL_RESULTS): void {
   vi.mocked(generateText).mockResolvedValue({
     text: "Answer [来源](https://example.com/a).",
     usage: { inputTokens: 12, outputTokens: 34, inputTokenDetails: {} },
-    toolResults: CALLED_TOOLS.map((toolName) => ({
-      toolName,
-      input: { query: "x" },
-      output: { ok: true },
-    })),
+    toolResults,
     steps: [{}],
   } as unknown as Ai.GenerateTextResult<Ai.ToolSet, never, never>);
+}
+
+/** The system prompt of the primary attempt. */
+function systemPrompt(): string {
+  return String(vi.mocked(generateText).mock.calls[0]?.[0]?.system);
+}
+
+/** Model messages the primary attempt was called with. */
+function sentMessages(): Ai.ModelMessage[] {
+  return vi.mocked(generateText).mock.calls[0]?.[0]?.messages ?? [];
 }
 
 function makeEnv(generation: ModelConfig[]): Env {
@@ -160,6 +189,313 @@ describe("generate channel allowlist", () => {
 
     expect(result).toMatchObject({ status: "rejected", code: "disabled" });
     expect(generateText).not.toHaveBeenCalled();
+  });
+});
+
+/** Number of rows a run left in `bot_soul`. */
+async function storedSouls(db: D1Database): Promise<number> {
+  const row = await db.prepare("SELECT COUNT(*) AS n FROM bot_soul").first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
+/** Tool results of a run that called `soul_update` once per entry. */
+function soulUpdates(...contents: string[]) {
+  return contents.map((content, i) => ({
+    toolName: "soul_update",
+    input: { content, summary: "s" },
+    output: {
+      status: "proposed",
+      proposal: { id: `p${i + 1}`, scopeId: "g1", content, summary: "s" } satisfies SoulProposal,
+    },
+  }));
+}
+
+describe("generate soul", () => {
+  it("injects the guild's own soul into the system prompt, before the clock", async () => {
+    const env = makeEnv([{ id: "test/primary" }]);
+    await setBotSoul(env.DB, { scopeId: "g1", content: "Speak like a pirate.", now: 1 });
+    stubModel();
+
+    expect((await generate(env, request())).status).toBe("completed");
+
+    const soul = formatSoulSegment("Speak like a pirate.");
+    expect(systemPrompt()).toContain(soul);
+    expect(systemPrompt().indexOf(soul)).toBeLessThan(systemPrompt().indexOf("Current date:"));
+  });
+
+  it("falls back to the built-in soul for a guild without one", async () => {
+    const env = makeEnv([{ id: "test/primary" }]);
+    stubModel();
+
+    await generate(env, request());
+
+    expect(systemPrompt()).toContain(formatSoulSegment(DEFAULT_SOUL));
+  });
+
+  it("never gives a DM generation a guild's soul", async () => {
+    const env = makeEnv([{ id: "test/primary" }]);
+    await setBotSoul(env.DB, { scopeId: "g1", content: "Speak like a pirate.", now: 1 });
+    stubModel();
+
+    await generate(env, request({ scopeId: "dm", containerId: "discord:@me:42", channelId: "42" }));
+
+    expect(systemPrompt()).toContain(formatSoulSegment(DEFAULT_SOUL));
+    expect(systemPrompt()).not.toContain("Speak like a pirate.");
+  });
+
+  it("returns the latest soul proposal of the run and stores nothing", async () => {
+    const env = makeEnv([{ id: "test/primary" }]);
+    stubModel(soulUpdates("First version.", "Second version."));
+
+    const result = await generate(env, request());
+
+    expect(result).toMatchObject({
+      status: "completed",
+      soulProposal: { id: "p2", scopeId: "g1", content: "Second version." },
+    });
+    expect(await storedSouls(env.DB)).toBe(0);
+  });
+
+  it("omits soulProposal when nothing was proposed, beside whatever memory was proposed", async () => {
+    const env = makeEnv([{ id: "test/primary" }]);
+    stubModel([
+      {
+        toolName: "soul_update",
+        input: { content: "x", summary: "s" },
+        output: { status: "rejected", reason: "dm_not_allowed" },
+      },
+      {
+        toolName: "remember",
+        input: { key: "pet", value: "cat" },
+        output: {
+          status: "proposed",
+          proposal: { id: "m1", action: "save", category: "fact", key: "pet", value: "cat" },
+        },
+      },
+    ]);
+
+    const result = await generate(env, request());
+
+    expect(result).not.toHaveProperty("soulProposal");
+    expect(result).toMatchObject({ memoryProposals: [{ id: "m1" }] });
+  });
+
+  it("records the soul tools as builtin, not as an MCP server named soul", async () => {
+    const env = makeEnv([{ id: "test/primary" }]);
+    stubModel([
+      {
+        toolName: "soul_read",
+        input: {},
+        output: { scopeId: "g1", content: "old", isDefault: false },
+      },
+      ...soulUpdates("new"),
+    ]);
+
+    await generate(env, request());
+
+    const { results } = await env.DB.prepare(
+      "SELECT tool_name, server FROM tool_invocations ORDER BY rowid",
+    ).all<{ tool_name: string; server: string }>();
+    expect(results).toEqual([
+      { tool_name: "soul_read", server: "builtin" },
+      { tool_name: "soul_update", server: "builtin" },
+    ]);
+  });
+});
+
+describe("generate history", () => {
+  const history: HistoryMessage[] = [
+    {
+      id: "h1",
+      text: "Anyone tried the new API?",
+      authorId: "u2",
+      authorName: "Bob",
+      isBot: false,
+      createdAt: 1_000,
+    },
+    {
+      id: "h2",
+      text: "Yes, it works.",
+      authorId: "bot",
+      authorName: "Xenoblade",
+      isBot: true,
+      createdAt: 1_100,
+    },
+    {
+      id: "h3",
+      text: "It broke for me.",
+      authorId: "u3",
+      authorName: "Cara",
+      isBot: false,
+      createdAt: 1_200,
+    },
+  ];
+
+  it("sends each history message once as a speaker-labeled turn, then the labeled request", async () => {
+    const env = makeEnv([{ id: "test/primary" }]);
+    stubModel();
+
+    await generate(env, request({ history, content: "  what did everyone say?  " }));
+
+    expect(sentMessages()).toEqual([
+      { role: "user", content: "[Bob]: Anyone tried the new API?" },
+      { role: "assistant", content: "Yes, it works." },
+      { role: "user", content: "[Cara]: It broke for me." },
+      { role: "user", content: "[User]: what did everyone say?" },
+    ]);
+  });
+
+  it("leaves the request unlabeled in a DM, its only speaker", async () => {
+    const env = makeEnv([{ id: "test/primary" }]);
+    stubModel();
+    const earlier = { ...history[0]!, id: "h0", authorId: "u1", authorName: "Alice" };
+
+    await generate(
+      env,
+      request({
+        scopeId: "dm",
+        containerId: "discord:@me:42",
+        channelId: "42",
+        history: [earlier],
+      }),
+    );
+
+    expect(sentMessages()).toEqual([
+      { role: "user", content: "[Alice]: Anyone tried the new API?" },
+      { role: "user", content: "hello" },
+    ]);
+  });
+
+  it("appends the cited-sources reference after the request instead of a second copy of the history", async () => {
+    const env = makeEnv([{ id: "test/primary" }]);
+    await env.DB.prepare(
+      `INSERT INTO interaction_sources (interaction_id, container_id, idx, title, url, created_at)
+       VALUES ('i0', 'discord:g1:c1', 1, 'Docs', 'https://example.com/docs', ?1)`,
+    )
+      .bind(Date.now())
+      .run();
+    stubModel();
+
+    await generate(env, request({ history }));
+
+    const messages = sentMessages();
+    const requestMessage = messages.at(-1);
+    expect(requestMessage?.role).toBe("user");
+    expect(requestMessage?.content).toContain("[User]: hello\n\n[Recently cited sources");
+    expect(requestMessage?.content).toContain("[1] Docs — https://example.com/docs");
+    const wholePrompt = JSON.stringify(messages);
+    for (const text of ["Anyone tried the new API?", "Yes, it works.", "It broke for me."]) {
+      expect(wholePrompt.split(text)).toHaveLength(2);
+    }
+  });
+});
+
+/** Run the real generateText loop against `model` for one test. */
+async function useRealLoop(model: MockLanguageModelV3): Promise<void> {
+  const { generateText: realGenerateText } = await vi.importActual<typeof Ai>("ai");
+  vi.mocked(generateText).mockImplementation(realGenerateText);
+  vi.mocked(createModel).mockReturnValue(model);
+}
+
+/**
+ * A model scripted to call `toolCalls[i]` on its i-th step while tools are on
+ * offer, and to answer with text otherwise or once the script runs out.
+ * `offered` records how many tools each step was offered.
+ */
+function scriptedModel(toolCalls: ReadonlyArray<{ toolName: string; input: object }>): {
+  model: MockLanguageModelV3;
+  offered: number[];
+} {
+  const offered: number[] = [];
+  const model = new MockLanguageModelV3({
+    doGenerate: async ({ tools }) => {
+      offered.push(tools?.length ?? 0);
+      const usage = {
+        inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
+        outputTokens: { total: 5, text: 5, reasoning: 0 },
+      };
+      const call = toolCalls[offered.length - 1];
+      if (call !== undefined && (tools?.length ?? 0) > 0) {
+        return {
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: `call-${offered.length}`,
+              toolName: call.toolName,
+              input: JSON.stringify(call.input),
+            },
+          ],
+          finishReason: { unified: "tool-calls", raw: "tool-calls" },
+          usage,
+          warnings: [],
+        };
+      }
+      return {
+        content: [{ type: "text", text: "Final answer." }],
+        finishReason: { unified: "stop", raw: "stop" },
+        usage,
+        warnings: [],
+      };
+    },
+  });
+  return { model, offered };
+}
+
+const REMEMBER = { toolName: "remember", input: { key: "pet", value: "cat" } };
+const SOUL_UPDATE = {
+  toolName: "soul_update",
+  input: { content: "Be calm and precise.", summary: "Calm down the tone." },
+};
+
+describe("generate tool loop", () => {
+  it("ends a tool-only run with a text reply instead of an empty one", async () => {
+    const env = makeEnv([{ id: "test/primary" }]);
+    // The model would keep calling tools forever, given the chance.
+    const { model, offered } = scriptedModel(Array.from({ length: 12 }, () => REMEMBER));
+    await useRealLoop(model);
+
+    const result = await generate(env, request());
+
+    // Seven steps that may call tools, then an eighth without tools: nothing is
+    // left to call, so the run's last step can only be the text reply.
+    expect(offered).toHaveLength(8);
+    expect(offered.slice(0, 7).every((count) => count > 0)).toBe(true);
+    expect(offered[7]).toBe(0);
+    expect(result).toMatchObject({ status: "completed", reply: "Final answer." });
+  });
+
+  it("carries a soul_update call back as a proposal and stores nothing", async () => {
+    const env = makeEnv([{ id: "test/primary" }]);
+    const { model } = scriptedModel([SOUL_UPDATE]);
+    await useRealLoop(model);
+
+    const result = await generate(env, request());
+
+    expect(result).toMatchObject({
+      status: "completed",
+      reply: "Final answer.",
+      soulProposal: {
+        scopeId: "g1",
+        content: "Be calm and precise.",
+        summary: "Calm down the tone.",
+      },
+    });
+    expect(await storedSouls(env.DB)).toBe(0);
+  });
+
+  it("brings back no soul proposal from a DM, where the tool refuses", async () => {
+    const env = makeEnv([{ id: "test/primary" }]);
+    const { model } = scriptedModel([SOUL_UPDATE]);
+    await useRealLoop(model);
+
+    const result = await generate(
+      env,
+      request({ scopeId: "dm", containerId: "discord:@me:42", channelId: "42" }),
+    );
+
+    expect(result).toMatchObject({ status: "completed", reply: "Final answer." });
+    expect(result).not.toHaveProperty("soulProposal");
+    expect(await storedSouls(env.DB)).toBe(0);
   });
 });
 

@@ -4,12 +4,13 @@ import type { GenerationRequest, HistoryMessage } from "@xenoblade/contracts";
 import { buildContext, isThreadContainer } from "../src/context";
 
 /**
- * ADR-011 isolation invariants. DM context lives under
- * `scopeId = "dm"`, `containerId = discord:@me:<dmChannelId>`; guild requests
- * use a guild scope and container. History reaches `buildContext` only from
- * the triggering channel itself, so these tests pin the remaining invariants:
- * DM containers are non-thread containers (channel mode, user+bot filtering)
- * and honor the reset cutoff.
+ * Context membership and budgets. ADR-011 isolation invariants: DM context
+ * lives under `scopeId = "dm"`, `containerId = discord:@me:<dmChannelId>`;
+ * guild requests use a guild scope and container. History reaches
+ * `buildContext` only from the triggering channel itself, so these tests pin
+ * the remaining invariants: DM containers are non-thread containers (channel
+ * mode, user+bot filtering) and honor the reset cutoff, while a guild channel
+ * carries every member's messages.
  */
 
 function message(partial: Partial<HistoryMessage> & Pick<HistoryMessage, "id">): HistoryMessage {
@@ -38,6 +39,93 @@ function request(containerId: string, history: HistoryMessage[]): GenerationRequ
     attachments: [],
   };
 }
+
+describe("guild channel context", () => {
+  const channel = "discord:123:c1";
+
+  it("includes every member's messages, not only the requesting user's", () => {
+    const history = [
+      message({ id: "m1", authorId: "user-a", authorName: "A" }),
+      message({ id: "m2", authorId: "user-b", authorName: "B" }),
+      message({ id: "m3", authorId: "user-c", authorName: "C" }),
+      message({ id: "m4", authorId: "bot", isBot: true }),
+    ];
+    const decision = buildContext(request(channel, history), 0);
+    expect(decision.mode).toBe("channel");
+    expect(decision.messages.map((m) => m.id)).toEqual(["m1", "m2", "m3", "m4"]);
+  });
+
+  it("applies the reset cutoff to everyone's messages alike", () => {
+    const history = [
+      message({ id: "old-b", authorId: "user-b", createdAt: 1000 }),
+      message({ id: "new-a", authorId: "user-a", createdAt: 2000 }),
+      message({ id: "new-b", authorId: "user-b", createdAt: 2100 }),
+    ];
+    const decision = buildContext(request(channel, history), 1500);
+    expect(decision.messages.map((m) => m.id)).toEqual(["new-a", "new-b"]);
+  });
+
+  it("still includes other members when the requesting user has said nothing yet", () => {
+    const history = [
+      message({ id: "m1", authorId: "user-b" }),
+      message({ id: "m2", authorId: "user-c" }),
+    ];
+    const decision = buildContext(request(channel, history), 0);
+    expect(decision.messages.map((m) => m.id)).toEqual(["m1", "m2"]);
+  });
+
+  it("keeps every message of a thread", () => {
+    const history = [
+      message({ id: "m1", authorId: "user-b" }),
+      message({ id: "m2", authorId: "user-a" }),
+    ];
+    const decision = buildContext(request("discord:123:c1:t1", history), 0);
+    expect(decision.mode).toBe("thread");
+    expect(decision.messages.map((m) => m.id)).toEqual(["m1", "m2"]);
+  });
+
+  it("degrades to no context when only the current message survives", () => {
+    const history = [
+      message({ id: "old", authorId: "user-b", createdAt: 1000 }),
+      message({ id: "current", authorId: "user-a", createdAt: 2000 }),
+    ];
+    expect(buildContext(request(channel, history), 1500)).toEqual({ mode: "none", messages: [] });
+  });
+});
+
+describe("context limits", () => {
+  const channel = "discord:123:c1";
+
+  /** `count` messages with ascending ids, oldest first, each `text` long. */
+  function many(count: number, text = `text of m`): HistoryMessage[] {
+    return Array.from({ length: count }, (_, i) =>
+      message({ id: `m${i}`, authorId: "user-b", text }),
+    );
+  }
+
+  function ids(history: HistoryMessage[]): string[] {
+    return buildContext(request(channel, history), 0).messages.map((m) => m.id);
+  }
+
+  it("keeps the 40 most recent messages and drops the oldest beyond that", () => {
+    const kept = ids(many(45));
+    expect(kept).toHaveLength(40);
+    expect(kept[0]).toBe("m5");
+    expect(kept.at(-1)).toBe("m44");
+  });
+
+  it("stops at the character budget, always keeping the most recent messages", () => {
+    // Six messages of 6,000 chars: only four fit the 24,000-char budget.
+    const decision = buildContext(request(channel, many(6, "x".repeat(6_000))), 0);
+    expect(decision.messages.map((m) => m.id)).toEqual(["m2", "m3", "m4", "m5"]);
+  });
+
+  it("drops the oldest message first when the character budget is nearly full", () => {
+    // Four messages of 10,000 chars (m0 is the oldest): m3 and m2 fill 20,000; m1
+    // would exceed 24,000, so m1 and the older m0 go.
+    expect(ids(many(4, "y".repeat(10_000)))).toEqual(["m2", "m3"]);
+  });
+});
 
 describe("DM container keying (ADR-011 §3)", () => {
   it("a DM container is never treated as a thread", () => {

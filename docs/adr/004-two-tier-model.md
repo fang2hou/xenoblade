@@ -32,6 +32,8 @@ Each role is an ordered **model chain** (`MODEL_CONFIG` Worker var; defaults in 
 
 _Evolution note:_ the original decision defined three roles; `vision` was added when fallback models without native image input entered the generation chain (the `vision_describe` tool delegates to it). The transcription role is configured but not yet wired — no voice handling ships today.
 
+_Amendment (2026-11-25):_ Review Trigger #1 has fired for two of the roles. `deepseek/deepseek-v4.1-flash-1017` — native-multimodal, with a 1M context — now leads both the `generation` and the `summarization` chain, with `deepseek/deepseek-v4-flash-0731` as the fallback. The roles stay separate, because they are still distinct failover and configuration units, but they no longer split for economic reasons. `transcription` is unchanged, and `vision` is unchanged — it still covers fallback models without native image input. The chains now live only in `packages/ai` (`DEFAULT_CHAINS`): `wrangler.jsonc` no longer hard-codes a `MODEL_CONFIG` var, so the drift between the two copies is gone and the var overrides a role only when an operator sets it explicitly.
+
 ## Alternatives Considered
 
 ### One model for all roles

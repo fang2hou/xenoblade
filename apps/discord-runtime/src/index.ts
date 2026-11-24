@@ -36,6 +36,12 @@ import {
   MemoryConfirmRegistry,
   postMemoryConfirmation,
 } from "./memory-confirm";
+import {
+  handleSoulConfirmInteraction,
+  isSoulConfirmCustomId,
+  postSoulConfirmation,
+  SoulConfirmRegistry,
+} from "./soul-confirm";
 import { evaluateTrigger, type TriggerDecision } from "./trigger-policy";
 import { fetchHistory } from "./history";
 import { sendTyping } from "./output";
@@ -64,6 +70,7 @@ async function main(): Promise<void> {
   const queue = new ConversationQueue();
   const registry = new ReplyRegistry();
   const confirms = new MemoryConfirmRegistry();
+  const soulConfirms = new SoulConfirmRegistry();
   const client = new Client({
     intents: [
       GatewayIntentBits.Guilds,
@@ -99,7 +106,7 @@ async function main(): Promise<void> {
   client.on("messageCreate", (message) => {
     // Fire-and-forget: the handler catches and logs internally; awaiting
     // would block the gateway's event dispatch.
-    void handleMessageCreate(message, env, queue, client, registry, confirms);
+    void handleMessageCreate(message, env, queue, client, registry, confirms, soulConfirms);
   });
 
   client.on("messageReactionAdd", (reaction, user) => {
@@ -123,7 +130,15 @@ async function main(): Promise<void> {
     if (interaction.isMessageComponent()) {
       // Fire-and-forget: the handler catches and logs internally; awaiting
       // would block the gateway's event dispatch.
-      void handleComponentInteraction(interaction, env, queue, client, registry, confirms);
+      void handleComponentInteraction(
+        interaction,
+        env,
+        queue,
+        client,
+        registry,
+        confirms,
+        soulConfirms,
+      );
       return;
     }
     if (!interaction.isChatInputCommand()) return;
@@ -152,6 +167,7 @@ async function handleMessageCreate(
   client: Client,
   registry: ReplyRegistry,
   confirms: MemoryConfirmRegistry,
+  soulConfirms: SoulConfirmRegistry,
 ): Promise<void> {
   try {
     if (message.author.bot) return;
@@ -161,7 +177,7 @@ async function handleMessageCreate(
     if (message.channel?.isDMBased()) {
       await handleDmMessage(message, env, (dmMessage) => {
         queue.enqueue(containerIdFromMessage(dmMessage), () =>
-          runGeneration(dmMessage, { kind: "dm-chat" }, env, registry, confirms),
+          runGeneration(dmMessage, { kind: "dm-chat" }, env, registry, confirms, soulConfirms),
         );
       });
       return;
@@ -181,7 +197,9 @@ async function handleMessageCreate(
         hasFallback: Boolean(decision.fallbackMessage),
       }),
     );
-    queue.enqueue(containerId, () => runGeneration(message, decision, env, registry, confirms));
+    queue.enqueue(containerId, () =>
+      runGeneration(message, decision, env, registry, confirms, soulConfirms),
+    );
   } catch (error) {
     console.log(
       JSON.stringify({
@@ -204,6 +222,7 @@ async function runGeneration(
   env: EnvConfig,
   registry: ReplyRegistry,
   confirms: MemoryConfirmRegistry,
+  soulConfirms: SoulConfirmRegistry,
 ): Promise<void> {
   const channel = message.channel;
   if (!channel?.isSendable()) return;
@@ -265,7 +284,15 @@ async function runGeneration(
     }),
   );
 
-  await executeGeneration(channel, request, env, { regenerate: false }, registry, confirms);
+  await executeGeneration(
+    channel,
+    request,
+    env,
+    { regenerate: false },
+    registry,
+    confirms,
+    soulConfirms,
+  );
 }
 
 /** How a generation run claims dedup and where its reply lands. */
@@ -304,6 +331,7 @@ async function executeGeneration(
   run: GenerationRun,
   registry: ReplyRegistry,
   confirms: MemoryConfirmRegistry,
+  soulConfirms: SoulConfirmRegistry,
 ): Promise<void> {
   // Keep typing indicator alive during generation. Discord's typing
   // indicator expires after ~10s; refresh every 8s until done.
@@ -369,6 +397,7 @@ async function executeGeneration(
     ...(run.target ? { regen: run.target } : {}),
     registry,
     confirms,
+    soulConfirms,
     staged,
     channel,
     language,
@@ -384,6 +413,8 @@ interface PostContext {
   registry: ReplyRegistry;
   /** Pending memory confirmations for this runtime (ADR-013). */
   confirms: MemoryConfirmRegistry;
+  /** Pending soul confirmations for this runtime. */
+  soulConfirms: SoulConfirmRegistry;
   /** Staged placeholder this run owns; settle/dismiss post or remove it. */
   staged: StagedStatus;
   /** Channel the reply was posted to; confirmations follow the reply. */
@@ -493,6 +524,25 @@ async function applyGenerationResult(result: GenerationResult, ctx: PostContext)
           result.memoryProposals,
           messages(ctx.language).memoryConfirm,
           ctx.confirms,
+        );
+      }
+      // A soul proposal from this generation: post the 是 / 不是 card right
+      // after the reply. Nothing reaches `bot_soul` until the owner clicks 是.
+      // Id-only log — the proposal text never reaches the logs.
+      if (result.soulProposal !== undefined) {
+        console.log(
+          JSON.stringify({
+            event: "soul_proposal_posted",
+            messageId,
+            proposalId: result.soulProposal.id,
+          }),
+        );
+        await postSoulConfirmation(
+          ctx.channel,
+          ctx.request.userId,
+          result.soulProposal,
+          messages(ctx.language).soulConfirm,
+          ctx.soulConfirms,
         );
       }
       return;
@@ -686,7 +736,9 @@ async function handleReactionAdd(
 }
 
 /**
- * interactionCreate entry point for the reply-control buttons (ADR-015):
+ * interactionCreate entry point for the bot's buttons. The soul-confirmation
+ * family (`xbl:soul:*`) is handed to its own handler first; everything below
+ * is the reply controls (ADR-015):
  * 🔁 Regenerate re-runs the frozen request and edits the reply in place,
  * 🗑 Delete removes the whole reply.
  *
@@ -704,8 +756,15 @@ async function handleComponentInteraction(
   client: Client,
   registry: ReplyRegistry,
   confirms: MemoryConfirmRegistry,
+  soulConfirms: SoulConfirmRegistry,
 ): Promise<void> {
   try {
+    // The soul-confirmation family has its own registry and texts; it is
+    // routed here so the reply-control resolver below never sees it.
+    if (isSoulConfirmCustomId(interaction.customId)) {
+      await handleSoulConfirmInteraction(interaction, env, soulConfirms);
+      return;
+    }
     const messageId = interaction.message.id;
     const entry = registry.get(messageId);
     const decision = resolveControlAction(
@@ -740,7 +799,7 @@ async function handleComponentInteraction(
       await deleteReply(interaction, entry, client, registry);
       return;
     }
-    await startRegenerate(interaction, entry, env, queue, client, registry, confirms);
+    await startRegenerate(interaction, entry, env, queue, client, registry, confirms, soulConfirms);
   } catch (error) {
     console.log(
       JSON.stringify({
@@ -768,6 +827,7 @@ async function startRegenerate(
   client: Client,
   registry: ReplyRegistry,
   confirms: MemoryConfirmRegistry,
+  soulConfirms: SoulConfirmRegistry,
 ): Promise<void> {
   const messageId = interaction.message.id;
   entry.busy = true;
@@ -826,6 +886,7 @@ async function startRegenerate(
       { regenerate: true, target: { entry, head, notify } },
       registry,
       confirms,
+      soulConfirms,
     );
   });
 }

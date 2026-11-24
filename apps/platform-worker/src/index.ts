@@ -15,6 +15,7 @@ import { clearUserContext, getUsageSummary, restoreUserContext, truncateUserCont
 import { generate } from "./generation";
 import { handleMemory, handleMemoryProposals } from "./memory";
 import { handleSettings } from "./settings";
+import { handleSoulApply } from "./soul";
 
 const INTERNAL_PREFIX = "/internal/v1/";
 
@@ -168,6 +169,15 @@ export default {
         return json({ status: "error", code: "invalid_body" }, 400);
       }
       return json(await handleMemoryProposals(env.DB, req));
+    }
+
+    // POST /internal/v1/soul/apply (button-confirmed soul proposal)
+    if (request.method === "POST" && path === "/internal/v1/soul/apply") {
+      const req = await readJson<unknown>(request);
+      if (req === null) {
+        return json({ status: "error", code: "invalid_body" }, 400);
+      }
+      return json(await handleSoulApply(env.DB, req));
     }
 
     // POST /internal/v1/settings
