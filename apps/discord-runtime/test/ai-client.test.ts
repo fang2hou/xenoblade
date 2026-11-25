@@ -1,16 +1,59 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { MessageIngestRequest } from "@xenoblade/contracts";
+import type { GenerationRequest, MessageIngestRequest } from "@xenoblade/contracts";
 
-import { GENERATION_TIMEOUT_MS, ingestMessages } from "../src/ai-client";
+import {
+  ADMIN_GENERATION_TIMEOUT_MS,
+  generate,
+  GENERATION_TIMEOUT_MS,
+  ingestMessages,
+} from "../src/ai-client";
 import { stagedMilestones } from "../src/i18n";
 
 const WORKER = "https://worker.example";
 
 describe("generation timeout", () => {
-  it("outlasts the longest staged-status milestone", () => {
+  it("outlasts the longest staged-status milestone and extends timeout for admin sessions", async () => {
     const longestMilestone = Math.max(...stagedMilestones("zh").map((m) => m.afterMs));
     expect(GENERATION_TIMEOUT_MS).toBeGreaterThan(longestMilestone);
+    expect(ADMIN_GENERATION_TIMEOUT_MS).toBeGreaterThan(GENERATION_TIMEOUT_MS);
+
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<(url: string, init?: RequestInit) => Promise<Response>>(async () =>
+        Response.json({
+          status: "completed",
+          requestId: "r1",
+          reply: "ok",
+          usage: { model: "m", inputTokens: 1, outputTokens: 1, durationMs: 1 },
+          sources: [],
+        }),
+      ),
+    );
+    const baseReq: GenerationRequest = {
+      messageId: "m1",
+      containerId: "discord:g1:c1",
+      scopeId: "g1",
+      channelId: "c1",
+      userId: "u1",
+      userDisplayName: "User",
+      summonKind: "user-mention",
+      content: "hi",
+      history: [],
+      reference: null,
+      attachments: [],
+    };
+    try {
+      await generate(baseReq, WORKER, "secret");
+      expect(timeout).toHaveBeenLastCalledWith(GENERATION_TIMEOUT_MS);
+
+      await generate({ ...baseReq, adminMode: true }, WORKER, "secret");
+      expect(timeout).toHaveBeenLastCalledWith(ADMIN_GENERATION_TIMEOUT_MS);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    }
   });
 });
 

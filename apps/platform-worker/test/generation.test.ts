@@ -1156,4 +1156,27 @@ describe("generate chain deadline", () => {
     });
     expect(await recordedRun(env.DB)).toEqual({ status: "timeout", total_duration_ms: 134_000 });
   });
+
+  it("classifies SDK step vs total TimeoutErrors distinctly and logs attemptDurationMs", async () => {
+    const env = makeEnv([{ id: "test/a" }]);
+    vi.mocked(generateText).mockImplementationOnce(async () => {
+      await hang(12_000);
+      throw new DOMException("Step timeout of 45000ms exceeded", "TimeoutError");
+    });
+
+    const result = await settleRun(generate(env, request()));
+
+    expect(result).toMatchObject({
+      status: "error",
+      code: "StepTimeoutError",
+      retryable: true,
+    });
+    expect(loggedEvents().filter((e) => e.event === "attempt_failed")).toEqual([
+      expect.objectContaining({
+        model: "test/a",
+        error: "StepTimeoutError",
+        attemptDurationMs: 12_000,
+      }),
+    ]);
+  });
 });

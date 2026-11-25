@@ -143,6 +143,14 @@ function isRetryable(error: unknown): boolean {
 const CHAIN_DEADLINE_MS = 135_000;
 
 /**
+ * Extended wall-clock budget for owner-only server administration sessions,
+ * sitting 15s below the Runtime's 195s `ADMIN_GENERATION_TIMEOUT_MS` so the
+ * primary attempt has a full 120s for reasoning + batch planning while still
+ * leaving room for a fallback attempt if primary fails.
+ */
+const ADMIN_CHAIN_DEADLINE_MS = 180_000;
+
+/**
  * Smallest budget still worth handing to a model attempt. With less of the
  * chain's budget left, the chain gives up instead of starting a call that
  * cannot finish in time.
@@ -238,6 +246,23 @@ function isTimeout(error: unknown): boolean {
     (error instanceof Error || error instanceof DOMException) &&
     (error.name === "TimeoutError" || error.name === "AbortError")
   );
+}
+
+/**
+ * Derive a safe, content-free error code for logs and wire responses.
+ * Distinguishes SDK step timeouts from total timeouts without leaking any
+ * provider or request body text.
+ */
+function classifyErrorCode(error: unknown): string {
+  if (error instanceof GenerationDeadlineError) return error.name;
+  if (error instanceof Error || error instanceof DOMException) {
+    if (error.name === "TimeoutError") {
+      if (/^Step timeout\b/i.test(error.message)) return "StepTimeoutError";
+      if (/^Total timeout\b/i.test(error.message)) return "TotalTimeoutError";
+    }
+    return error.name;
+  }
+  return "GENERATION_FAILED";
 }
 
 function sleep(ms: number): Promise<void> {
@@ -400,7 +425,7 @@ async function runGenerationPipeline(
   // wall-clock budget for the whole chain.
   const chain = getModelChain(env, "generation");
   const sessionId = `xenoblade:${req.containerId}`;
-  const chainDeadline = now + CHAIN_DEADLINE_MS;
+  const chainDeadline = now + (adminSession ? ADMIN_CHAIN_DEADLINE_MS : CHAIN_DEADLINE_MS);
 
   let result: Awaited<ReturnType<typeof generateText>> | undefined;
   let finalReply = "";
@@ -415,7 +440,8 @@ async function runGenerationPipeline(
   GENERATION_LOOP: try {
     for (const [i, config] of chain.entries()) {
       const isPrimary = i === 0;
-      const remainingMs = chainDeadline - Date.now();
+      const attemptStartedAt = Date.now();
+      const remainingMs = chainDeadline - attemptStartedAt;
       if (remainingMs < MIN_ATTEMPT_MS) {
         throw new GenerationDeadlineError();
       }
@@ -425,12 +451,10 @@ async function runGenerationPipeline(
         (adminSession
           ? ADMIN_GENERATION_LIMITS.maxOutputTokens
           : GENERATION_LIMITS.maxOutputTokens);
-      const attemptTimeout = adminSession
-        ? {
-            totalMs: Math.min(ADMIN_GENERATION_LIMITS.timeout.totalMs, remainingMs),
-            stepMs: Math.min(ADMIN_GENERATION_LIMITS.timeout.stepMs, remainingMs),
-          }
-        : Math.min(GENERATION_LIMITS.timeout.totalMs, remainingMs);
+      const attemptTimeout = Math.min(
+        adminSession ? ADMIN_GENERATION_LIMITS.timeout.totalMs : GENERATION_LIMITS.timeout.totalMs,
+        remainingMs,
+      );
       try {
         const model = createModel(env, config, sessionId);
         const attemptMessages = isPrimary ? messagesWithImages : messagesTextOnly;
@@ -497,12 +521,12 @@ async function runGenerationPipeline(
               : [];
           let rescued = false;
           if (priorMessages.length > 0 && rescueRemainingMs >= MIN_ATTEMPT_MS) {
-            const rescueTimeout = adminSession
-              ? {
-                  totalMs: Math.min(ADMIN_GENERATION_LIMITS.timeout.totalMs, rescueRemainingMs),
-                  stepMs: Math.min(ADMIN_GENERATION_LIMITS.timeout.stepMs, rescueRemainingMs),
-                }
-              : Math.min(GENERATION_LIMITS.timeout.totalMs, rescueRemainingMs);
+            const rescueTimeout = Math.min(
+              adminSession
+                ? ADMIN_GENERATION_LIMITS.timeout.totalMs
+                : GENERATION_LIMITS.timeout.totalMs,
+              rescueRemainingMs,
+            );
             try {
               const rescue = await withDeadline(
                 generateText({
@@ -584,6 +608,7 @@ async function runGenerationPipeline(
         }
         break GENERATION_LOOP;
       } catch (error) {
+        const timedOut = isTimeout(error);
         console.log(
           JSON.stringify({
             event: "attempt_failed",
@@ -592,10 +617,15 @@ async function runGenerationPipeline(
             retryable: isRetryable(error),
             // Never the message: a provider or a tool may fill it with
             // request content, which no log may carry in any scope.
-            error: error instanceof Error ? error.name : typeof error,
+            error: timedOut
+              ? classifyErrorCode(error)
+              : error instanceof Error
+                ? error.name
+                : typeof error,
             ...(APICallError.isInstance(error) && error.statusCode !== undefined
               ? { statusCode: error.statusCode }
               : {}),
+            ...(timedOut ? { attemptDurationMs: Date.now() - attemptStartedAt } : {}),
             ...(error instanceof OutputTruncatedError
               ? {
                   finishReason: error.finishReason,
@@ -622,7 +652,7 @@ async function runGenerationPipeline(
     const outOfTime = isTimeout(error);
     // A DOMException — how the SDK's timeout arrives — is read like an Error.
     const named = error instanceof Error || error instanceof DOMException ? error : null;
-    const code = named === null ? "GENERATION_FAILED" : named.name;
+    const code = classifyErrorCode(error);
     const errorMsg = named === null ? String(error) : named.message;
     if (reservationId !== null) await safeFinish(env.DB, reservationId);
     await safeRecord(env.DB, {

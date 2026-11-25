@@ -42,6 +42,12 @@ import type {
  * structured answer arrives before this fires.
  */
 export const GENERATION_TIMEOUT_MS = 150_000;
+/**
+ * Extended timeout for owner-only server administration turns, sitting 15s
+ * above the Worker's 180s `ADMIN_CHAIN_DEADLINE_MS` so bulk planning replies
+ * settle cleanly before the HTTP client aborts.
+ */
+export const ADMIN_GENERATION_TIMEOUT_MS = 195_000;
 /** Timeout for short Worker control-plane calls. */
 const CONTROL_TIMEOUT_MS = 15_000;
 /** Timeout for one history ingest request; a slow Worker must not hold back the buffer for long. Shutdown waits at least this long for a flush in flight. */
@@ -61,7 +67,7 @@ export async function generate(
     `${workerUrl}/internal/v1/generations`,
     req,
     token,
-    GENERATION_TIMEOUT_MS,
+    req.adminMode === true ? ADMIN_GENERATION_TIMEOUT_MS : GENERATION_TIMEOUT_MS,
   );
   return assertGenerationResult(result);
 }

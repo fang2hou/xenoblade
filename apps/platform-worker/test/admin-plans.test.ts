@@ -486,7 +486,7 @@ describe("admin generation isolation, read-proxy continuation & budget accountin
     expect(Object.keys(nonAdminTools)).not.toContain("admin_plan_rest");
   });
 
-  it("passes elevated maxOutputTokens and step/total timeouts for admin sessions only", async () => {
+  it("passes elevated maxOutputTokens and 120s total timeout (no short per-step cap) for admin sessions only", async () => {
     const db = createTestD1();
     const env = makeEnv(db);
     vi.mocked(generateText).mockResolvedValue({
@@ -499,16 +499,11 @@ describe("admin generation isolation, read-proxy continuation & budget accountin
     await generate(env, adminRequest({ messageId: "m-admin-limits" }));
     const adminCall = vi.mocked(generateText).mock.calls[0]?.[0];
     expect(adminCall?.maxOutputTokens).toBe(ADMIN_GENERATION_LIMITS.maxOutputTokens);
-    expect(adminCall?.timeout).toEqual(
-      expect.objectContaining({
-        totalMs: expect.any(Number),
-        stepMs: expect.any(Number),
-      }),
-    );
-    const adminTimeout = adminCall?.timeout as { totalMs: number; stepMs: number };
-    expect(adminTimeout.totalMs).toBeLessThanOrEqual(ADMIN_GENERATION_LIMITS.timeout.totalMs);
-    expect(adminTimeout.totalMs).toBeGreaterThan(GENERATION_LIMITS.timeout.totalMs);
-    expect(adminTimeout.stepMs).toBeLessThanOrEqual(ADMIN_GENERATION_LIMITS.timeout.stepMs);
+    expect(typeof adminCall?.timeout).toBe("number");
+    const adminTimeout = adminCall?.timeout as number;
+    expect(adminTimeout).toBeLessThanOrEqual(ADMIN_GENERATION_LIMITS.timeout.totalMs);
+    expect(adminTimeout).toBeGreaterThan(GENERATION_LIMITS.timeout.totalMs);
+    expect(adminTimeout).toBeGreaterThanOrEqual(115_000);
 
     await generate(
       env,
@@ -521,6 +516,71 @@ describe("admin generation isolation, read-proxy continuation & budget accountin
     const normalCall = vi.mocked(generateText).mock.calls[1]?.[0];
     expect(normalCall?.maxOutputTokens).toBe(GENERATION_LIMITS.maxOutputTokens);
     expect(typeof normalCall?.timeout).toBe("number");
+    expect(normalCall?.timeout as number).toBeLessThanOrEqual(GENERATION_LIMITS.timeout.totalMs);
+  });
+
+  it("allows a slow 65s single-step admin_plan_batch generation to succeed on primary without tripping a 45s step timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const db = createTestD1();
+      const env = makeEnv(db);
+      const adminTools = createAdminTools({
+        config: CFG,
+        protectedChannelIds: [THREAD_ID, PRIVATE_CHANNEL_ID, CATEGORY_ID],
+        readResults: [],
+      });
+      const batchTool = adminTools.admin_plan_batch as unknown as {
+        execute: (args: unknown) => Promise<Record<string, unknown>>;
+      };
+      const batchOut = await batchTool.execute({
+        operations: [
+          {
+            tool: "role",
+            params: {
+              op: "update",
+              role_id: ROLE_ID,
+              permissions: ["SendMessages", "AttachFiles"],
+            },
+          },
+          {
+            tool: "channel",
+            params: {
+              op: "update",
+              channel_id: PUBLIC_CHANNEL_ID,
+              permission_overwrites: [
+                { target_id: GUILD_ID, target_type: "role", deny_permissions: ["ViewChannel"] },
+                { target_id: ROLE_ID, target_type: "role", allow_permissions: ["ViewChannel"] },
+              ],
+            },
+          },
+        ],
+      });
+
+      vi.mocked(generateText).mockImplementationOnce(async ({ timeout }) => {
+        expect(typeof timeout).toBe("number");
+        expect(timeout as number).toBeGreaterThanOrEqual(115_000);
+        await new Promise((resolve) => setTimeout(resolve, 65_000));
+        return {
+          text: "Phase 1 & 2 planned — please review and approve.",
+          usage: { inputTokens: 19_000, outputTokens: 6_500, inputTokenDetails: {} },
+          toolResults: [{ toolName: "admin_plan_batch", input: {}, output: batchOut }],
+          steps: [{}, {}],
+        } as unknown as Ai.GenerateTextResult<Ai.ToolSet, never, never>;
+      });
+
+      const pending = generate(
+        env,
+        adminRequest({ messageId: "m-slow-batch:ar:1", adminContinuation: true }),
+      );
+      await vi.advanceTimersByTimeAsync(70_000);
+      const res = await pending;
+      expect(res.status).toBe("completed");
+      if (res.status !== "completed") return;
+      expect(res.adminActionPlan?.operations).toHaveLength(2);
+      expect(generateText).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("supports whole-channel permission_overwrites on admin_plan_channel(update) and admin_plan_batch with explicit operation limit", async () => {
