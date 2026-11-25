@@ -16,6 +16,7 @@ const zh = {
   generation: {
     failure: "这次处理失败了，请稍后重试。",
     rateLimited: "请求过于频繁，请稍后再试。",
+    longReplyAttachment: "（完整回复较长，已附在 reply.md 中。）",
   },
   askConfirm: {
     contextNote: (note: string) => `补充：${note}`,
@@ -172,6 +173,7 @@ const zh = {
     categoryMemoriesHeader: (label: string) => `${label}记忆：`,
     noMemories: "没有任何记忆。",
     allMemoriesHeader: "全部记忆：",
+    memoriesAttachmentNote: "记忆列表超出单条消息长度，完整内容见附件 memories.txt。",
     personaLabel: "人设",
     preferenceLabel: "偏好",
   },
@@ -179,7 +181,7 @@ const zh = {
 
 export type Messages = {
   status: { ok: string };
-  generation: { failure: string; rateLimited: string };
+  generation: { failure: string; rateLimited: string; longReplyAttachment: string };
   askConfirm: {
     contextNote: (note: string) => string;
     options: (labels: readonly string[]) => string;
@@ -297,6 +299,7 @@ export type Messages = {
     categoryMemoriesHeader: (label: string) => string;
     noMemories: string;
     allMemoriesHeader: string;
+    memoriesAttachmentNote: string;
     personaLabel: string;
     preferenceLabel: string;
   };
@@ -309,6 +312,7 @@ const en: Messages = {
   generation: {
     failure: "That request failed. Please try again later.",
     rateLimited: "You're sending requests too fast — please wait a moment.",
+    longReplyAttachment: "(Full reply is long — attached as reply.md.)",
   },
   askConfirm: {
     contextNote: (note: string) => `Note: ${note}`,
@@ -484,6 +488,8 @@ const en: Messages = {
     categoryMemoriesHeader: (label: string) => `${label} memories:`,
     noMemories: "No memories at all.",
     allMemoriesHeader: "All memories:",
+    memoriesAttachmentNote:
+      "The memory list is too long for one message. The full list is attached as memories.txt.",
     personaLabel: "persona",
     preferenceLabel: "preference",
   },

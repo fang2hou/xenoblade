@@ -8,7 +8,10 @@
  */
 import { generateText, jsonSchema, tool } from "ai";
 import type { ToolSet } from "ai";
-import { selectModel } from "@xenoblade/ai";
+import { getModelChain, resolveMaxOutputTokens, selectModel } from "@xenoblade/ai";
+
+/** Output token budget for `vision_describe` (includes thinking tokens on reasoning vision models). */
+const VISION_MAX_OUTPUT_TOKENS = 20_480;
 
 export function createVisionTool(env: Env): ToolSet {
   return {
@@ -36,6 +39,7 @@ export function createVisionTool(env: Env): ToolSet {
         const started = Date.now();
         try {
           const model = selectModel(env, { role: "vision" });
+          const visionConfig = getModelChain(env, "vision")[0];
 
           const result = await generateText({
             model,
@@ -53,7 +57,7 @@ export function createVisionTool(env: Env): ToolSet {
                 ],
               },
             ],
-            maxOutputTokens: 2048,
+            maxOutputTokens: resolveMaxOutputTokens(visionConfig, VISION_MAX_OUTPUT_TOKENS),
             timeout: 30_000,
           });
 

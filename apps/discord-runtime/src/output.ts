@@ -1,4 +1,4 @@
-import { MessageFlags, type Message, type SendableChannels } from "discord.js";
+import { AttachmentBuilder, MessageFlags, type Message, type SendableChannels } from "discord.js";
 
 import { isClosingFence, parseOpeningFence, type CodeFence } from "./code-fences";
 
@@ -6,15 +6,89 @@ import { isClosingFence, parseOpeningFence, type CodeFence } from "./code-fences
 export const MAX_MESSAGE_LENGTH = 2000;
 
 /**
+ * Maximum number of 2,000-char inline messages posted for a single reply.
+ * Replies longer than this switch to a fence-balanced preview plus a
+ * `reply.md` attachment so long outputs never flood a channel or trigger
+ * Discord per-channel rate limits.
+ */
+export const MAX_INLINE_CHUNKS = 5;
+
+/** Filename for a reply delivered as a UTF-8 Markdown attachment. */
+export const REPLY_ATTACHMENT_NAME = "reply.md";
+
+/** Conservative attachment byte ceiling below Discord's 10 MiB upload limit. */
+export const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+
+const DEFAULT_LONG_REPLY_NOTICE = "（完整回复较长，已附在 reply.md 中。）";
+const ATTACHMENT_TRUNCATED_NOTE =
+  "\n\n…[truncated: exceeded 8 MiB Discord attachment safety limit]";
+
+export interface PostReplyOptions {
+  /** Localized notice appended below the preview when `reply.md` is attached. */
+  attachmentNotice?: string;
+}
+
+/**
  * Message payload for bot reply text. `SuppressEmbeds` is what stops Discord
  * from rendering link preview cards — masked links alone do not — so reply
  * text is never sent without it.
  */
-export function replyPayload(content: string): {
+export function replyPayload(
+  content: string,
+  files?: AttachmentBuilder[],
+): {
   content: string;
   flags: MessageFlags.SuppressEmbeds;
+  files?: AttachmentBuilder[];
 } {
-  return { content, flags: MessageFlags.SuppressEmbeds };
+  return files === undefined || files.length === 0
+    ? { content, flags: MessageFlags.SuppressEmbeds }
+    : { content, flags: MessageFlags.SuppressEmbeds, files };
+}
+
+/** Encode UTF-8 attachment bytes safely under {@link MAX_ATTACHMENT_BYTES}. */
+function buildReplyAttachment(content: string): AttachmentBuilder {
+  let buf = Buffer.from(content, "utf8");
+  if (buf.byteLength > MAX_ATTACHMENT_BYTES) {
+    const suffix = Buffer.from(ATTACHMENT_TRUNCATED_NOTE, "utf8");
+    const keepBytes = Math.max(0, MAX_ATTACHMENT_BYTES - suffix.byteLength);
+    // Decode via TextDecoder/slice without leaving a dangling UTF-8 continuation byte.
+    let end = keepBytes;
+    while (end > 0 && ((buf[end] ?? 0) & 0xc0) === 0x80) {
+      end -= 1;
+    }
+    buf = Buffer.concat([buf.subarray(0, end), suffix]);
+  }
+  return new AttachmentBuilder(buf, { name: REPLY_ATTACHMENT_NAME });
+}
+
+/**
+ * Build a single ≤2000-char preview message plus a `reply.md` attachment for
+ * replies that exceed {@link MAX_INLINE_CHUNKS}. Uses `sliceIntoChunks` for
+ * the preview so any open code fence is closed cleanly and no masked link is
+ * split across the cut.
+ */
+export function buildLongReplyPayload(
+  content: string,
+  attachmentNotice: string = DEFAULT_LONG_REPLY_NOTICE,
+): {
+  content: string;
+  flags: MessageFlags.SuppressEmbeds;
+  files: AttachmentBuilder[];
+} {
+  const notice =
+    attachmentNotice.length <= MAX_MESSAGE_LENGTH
+      ? attachmentNotice
+      : attachmentNotice.slice(0, MAX_MESSAGE_LENGTH);
+  const previewBudget = MAX_MESSAGE_LENGTH - notice.length - 2;
+  const preview =
+    previewBudget > 0 ? (sliceIntoChunks(content, previewBudget)[0] ?? "").trimEnd() : "";
+  const messageContent = preview === "" ? notice : `${preview}\n\n${notice}`;
+  return {
+    content: messageContent,
+    flags: MessageFlags.SuppressEmbeds,
+    files: [buildReplyAttachment(content)],
+  };
 }
 
 /** Send a typing indicator to a channel. Never throws. */
@@ -34,19 +108,28 @@ export async function sendTyping(channel: SendableChannels): Promise<void> {
 
 /**
  * Post a reply to a channel, splitting content into ≤2000-char chunks when
- * needed. Chunks are split on newline boundaries first, then hard-wrapped,
- * and a code fence spanning two chunks is closed and reopened across the
- * boundary (see {@link sliceIntoChunks}). Returns the posted messages, head
- * chunk first.
+ * needed (up to {@link MAX_INLINE_CHUNKS} messages). Chunks are split on
+ * newline boundaries first, then hard-wrapped, and a code fence spanning two
+ * chunks is closed and reopened across the boundary (see
+ * {@link sliceIntoChunks}). Replies exceeding {@link MAX_INLINE_CHUNKS} are
+ * sent as one ≤2000-char preview plus a `reply.md` attachment to prevent
+ * channel flooding. Returns the posted messages, head chunk first.
  *
  * No streaming, no edit loop — one typing indicator earlier, then a single
  * complete post here.
  */
-export async function postReply(target: SendableChannels, content: string): Promise<Message[]> {
+export async function postReply(
+  target: SendableChannels,
+  content: string,
+  options?: PostReplyOptions,
+): Promise<Message[]> {
   if (content.trim() === "") {
     throw new Error("postReply: content is empty after trim");
   }
   const chunks = sliceIntoChunks(content, MAX_MESSAGE_LENGTH);
+  if (chunks.length > MAX_INLINE_CHUNKS) {
+    return [await target.send(buildLongReplyPayload(content, options?.attachmentNotice))];
+  }
   const posted: Message[] = [];
   for (const chunk of chunks) {
     posted.push(await target.send(replyPayload(chunk)));

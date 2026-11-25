@@ -1,7 +1,7 @@
 import { generateText, jsonSchema, tool } from "ai";
 import type { Tool } from "ai";
 
-import { selectModel } from "@xenoblade/ai";
+import { getModelChain, resolveMaxOutputTokens, selectModel } from "@xenoblade/ai";
 
 import { isUrlSafe } from "./ssrf";
 
@@ -10,6 +10,9 @@ const READ_URL_CONTENT_THRESHOLD = 2000;
 
 /** Maximum characters of raw page text kept before compression/truncation. */
 const READ_URL_MAX_CONTENT = 8000;
+
+/** Output token budget for compressing long web pages (includes thinking tokens). */
+const READ_URL_SUMMARY_MAX_OUTPUT_TOKENS = 40_960;
 
 /**
  * Strip HTML to readable text: remove script/style/nav boilerplate, drop all
@@ -104,13 +107,17 @@ export function createReadUrlTool(env: Env): Tool {
       // Compress long content via the summarization model.
       if (truncated.length > READ_URL_CONTENT_THRESHOLD) {
         try {
+          const summaryConfig = getModelChain(env, "summarization")[0];
           const summary = await generateText({
             model: selectModel(env, { role: "summarization" }),
             prompt:
               "Extract key facts from this page. Preserve numbers, dates, names. " +
               "Remove ads/navigation. Output markdown.\n\n" +
               truncated,
-            maxOutputTokens: 4096,
+            maxOutputTokens: resolveMaxOutputTokens(
+              summaryConfig,
+              READ_URL_SUMMARY_MAX_OUTPUT_TOKENS,
+            ),
             timeout: 30_000,
           });
           if (summary.text.trim()) {

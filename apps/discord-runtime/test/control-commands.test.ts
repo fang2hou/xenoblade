@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ChatInputCommandInteraction } from "discord.js";
+import type { AttachmentBuilder, ChatInputCommandInteraction } from "discord.js";
 import type { UserSettings } from "@xenoblade/contracts";
 
-import { handleControlCommand } from "../src/control-commands";
+import { handleControlCommand, MEMORIES_ATTACHMENT_NAME } from "../src/control-commands";
 import type { EnvConfig } from "../src/env";
 import { resetLanguageCache } from "../src/language";
 import { messages } from "../src/i18n";
+import { MAX_MESSAGE_LENGTH } from "../src/output";
 
 const env: EnvConfig = {
   discordBotToken: "test-token",
@@ -46,6 +47,7 @@ function makeInteraction(options: InteractionOptions = {}) {
   } = options;
   const calls: string[] = [];
   const editContents: string[] = [];
+  const editFiles: Array<AttachmentBuilder[] | undefined> = [];
   const bodies: unknown[] = [];
   const interaction = {
     commandName: command,
@@ -64,17 +66,19 @@ function makeInteraction(options: InteractionOptions = {}) {
     deferReply: async () => {
       calls.push("defer");
     },
-    editReply: async (editOptions: string | { content?: string }) => {
+    editReply: async (editOptions: string | { content?: string; files?: AttachmentBuilder[] }) => {
       calls.push("edit");
       editContents.push(
         typeof editOptions === "string" ? editOptions : (editOptions.content ?? ""),
       );
+      editFiles.push(typeof editOptions === "string" ? undefined : editOptions.files);
     },
   };
   return {
     interaction: interaction as unknown as ChatInputCommandInteraction,
     calls,
     editContents,
+    editFiles,
     bodies,
   };
 }
@@ -212,6 +216,38 @@ describe("handleControlCommand preference", () => {
 });
 
 describe("handleControlCommand memory", () => {
+  it("attaches memories.txt when /memory show exceeds Discord's 2,000-character limit", async () => {
+    const { interaction, editContents, editFiles } = makeInteraction({
+      command: "memory",
+      subcommand: "show",
+    });
+    const memories = Array.from({ length: 12 }, (_, i) => ({
+      category: "fact" as const,
+      key: `key_${i}`,
+      value: "v".repeat(250),
+      updatedAt: i + 1,
+    }));
+    const calls: string[] = [];
+    const bodies: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      stubFetch(calls, bodies, {
+        "/internal/v1/settings": () => ({ status: "ok", settings: settingsFor() }),
+        "/internal/v1/memory": () => ({ status: "ok", memories }),
+      }),
+    );
+
+    await handleControlCommand(interaction, env);
+
+    expect(editContents[0]!.length).toBeLessThanOrEqual(MAX_MESSAGE_LENGTH);
+    expect(editContents[0]).toContain(ZH.memoriesAttachmentNote);
+    expect(editFiles[0]).toHaveLength(1);
+    expect(editFiles[0]?.[0]?.name).toBe(MEMORIES_ATTACHMENT_NAME);
+    const attached = Buffer.from(editFiles[0]?.[0]?.attachment as Buffer).toString("utf8");
+    expect(attached).toContain("- [fact] key_0:");
+    expect(attached).toContain("- [fact] key_11:");
+  });
+
   it("clears all memories", async () => {
     const { interaction, editContents, bodies } = makeInteraction({
       command: "memory",

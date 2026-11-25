@@ -1,6 +1,14 @@
-import type { Message, SendableChannels } from "discord.js";
+import type { AttachmentBuilder, Message, SendableChannels } from "discord.js";
 
-import { MAX_MESSAGE_LENGTH, postReply, replyPayload, sliceIntoChunks } from "./output";
+import {
+  buildLongReplyPayload,
+  MAX_INLINE_CHUNKS,
+  MAX_MESSAGE_LENGTH,
+  postReply,
+  replyPayload,
+  sliceIntoChunks,
+  type PostReplyOptions,
+} from "./output";
 import { stagedMilestones } from "./i18n";
 
 /**
@@ -93,10 +101,10 @@ export class StagedStatus {
    * Returns every message making up the final reply, head chunk first — the
    * settled placeholder (or first fresh post) followed by continuations.
    */
-  settle(content: string): Promise<Message[]> {
+  settle(content: string, options?: PostReplyOptions): Promise<Message[]> {
     this.settled = true;
     this.clearTimers();
-    return this.runExclusive(() => this.applySettled(content));
+    return this.runExclusive(() => this.applySettled(content, options));
   }
 
   /** Stop staging and delete the placeholder, if any (silent outcomes). */
@@ -150,14 +158,33 @@ export class StagedStatus {
     }
   }
 
-  private async applySettled(content: string): Promise<Message[]> {
+  private async applySettled(content: string, options?: PostReplyOptions): Promise<Message[]> {
+    if (content.trim() === "") {
+      throw new Error("postReply: content is empty after trim");
+    }
     const placeholder = this.placeholder;
     this.placeholder = null;
     if (!placeholder) {
       // Fast path: no placeholder was ever posted; behave exactly like postReply.
-      return postReply(this.channel, content);
+      return postReply(this.channel, content, options);
     }
     const chunks = sliceIntoChunks(content, MAX_MESSAGE_LENGTH);
+    if (chunks.length > MAX_INLINE_CHUNKS) {
+      const longReply = buildLongReplyPayload(content, options?.attachmentNotice);
+      if (await this.editPlaceholder(placeholder, longReply.content, longReply.files)) {
+        log("staged_placeholder_settled", this.channel.id, {
+          edits: this.edits,
+          attachment: true,
+        });
+        return [placeholder];
+      }
+      log("staged_settle_fallback", this.channel.id, { attachment: true });
+      const posted = [await this.channel.send(longReply)];
+      await placeholder.delete().catch((error) => {
+        log("staged_placeholder_delete_error", this.channel.id, { error: String(error) });
+      });
+      return posted;
+    }
     const head = chunks[0];
     if (head !== undefined && (await this.editPlaceholder(placeholder, head))) {
       log("staged_placeholder_settled", this.channel.id, { edits: this.edits });
@@ -169,7 +196,7 @@ export class StagedStatus {
     }
     // Never leave the user without the reply or a stale placeholder.
     log("staged_settle_fallback", this.channel.id);
-    const posted = await postReply(this.channel, content);
+    const posted = await postReply(this.channel, content, options);
     await placeholder.delete().catch((error) => {
       log("staged_placeholder_delete_error", this.channel.id, { error: String(error) });
     });
@@ -177,10 +204,15 @@ export class StagedStatus {
   }
 
   /**
-   * Edit the placeholder to `text`, retrying once after a backoff on rate
-   * limits. Only completed edits count toward the cap. Returns success.
+   * Edit the placeholder to `text` (and optional files), retrying once after a
+   * backoff on rate limits. Only completed edits count toward the cap.
+   * Returns success.
    */
-  private async editPlaceholder(message: Message, text: string): Promise<boolean> {
+  private async editPlaceholder(
+    message: Message,
+    text: string,
+    files?: AttachmentBuilder[],
+  ): Promise<boolean> {
     for (let attempt = 0; attempt < 2; attempt++) {
       if (attempt > 0) {
         await new Promise<void>((resolve) => {
@@ -188,7 +220,7 @@ export class StagedStatus {
         });
       }
       try {
-        await message.edit(replyPayload(text));
+        await message.edit(replyPayload(text, files));
         this.edits += 1;
         return true;
       } catch (error) {

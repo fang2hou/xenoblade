@@ -89,6 +89,6 @@ Do not infer UI language from conversation language.
 - DM context lives under `discord:@me:<channelId>` keys that cannot collide with guild keys; keep it that way.
 - Staged status placeholder is capped at 4 edits per generation (ADR-003 amendment) — do not raise casually.
 - TypeScript strict + `noUncheckedIndexedAccess`; guard every indexed access.
-- Budget guardrails: 1024 tokens reserved per generation, 2M tokens / 24h rolling window.
+- Budget guardrails: 1024 tokens reserved per generation, 20M tokens / 24h rolling window.
 
 Depth: [DEVELOPMENT.md](./DEVELOPMENT.md) for workflow and toolchain, [CONTRIBUTING.md](./CONTRIBUTING.md) for PR rules, [ARCHITECTURE.md](./ARCHITECTURE.md) for invariants.

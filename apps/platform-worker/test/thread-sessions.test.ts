@@ -8,6 +8,7 @@ import {
   getLastTurn,
   getThreadSession,
   handleThreadState,
+  MAX_LAST_TURN_CONTENT_CHARS,
   recordLastReply,
   recordLastTurn,
   setThreadActive,
@@ -800,6 +801,29 @@ describe("container_last_turns", () => {
         2000,
       ),
     ).resolves.toBeUndefined();
+  });
+
+  it("clamps oversized prompt and reply text stored in container_last_turns", async () => {
+    const db = createTestD1();
+    const huge = "a".repeat(MAX_LAST_TURN_CONTENT_CHARS + 5_000);
+    await recordLastTurn(db, { ...TURN, triggerContent: huge, assistantReply: huge }, 1000);
+
+    const stored = await getLastTurn(db, TURN.containerId);
+    expect(stored?.triggerContent.length).toBe(MAX_LAST_TURN_CONTENT_CHARS);
+    expect(stored?.triggerContent.endsWith("…[truncated]")).toBe(true);
+    expect(stored?.assistantReply.length).toBe(MAX_LAST_TURN_CONTENT_CHARS);
+    expect(stored?.assistantReply.endsWith("…[truncated]")).toBe(true);
+
+    const hugeRetry = "b".repeat(MAX_LAST_TURN_CONTENT_CHARS + 3_000);
+    await recordLastReply(
+      db,
+      { containerId: TURN.containerId, scopeId: "g1", assistantReply: hugeRetry },
+      2000,
+    );
+    const updated = await getLastTurn(db, TURN.containerId);
+    expect(updated?.assistantReply.length).toBe(MAX_LAST_TURN_CONTENT_CHARS);
+    expect(updated?.assistantReply.startsWith("b")).toBe(true);
+    expect(updated?.assistantReply.endsWith("…[truncated]")).toBe(true);
   });
 });
 

@@ -6,6 +6,7 @@ import {
   createModel,
   GENERATION_LIMITS,
   getModelChain,
+  resolveMaxOutputTokens,
 } from "@xenoblade/ai";
 import type {
   AdminActionPlan,
@@ -446,11 +447,10 @@ async function runGenerationPipeline(
         throw new GenerationDeadlineError();
       }
       usedModel = config.id;
-      const attemptMaxOutputTokens =
-        config.maxOutputTokens ??
-        (adminSession
-          ? ADMIN_GENERATION_LIMITS.maxOutputTokens
-          : GENERATION_LIMITS.maxOutputTokens);
+      const attemptMaxOutputTokens = resolveMaxOutputTokens(
+        config,
+        adminSession ? ADMIN_GENERATION_LIMITS.maxOutputTokens : GENERATION_LIMITS.maxOutputTokens,
+      );
       const attemptTimeout = Math.min(
         adminSession ? ADMIN_GENERATION_LIMITS.timeout.totalMs : GENERATION_LIMITS.timeout.totalMs,
         remainingMs,

@@ -1,14 +1,21 @@
 import { describe, it, expect } from "vitest";
 import { MessageFlags } from "discord.js";
-import type { SendableChannels } from "discord.js";
+import type { AttachmentBuilder, SendableChannels } from "discord.js";
 
-import { postReply, sliceIntoChunks } from "../src/output";
+import {
+  buildLongReplyPayload,
+  MAX_INLINE_CHUNKS,
+  MAX_MESSAGE_LENGTH,
+  postReply,
+  REPLY_ATTACHMENT_NAME,
+  sliceIntoChunks,
+} from "../src/output";
 
 describe("postReply", () => {
   it("sends every chunk with SuppressEmbeds so Discord renders no link preview cards", async () => {
-    const sent: Array<{ content: string; flags?: number }> = [];
+    const sent: Array<{ content: string; flags?: number; files?: AttachmentBuilder[] }> = [];
     const channel = {
-      send: async (options: { content: string; flags?: number }) => {
+      send: async (options: { content: string; flags?: number; files?: AttachmentBuilder[] }) => {
         sent.push(options);
         return { id: `m${sent.length}` };
       },
@@ -22,6 +29,53 @@ describe("postReply", () => {
       { content: "b".repeat(1_500), flags: MessageFlags.SuppressEmbeds },
     ]);
     expect(posted.map((message) => message.id)).toEqual(["m1", "m2"]);
+  });
+
+  it("falls back to a fence-balanced preview + reply.md attachment when a reply exceeds MAX_INLINE_CHUNKS", async () => {
+    const sent: Array<{ content: string; flags?: number; files?: AttachmentBuilder[] }> = [];
+    const channel = {
+      send: async (options: { content: string; flags?: number; files?: AttachmentBuilder[] }) => {
+        sent.push(options);
+        return { id: `m${sent.length}` };
+      },
+    } as unknown as SendableChannels;
+
+    // 7 paragraphs × 1,800 chars = 7 chunks (> MAX_INLINE_CHUNKS = 5), starting with a code block.
+    const longContent = [
+      "Intro.",
+      "```ts",
+      ...Array.from({ length: 7 }, (_, i) => `const part${i} = "${"x".repeat(1_750)}";`),
+      "```",
+    ].join("\n");
+    expect(sliceIntoChunks(longContent, MAX_MESSAGE_LENGTH).length).toBeGreaterThan(
+      MAX_INLINE_CHUNKS,
+    );
+
+    const posted = await postReply(channel, longContent, {
+      attachmentNotice: "(Full reply attached.)",
+    });
+
+    expect(posted).toHaveLength(1);
+    expect(sent).toHaveLength(1);
+    const payload = sent[0]!;
+    expect(payload.flags).toBe(MessageFlags.SuppressEmbeds);
+    expect(payload.content.length).toBeLessThanOrEqual(MAX_MESSAGE_LENGTH);
+    expect(payload.content).toContain("(Full reply attached.)");
+    expect(endsInsideFence(payload.content)).toBe(false);
+    expect(payload.files).toHaveLength(1);
+    expect(payload.files?.[0]?.name).toBe(REPLY_ATTACHMENT_NAME);
+    expect(Buffer.from(payload.files?.[0]?.attachment as Buffer).toString("utf8")).toBe(
+      longContent,
+    );
+  });
+
+  it("keeps buildLongReplyPayload within 2000 chars even for giant single-line replies", () => {
+    const huge = "z".repeat(20_000);
+    const payload = buildLongReplyPayload(huge);
+    expect(payload.content.length).toBeLessThanOrEqual(MAX_MESSAGE_LENGTH);
+    expect(payload.flags).toBe(MessageFlags.SuppressEmbeds);
+    expect(payload.files[0]?.name).toBe(REPLY_ATTACHMENT_NAME);
+    expect(Buffer.from(payload.files[0]?.attachment as Buffer).toString("utf8")).toBe(huge);
   });
 });
 
