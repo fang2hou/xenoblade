@@ -1,6 +1,8 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
 import { generateText, isStepCount, jsonSchema, tool } from "ai";
 import {
+  ADMIN_GENERATION_LIMITS,
+  GENERATION_LIMITS,
   selectModel,
   composeSystemPrompt,
   getModelChain,
@@ -134,6 +136,11 @@ describe("getModelChain", () => {
   it("treats blank HYPER_API_KEY as unset and stays on OpenRouter defaults", () => {
     const blankHyper: AiEnv = { HYPER_API_KEY: "   ", OPENROUTER_API_KEY: "test-key" };
     expect(getModelChain(blankHyper, "generation")).toEqual(getModelChain(baseEnv, "generation"));
+  });
+
+  it("allocates generous output token limits for thinking models on normal and admin turns", () => {
+    expect(GENERATION_LIMITS.maxOutputTokens).toBe(16_384);
+    expect(ADMIN_GENERATION_LIMITS.maxOutputTokens).toBe(32_768);
   });
 });
 

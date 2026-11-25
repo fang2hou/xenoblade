@@ -53,7 +53,7 @@ export function createVisionTool(env: Env): ToolSet {
                 ],
               },
             ],
-            maxOutputTokens: 512,
+            maxOutputTokens: 2048,
             timeout: 30_000,
           });
 

@@ -110,7 +110,7 @@ export function createReadUrlTool(env: Env): Tool {
               "Extract key facts from this page. Preserve numbers, dates, names. " +
               "Remove ads/navigation. Output markdown.\n\n" +
               truncated,
-            maxOutputTokens: 512,
+            maxOutputTokens: 4096,
             timeout: 30_000,
           });
           if (summary.text.trim()) {

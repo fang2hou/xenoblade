@@ -499,6 +499,7 @@ describe("admin generation isolation, read-proxy continuation & budget accountin
     await generate(env, adminRequest({ messageId: "m-admin-limits" }));
     const adminCall = vi.mocked(generateText).mock.calls[0]?.[0];
     expect(adminCall?.maxOutputTokens).toBe(ADMIN_GENERATION_LIMITS.maxOutputTokens);
+    expect(ADMIN_GENERATION_LIMITS.maxOutputTokens).toBe(32_768);
     expect(typeof adminCall?.timeout).toBe("number");
     const adminTimeout = adminCall?.timeout as number;
     expect(adminTimeout).toBeLessThanOrEqual(ADMIN_GENERATION_LIMITS.timeout.totalMs);

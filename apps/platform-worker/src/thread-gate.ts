@@ -209,7 +209,7 @@ export async function handleThreadShouldReply(
         model,
         system: GATE_SYSTEM,
         prompt,
-        maxOutputTokens: 32,
+        maxOutputTokens: 1024,
         maxRetries: 0,
         timeout: remainingMs,
         ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),

@@ -52,7 +52,7 @@ const OPENROUTER_DEFAULT_CHAINS: Record<ModelRole, ModelConfig[]> = {
 };
 
 export const GENERATION_LIMITS = {
-  maxOutputTokens: 4096,
+  maxOutputTokens: 16_384,
   timeout: { totalMs: 60_000, firstChunkMs: 15_000, chunkMs: 5_000 },
 } as const;
 
@@ -63,7 +63,7 @@ export const GENERATION_LIMITS = {
  * routinely takes 50–90s on OpenRouter.
  */
 export const ADMIN_GENERATION_LIMITS = {
-  maxOutputTokens: 16_384,
+  maxOutputTokens: 32_768,
   timeout: { totalMs: 120_000 },
 } as const;
 
