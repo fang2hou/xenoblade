@@ -457,7 +457,8 @@ async function runGenerationPipeline(
       );
       try {
         const model = createModel(env, config, sessionId);
-        const attemptMessages = isPrimary ? messagesWithImages : messagesTextOnly;
+        const supportsVision = config.vision ?? isPrimary;
+        const attemptMessages = supportsVision ? messagesWithImages : messagesTextOnly;
 
         result = await withDeadline(
           generateText({

@@ -10,6 +10,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@ai-sdk/openai-compatible": "^3.0.26",
     "@openrouter/ai-sdk-provider": "3.0.0",
     "ai": "7.0.55"
   }
