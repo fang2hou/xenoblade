@@ -292,4 +292,88 @@ describe("handleAdminConfirmInteraction", () => {
     expect(patch).not.toHaveBeenCalled();
     expect(edit).toHaveBeenCalledWith(expect.objectContaining({ components: [] }));
   });
+
+  it("updates the approval card in-place with executing status, removes buttons immediately, and cleans up any concurrent busy ephemeral notice on completion", async () => {
+    const registry = new AdminConfirmRegistry();
+    const plan = makePlan("high");
+    const edit = vi.fn<AsyncVoid>(async () => undefined);
+    registry.register(plan.id, {
+      plan,
+      message: { id: "msg-busy", edit } as unknown as Message,
+      texts: messages("zh").adminConfirm,
+      busy: false,
+      timer: undefined,
+    });
+    vi.mocked(aiClient.claimAdminPlan).mockResolvedValue({ status: "ok", plan });
+    vi.mocked(aiClient.completeAdminPlan).mockResolvedValue({ status: "ok" });
+
+    let releaseDelete!: () => void;
+    const deleteInFlight = new Promise<void>((resolve) => {
+      releaseDelete = resolve;
+    });
+    const { client, del } = makeClient();
+    del.mockImplementationOnce(async () => {
+      await deleteInFlight;
+    });
+
+    const update = vi.fn<AsyncVoid>(async () => undefined);
+    const firstClick = handleAdminConfirmInteraction(
+      {
+        customId: adminButtonCustomId("approve", plan.id),
+        guildId: GUILD_ID,
+        user: { id: OWNER_ID },
+        message: { id: "msg-busy", edit },
+        update,
+      } as unknown as MessageComponentInteraction,
+      client,
+      ENV,
+      registry,
+    );
+
+    // Wait until execution is in flight.
+    await vi.waitFor(() => {
+      expect(del).toHaveBeenCalledTimes(1);
+    });
+    expect(update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: messages("zh").adminConfirm.executing(1),
+        components: [],
+      }),
+    );
+
+    // A concurrent double-click receives an ephemeral busy notice that is cleaned up once execution finishes.
+    const secondReply = vi.fn<AsyncVoid>(async () => undefined);
+    const secondDeleteReply = vi.fn<AsyncVoid>(async () => undefined);
+    await handleAdminConfirmInteraction(
+      {
+        customId: adminButtonCustomId("approve", plan.id),
+        guildId: GUILD_ID,
+        user: { id: OWNER_ID },
+        message: { id: "msg-busy", edit },
+        reply: secondReply,
+        deleteReply: secondDeleteReply,
+      } as unknown as MessageComponentInteraction,
+      client,
+      ENV,
+      registry,
+    );
+    expect(secondReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: messages("zh").adminConfirm.busy,
+        flags: MessageFlags.Ephemeral,
+      }),
+    );
+    expect(secondDeleteReply).not.toHaveBeenCalled();
+
+    releaseDelete();
+    await firstClick;
+
+    expect(secondDeleteReply).toHaveBeenCalledTimes(1);
+    expect(edit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining("1/1"),
+        components: [],
+      }),
+    );
+  });
 });

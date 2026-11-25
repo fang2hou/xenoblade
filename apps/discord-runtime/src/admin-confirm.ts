@@ -41,6 +41,8 @@ export interface AdminConfirmEntry {
   texts: AdminConfirmTexts;
   busy: boolean;
   timer: NodeJS.Timeout | undefined;
+  /** Cleanup hooks for any ephemeral busy notices sent on concurrent double-clicks. */
+  busyCleanups?: Array<() => Promise<void>>;
 }
 
 /**
@@ -279,7 +281,15 @@ export function renderExecutionOutcome(
 }
 
 function settle(registry: AdminConfirmRegistry, planId: string, entry?: AdminConfirmEntry): void {
-  if (entry !== undefined) clearTimeout(entry.timer);
+  if (entry !== undefined) {
+    clearTimeout(entry.timer);
+    if (entry.busyCleanups !== undefined) {
+      const cleanups = entry.busyCleanups.splice(0);
+      for (const cleanup of cleanups) {
+        void cleanup().catch(() => undefined);
+      }
+    }
+  }
   registry.remove(planId);
 }
 
@@ -368,17 +378,46 @@ async function replyEphemeral(
   });
 }
 
+/**
+ * Atomically switch the approval card to an in-progress state (removing its
+ * buttons immediately so accidental double-clicks cannot fire). Uses
+ * `interaction.update` when available, falling back to `deferUpdate` + edit.
+ */
+async function markCardExecuting(
+  interaction: MessageComponentInteraction,
+  content: string,
+): Promise<void> {
+  if (typeof interaction.update === "function") {
+    try {
+      await interaction.update({
+        content,
+        components: [],
+        allowedMentions: NO_MENTIONS,
+      });
+      return;
+    } catch {
+      // Fall through to deferUpdate + message.edit below.
+    }
+  }
+  await interaction.deferUpdate().catch(() => undefined);
+  await retireCard(interaction.message, content);
+}
+
 /** Resolve a plan from in-memory registry or D1 (supporting Runtime restarts within TTL). */
 async function loadPendingPlan(
   planId: string,
   env: EnvConfig,
   registry: AdminConfirmRegistry,
-): Promise<{ plan: AdminActionPlan; entry?: AdminConfirmEntry } | { error: "expired" | "busy" }> {
+): Promise<
+  | { plan: AdminActionPlan; entry?: AdminConfirmEntry }
+  | { error: "expired" }
+  | { error: "busy"; entry: AdminConfirmEntry }
+> {
   const admin = env.admin;
   if (admin == null) return { error: "expired" };
   const entry = registry.get(planId);
   if (entry !== undefined) {
-    if (entry.busy) return { error: "busy" };
+    if (entry.busy) return { error: "busy", entry };
     if (Date.now() >= entry.plan.expiresAt) return { error: "expired" };
     return { plan: entry.plan, entry };
   }
@@ -432,7 +471,20 @@ export async function handleAdminConfirmInteraction(
 
   const loaded = await loadPendingPlan(parsed.planId, env, registry);
   if ("error" in loaded) {
-    await replyEphemeral(interaction, loaded.error === "busy" ? texts.busy : texts.expiredNotice);
+    if (loaded.error === "busy") {
+      await replyEphemeral(interaction, texts.busy);
+      if (typeof interaction.deleteReply === "function") {
+        loaded.entry.busyCleanups ??= [];
+        loaded.entry.busyCleanups.push(() =>
+          interaction.deleteReply().then(
+            () => undefined,
+            () => undefined,
+          ),
+        );
+      }
+      return;
+    }
+    await replyEphemeral(interaction, texts.expiredNotice);
     return;
   }
   const { plan, entry } = loaded;
@@ -459,7 +511,7 @@ export async function handleAdminConfirmInteraction(
   }
 
   if (entry !== undefined) entry.busy = true;
-  await interaction.deferUpdate().catch(() => undefined);
+  await markCardExecuting(interaction, texts.executing(plan.operations.length));
 
   let claimedPlan: AdminActionPlan;
   try {
@@ -484,7 +536,7 @@ export async function handleAdminConfirmInteraction(
     }
     claimedPlan = claim.plan;
   } catch (error) {
-    if (entry !== undefined) entry.busy = false;
+    settle(registry, plan.id, entry);
     console.log(
       JSON.stringify({
         event: "admin_confirm_claim_error",
