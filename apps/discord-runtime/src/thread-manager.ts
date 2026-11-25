@@ -17,9 +17,11 @@ import type {
   ThreadSession,
   ThreadSessionRequest,
   ThreadSessionResponse,
+  ThreadShouldReplyRequest,
+  ThreadShouldReplyResponse,
 } from "@xenoblade/contracts";
 
-import { checkChannelAllowed, threadSessionOp } from "./ai-client";
+import { checkChannelAllowed, shouldReplyInThread, threadSessionOp } from "./ai-client";
 import { fetchHistory } from "./history";
 
 // ── Threads started on a summon ───────────────────────────────────────────
@@ -287,6 +289,8 @@ export interface ThreadSessionsOptions {
   send?: (req: ThreadSessionRequest) => Promise<ThreadSessionResponse>;
   /** Asks whether the Worker answers in a channel — the Worker client, unless a test stubs it. */
   ask?: (req: ChannelAllowedRequest) => Promise<ChannelAllowedResponse>;
+  /** Asks the Layer 2 semantic gate whether an ambiguous thread-chat message is for the bot. */
+  shouldReply?: (req: ThreadShouldReplyRequest) => Promise<ThreadShouldReplyResponse>;
 }
 
 /**
@@ -303,11 +307,70 @@ export interface ThreadSessionsOptions {
 export class ThreadSessions {
   private readonly send: (req: ThreadSessionRequest) => Promise<ThreadSessionResponse>;
   private readonly ask: (req: ChannelAllowedRequest) => Promise<ChannelAllowedResponse>;
+  private readonly gate: (req: ThreadShouldReplyRequest) => Promise<ThreadShouldReplyResponse>;
   private readonly remembered = new Map<string, Remembered>();
+  /**
+   * Threads whose latest human activity was skipped as human-to-human side-talk
+   * (Layer 1 or Layer 2), cleared once the bot answers or is explicitly
+   * summoned there. Triggers Layer 2 on the next un-mentioned follow-up even
+   * before multiple humans appear in the recent window.
+   */
+  private readonly sideTalkThreads = new Set<string>();
 
   constructor(options: ThreadSessionsOptions) {
     this.send = options.send ?? ((req) => threadSessionOp(req, options.workerUrl, options.token));
     this.ask = options.ask ?? ((req) => checkChannelAllowed(req, options.workerUrl, options.token));
+    this.gate =
+      options.shouldReply ?? ((req) => shouldReplyInThread(req, options.workerUrl, options.token));
+  }
+
+  /** Record that the thread just saw skipped human-to-human side-talk. */
+  markSideTalk(threadId: string): void {
+    this.sideTalkThreads.delete(threadId);
+    this.sideTalkThreads.add(threadId);
+    if (this.sideTalkThreads.size > MAX_REMEMBERED_THREADS) {
+      const oldest = this.sideTalkThreads.values().next().value;
+      if (oldest !== undefined) this.sideTalkThreads.delete(oldest);
+    }
+  }
+
+  /** Clear the side-talk flag once the bot is addressed or replies in the thread. */
+  clearSideTalk(threadId: string): void {
+    this.sideTalkThreads.delete(threadId);
+  }
+
+  /** True when human-to-human side-talk was skipped since the bot's last turn in this thread. */
+  hasRecentSideTalk(threadId: string): boolean {
+    return this.sideTalkThreads.has(threadId);
+  }
+
+  /**
+   * Ask the Worker's Layer 2 semantic gate whether an ambiguous followed-thread
+   * message is addressed to the bot. Returns `null` on network/gate failure so
+   * the caller fails open rather than dropping a real follow-up.
+   */
+  async checkShouldReply(req: ThreadShouldReplyRequest): Promise<boolean | null> {
+    try {
+      const response = await this.gate(req);
+      if (response.status === "ok") return response.shouldReply;
+      console.log(
+        JSON.stringify({
+          event: "thread_gate_client_error",
+          messageId: req.messageId,
+          code: response.code,
+        }),
+      );
+      return null;
+    } catch (error) {
+      console.log(
+        JSON.stringify({
+          event: "thread_gate_client_error",
+          messageId: req.messageId,
+          detail: errorName(error),
+        }),
+      );
+      return null;
+    }
   }
 
   /**

@@ -155,8 +155,26 @@ export async function handleMessageCreate(
         runtime.threadSessions.isFollowed(thread),
       );
       if (trigger.kind === "none") return;
-      if (trigger.kind === "summon" && trigger.resume) {
-        await runtime.threadSessions.follow(thread, message.author.id);
+      if (trigger.kind === "skipped") {
+        if (trigger.reason === "reply-to-other" || trigger.reason === "leading-mention") {
+          runtime.threadSessions.markSideTalk(channel.id);
+        }
+        console.log(
+          JSON.stringify({
+            event: "thread_message_skipped",
+            messageId: message.id,
+            channelId: channel.id,
+            layer: "deterministic",
+            reason: trigger.reason,
+          }),
+        );
+        return;
+      }
+      if (trigger.kind === "summon") {
+        runtime.threadSessions.clearSideTalk(channel.id);
+        if (trigger.resume) {
+          await runtime.threadSessions.follow(thread, message.author.id);
+        }
       }
       const decision = trigger.kind === "summon" ? trigger.decision : THREAD_CHAT;
       dispatch(runtime, message, messageTurn(message, decision), {
@@ -306,8 +324,13 @@ function messageTurn(message: Message, decision: TriggerDecision): Turn {
   };
 }
 
+/** Recent prior thread messages inspected by the Layer 2 relevance gate. */
+const THREAD_GATE_WINDOW = 8;
+
 /**
  * Serialized generation for one turn: read the history the model will see,
+ * run the conditional Layer 2 relevance gate for ambiguous followed-thread
+ * messages (before dismissing any pending question cards or flashing typing),
  * build the request, and hand off to {@link executeGeneration}. Runs inside
  * the per-container queue.
  */
@@ -317,8 +340,24 @@ async function runGeneration(
   target: Target,
   runtime: Runtime,
 ): Promise<void> {
+  const rawHistory = await fetchTurnHistory(target.channel);
+  const userDisplayName =
+    message.member?.displayName || message.author.displayName || message.author.username;
+
+  if (turn.kind === "thread-chat" && target.thread !== null) {
+    const proceed = await shouldProceedThreadChat(
+      message,
+      turn,
+      target.thread,
+      userDisplayName,
+      rawHistory,
+      runtime,
+    );
+    if (!proceed) return;
+  }
+
   const history = markRedoRequests(
-    await readTurnHistory(target.channel, target.thread, runtime),
+    await settleTurnCards(target.channel, target.thread, rawHistory, runtime),
     target.containerId,
     runtime.retryRequests,
   );
@@ -332,8 +371,7 @@ async function runGeneration(
     parentChannelId: target.thread?.parentId ?? null,
     ...(publicIds === undefined ? {} : { publicChannelIds: publicIds }),
     userId: message.author.id,
-    userDisplayName:
-      message.member?.displayName || message.author.displayName || message.author.username,
+    userDisplayName,
     summonKind: turn.kind,
     content: turn.content,
     history,
@@ -344,6 +382,91 @@ async function runGeneration(
   logRequest(request);
 
   await executeGeneration(target.channel, request, runtime);
+}
+
+/**
+ * Layer 2 conditional semantic gate for an un-summoned `thread-chat` message.
+ *
+ * Bypasses immediately (zero extra latency) when the author is answering an
+ * active `ask_user` card addressed to them, or when recent thread messages
+ * involve only that single human and the bot with no recent skipped side-talk.
+ * Otherwise asks the Worker's lightweight classifier; fails open on gate
+ * errors so a transient hiccup never silently drops a real follow-up.
+ */
+async function shouldProceedThreadChat(
+  message: Message,
+  turn: Turn,
+  thread: ThreadRef,
+  userDisplayName: string,
+  rawHistory: readonly HistoryMessage[],
+  runtime: Runtime,
+): Promise<boolean> {
+  const now = Date.now();
+  const activeCards = runtime.askCards
+    .inChannel(thread.id)
+    .filter((entry) => now < entry.expiresAt);
+  if (activeCards.some((entry) => entry.userId === message.author.id)) {
+    runtime.threadSessions.clearSideTalk(thread.id);
+    return true;
+  }
+
+  const pendingQuestionForOther = activeCards.some((entry) => entry.userId !== message.author.id);
+  const priorWindow = rawHistory
+    .filter((entry) => entry.id !== message.id)
+    .slice(-THREAD_GATE_WINDOW);
+  const humanSpeakers = new Set(
+    priorWindow.filter((entry) => !entry.isBot).map((entry) => entry.authorId),
+  );
+  humanSpeakers.add(message.author.id);
+
+  const needsGate =
+    humanSpeakers.size >= 2 ||
+    runtime.threadSessions.hasRecentSideTalk(thread.id) ||
+    pendingQuestionForOther;
+  if (!needsGate) return true;
+
+  const decision = await runtime.threadSessions.checkShouldReply({
+    scopeId: thread.guildId,
+    channelId: thread.id,
+    parentChannelId: thread.parentId,
+    messageId: message.id,
+    userDisplayName,
+    content: turn.content,
+    hasAttachments: turn.attachments.length > 0,
+    recentMessages: priorWindow.map((entry) => ({
+      authorName: entry.authorName,
+      isBot: entry.isBot,
+      text: entry.text,
+    })),
+    pendingQuestionForOther,
+  });
+
+  if (decision === false) {
+    runtime.threadSessions.markSideTalk(thread.id);
+    console.log(
+      JSON.stringify({
+        event: "thread_message_skipped",
+        messageId: message.id,
+        channelId: thread.id,
+        layer: "semantic",
+      }),
+    );
+    return false;
+  }
+
+  if (decision === null) {
+    console.log(
+      JSON.stringify({
+        event: "thread_gate_fallback",
+        messageId: message.id,
+        channelId: thread.id,
+      }),
+    );
+    return true;
+  }
+
+  runtime.threadSessions.clearSideTalk(thread.id);
+  return true;
 }
 
 /**
@@ -358,7 +481,15 @@ async function readTurnHistory(
   thread: ThreadRef | null,
   runtime: Runtime,
 ): Promise<HistoryMessage[]> {
-  const history = await fetchTurnHistory(channel);
+  return settleTurnCards(channel, thread, await fetchTurnHistory(channel), runtime);
+}
+
+async function settleTurnCards(
+  channel: SendableChannels,
+  thread: ThreadRef | null,
+  history: HistoryMessage[],
+  runtime: Runtime,
+): Promise<HistoryMessage[]> {
   const readable = toReadable(channel);
   if (readable === undefined) return history;
 
@@ -609,6 +740,7 @@ async function applyGenerationResult(result: GenerationResult, ctx: PostContext)
 
   switch (result.status) {
     case "completed": {
+      ctx.runtime.threadSessions.clearSideTalk(ctx.request.channelId);
       if (result.askPrompt !== undefined) {
         await postQuestion(result, ctx);
       } else {

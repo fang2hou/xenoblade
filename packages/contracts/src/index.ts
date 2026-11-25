@@ -287,6 +287,37 @@ export type ChannelAllowedResponse =
   | { status: "ok"; allowed: boolean }
   | { status: "error"; code: "invalid_body" };
 
+/** One recent thread message handed to the Layer 2 relevance gate. */
+export interface ThreadGateMessage {
+  authorName: string;
+  isBot: boolean;
+  text: string;
+}
+
+/**
+ * Ask the Worker's lightweight semantic gate whether an ambiguous un-summoned
+ * message in a followed multi-participant thread is addressed to the bot
+ * rather than human-to-human side-talk (ADR-003 amendment).
+ */
+export interface ThreadShouldReplyRequest {
+  scopeId: string;
+  channelId: string;
+  parentChannelId?: string | null;
+  messageId: string;
+  userDisplayName: string;
+  content: string;
+  /** True when the candidate message carries file/image attachments. */
+  hasAttachments?: boolean;
+  /** Recent thread messages before the candidate message, oldest first (at most 10). */
+  recentMessages: ThreadGateMessage[];
+  /** True when the bot has an unanswered ask_user card waiting for another participant. */
+  pendingQuestionForOther?: boolean;
+}
+
+export type ThreadShouldReplyResponse =
+  | { status: "ok"; shouldReply: boolean }
+  | { status: "error"; code: "invalid_body" | "gate_failed" };
+
 // ── Usage ─────────────────────────────────────────────────────────────────
 
 /** One tool and its invocation count over the usage window. */

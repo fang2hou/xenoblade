@@ -17,6 +17,7 @@ import { handleGuildMemoryApply, handleMemory } from "./memory";
 import { handleSettings } from "./settings";
 import { handleSoulApply } from "./soul";
 import { handleChannelAllowed, handleThreadState } from "./thread-sessions";
+import { handleThreadShouldReply } from "./thread-gate";
 
 const INTERNAL_PREFIX = "/internal/v1/";
 
@@ -205,6 +206,16 @@ export default {
       const req = await readJson<unknown>(request);
       const result = await handleChannelAllowed(env.DB, req);
       return json(result, result.status === "ok" ? 200 : 400);
+    }
+
+    // POST /internal/v1/threads/should-reply (Layer 2 semantic gate for followed threads)
+    if (request.method === "POST" && path === "/internal/v1/threads/should-reply") {
+      const req = await readJson<unknown>(request);
+      const result = await handleThreadShouldReply(env, req);
+      return json(
+        result,
+        result.status === "ok" ? 200 : result.code === "invalid_body" ? 400 : 500,
+      );
     }
 
     // POST /internal/v1/messages/ingest (90-day guild history index)

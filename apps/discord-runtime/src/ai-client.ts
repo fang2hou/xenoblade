@@ -19,6 +19,8 @@ import type {
   SoulApplyResponse,
   ThreadSessionRequest,
   ThreadSessionResponse,
+  ThreadShouldReplyRequest,
+  ThreadShouldReplyResponse,
   UsageSummaryResponse,
   SettingsRequest,
   SettingsResponse,
@@ -154,6 +156,9 @@ export function threadSessionOp(
   );
 }
 
+/** Timeout for the lightweight Layer 2 thread-relevance gate; kept short so it never delays a turn for long. */
+const THREAD_GATE_TIMEOUT_MS = 6_000;
+
 /** Ask the Worker's generation gate whether the bot answers in a channel at all. */
 export function checkChannelAllowed(
   req: ChannelAllowedRequest,
@@ -165,6 +170,20 @@ export function checkChannelAllowed(
     req,
     token,
     CONTROL_TIMEOUT_MS,
+  );
+}
+
+/** Ask the Worker's Layer 2 semantic gate whether an ambiguous followed-thread message is for the bot. */
+export function shouldReplyInThread(
+  req: ThreadShouldReplyRequest,
+  workerUrl: string,
+  token: string,
+): Promise<ThreadShouldReplyResponse> {
+  return postJson<ThreadShouldReplyResponse>(
+    `${workerUrl}/internal/v1/threads/should-reply`,
+    req,
+    token,
+    THREAD_GATE_TIMEOUT_MS,
   );
 }
 
