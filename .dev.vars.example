@@ -1,5 +1,7 @@
 # Required Platform Worker secrets (copy to apps/platform-worker/.dev.vars)
+# Configure HYPER_API_KEY (routes DeepSeek via Charm Hyper) and/or OPENROUTER_API_KEY
 INTERNAL_API_TOKEN=
+HYPER_API_KEY=
 OPENROUTER_API_KEY=
 
 # Optional tool & MCP secrets

@@ -168,6 +168,55 @@ describe("generate model options", () => {
     // Absent, not undefined: reasoning models reject an explicit temperature.
     expect(options).not.toHaveProperty("temperature");
   });
+
+  it("uses Charm Hyper economy primary when HYPER_API_KEY is configured and sends native images to vision-capable fallbacks", async () => {
+    const env = {
+      DB: createTestD1(),
+      INTERNAL_API_TOKEN: "test-internal-token",
+      HYPER_API_KEY: "test-hyper-key",
+      ARTIFICIAL_ANALYSIS_API_KEY: "test-key",
+    } as Env;
+    vi.mocked(generateText)
+      .mockRejectedValueOnce(new Error("primary transient failure"))
+      .mockResolvedValueOnce({
+        text: "Described from fallback.",
+        usage: { inputTokens: 15, outputTokens: 20, inputTokenDetails: { cacheReadTokens: 10 } },
+        toolResults: [],
+        steps: [{}],
+      } as unknown as Ai.GenerateTextResult<Ai.ToolSet, never, never>);
+
+    const result = await generate(
+      env,
+      request({
+        attachments: [
+          {
+            id: "a1",
+            url: "https://cdn.discordapp.com/attachments/1/2/pic.png",
+            contentType: "image/png",
+            size: 1234,
+          },
+        ],
+      }),
+    );
+
+    expect(result).toMatchObject({
+      status: "completed",
+      usage: { model: "deepseek-v4.1-flash-1017", cacheReadTokens: 10 },
+    });
+    // Both Charm Hyper models declare vision: true, so the fallback still gets native image parts.
+    const fallbackMessages = vi.mocked(generateText).mock.calls[1]?.[0]?.messages ?? [];
+    const lastContent = fallbackMessages.at(-1)?.content;
+    expect(Array.isArray(lastContent)).toBe(true);
+    expect((lastContent as Array<{ type: string }>).some((part) => part.type === "image")).toBe(
+      true,
+    );
+
+    const row = await env.DB.prepare("SELECT model, cache_read_tokens FROM interactions").first<{
+      model: string;
+      cache_read_tokens: number;
+    }>();
+    expect(row).toEqual({ model: "deepseek-v4.1-flash-1017", cache_read_tokens: 10 });
+  });
 });
 
 describe("generate tool audit", () => {

@@ -28,7 +28,7 @@ Do not substitute tools without explicit approval (see the guidelines repository
 **First Worker run** — secrets and local D1:
 
 ```bash
-cp .dev.vars.example apps/platform-worker/.dev.vars   # INTERNAL_API_TOKEN, OPENROUTER_API_KEY (+ optional Brave keys)
+cp .dev.vars.example apps/platform-worker/.dev.vars   # INTERNAL_API_TOKEN, HYPER_API_KEY and/or OPENROUTER_API_KEY (+ optional Brave keys)
 pnpm --filter @xenoblade/platform-worker db:migrate:local
 pnpm --filter @xenoblade/platform-worker types
 ```
@@ -68,7 +68,7 @@ mise run test -- {{filter}} # run a single test file or case, e.g. mise run test
 - `apps/platform-worker/` — Cloudflare Worker: routes, generation pipeline, tools, D1 access
 - `apps/discord-runtime/` — self-hosted discord.js gateway: triggers, auto-started threads, question cards, staged status, DM control plane
 - `packages/contracts/` — wire types shared by both apps
-- `packages/ai/` — model chains, OpenRouter provider, system prompt composition
+- `packages/ai/` — model chains, Charm Hyper / OpenRouter providers, system prompt composition
 - `packages/db/` — legacy D1 helpers; unreferenced, do not add code here
 - `docs/adr/` — architecture decision records
 - `scripts/`, `deploy/` — local deploy tooling; docker-compose for the gateway host
@@ -110,7 +110,7 @@ It runs the same checks locally that CI runs (`ci.yml`: `mise run check` + `mise
 Production deploys run in CI (`deploy.yml`) after `ci.yml` passes on `main`. Order matters:
 
 1. **D1 remote migration first** — CI applies `wrangler d1 migrations apply xenoblade --remote` before the Worker deploy; locally, run `pnpm --filter @xenoblade/platform-worker db:migrate` first.
-2. **Worker secrets** (once, via `wrangler secret put`): `INTERNAL_API_TOKEN`, `OPENROUTER_API_KEY`; optional: `BRAVE_SEARCH_API_KEY`, `BRAVE_ANSWER_API_KEY`, `GITHUB_MCP_TOKEN`, `ARTIFICIAL_ANALYSIS_API_KEY`, `ADMIN_GUILD_ID`, `ADMIN_OWNER_USER_ID` (CI syncs `ADMIN_*` when set in GitHub Secrets). Discord credentials do **not** belong on the Worker.
+2. **Worker secrets** (once, via `wrangler secret put`): `INTERNAL_API_TOKEN`, `HYPER_API_KEY` (routes DeepSeek via Charm Hyper when set) and/or `OPENROUTER_API_KEY`; optional: `BRAVE_SEARCH_API_KEY`, `BRAVE_ANSWER_API_KEY`, `GITHUB_MCP_TOKEN`, `ARTIFICIAL_ANALYSIS_API_KEY`, `ADMIN_GUILD_ID`, `ADMIN_OWNER_USER_ID` (CI syncs `HYPER_API_KEY` and `ADMIN_*` when set in GitHub Secrets). Discord credentials do **not** belong on the Worker.
 3. **Worker deploy** — `wrangler deploy` with `CLOUDFLARE_API_TOKEN`, then health verification (`/internal/v1/health` must return `status: "ok"`).
 4. **Runtime deploy** — build `linux/arm64` image, push to the self-hosted registry, SSH: `docker compose pull && down && up -d` (SIGTERM closes the Gateway socket gracefully first — Discord allows only one Gateway session per token), then `/health` poll on `:8397`.
 5. **Host `.env`** (runtime container): `DISCORD_BOT_TOKEN`, `DISCORD_APPLICATION_ID`, `WORKER_URL`, `INTERNAL_API_TOKEN`.
