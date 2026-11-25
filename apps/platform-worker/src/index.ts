@@ -12,6 +12,7 @@ import type {
 import { isInternalAuthorized } from "./auth";
 import { clearUserContext, getUsageSummary, restoreUserContext, truncateUserContext } from "./db";
 import { generate } from "./generation";
+import { handleMessageIngest } from "./history-index";
 import { handleGuildMemoryApply, handleMemory } from "./memory";
 import { handleSettings } from "./settings";
 import { handleSoulApply } from "./soul";
@@ -186,6 +187,16 @@ export default {
         return json({ status: "error", code: "invalid_body" }, 400);
       }
       return json(await handleSettings(env.DB, req));
+    }
+
+    // POST /internal/v1/messages/ingest (90-day guild history index)
+    if (request.method === "POST" && path === "/internal/v1/messages/ingest") {
+      const req = await readJson<unknown>(request);
+      const result = await handleMessageIngest(env.DB, req);
+      return json(
+        result,
+        result.status === "ok" ? 200 : result.code === "invalid_body" ? 400 : 500,
+      );
     }
 
     return notFound();

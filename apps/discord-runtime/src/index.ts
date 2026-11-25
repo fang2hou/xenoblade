@@ -43,8 +43,9 @@ import { evaluateTrigger, type TriggerDecision } from "./trigger-policy";
 import { fetchHistory } from "./history";
 import { sendTyping } from "./output";
 import { StagedStatus } from "./staged-status";
-import { generate } from "./ai-client";
+import { generate, INGEST_TIMEOUT_MS } from "./ai-client";
 import { handleDmMessage } from "./dm-commands";
+import { HistoryIngestBuffer, publicChannelIds } from "./history-ingest";
 import { ConversationQueue } from "./conversation-queue";
 import { registerSlashCommands } from "./slash-commands";
 import { handleLanguageCommand, resolveUiLanguageBounded } from "./language";
@@ -81,6 +82,14 @@ async function main(): Promise<void> {
     // interaction, so no reaction intent or partial is needed.
     partials: [Partials.Channel, Partials.Message, Partials.User],
   });
+  // Every public channel message enters the 90-day history index, triggered
+  // or not. The bot's own id is read per event: `client.user` exists only
+  // once the gateway is up.
+  const historyIngest = new HistoryIngestBuffer({
+    workerUrl: env.workerUrl,
+    token: env.internalApiToken,
+    botId: () => client.user?.id ?? env.discordApplicationId,
+  });
 
   client.once("ready", () => {
     console.log(
@@ -96,9 +105,25 @@ async function main(): Promise<void> {
   });
 
   client.on("messageCreate", (message) => {
+    // Before any trigger check, so chat the bot was not summoned for is
+    // indexed too. Never throws: indexing is best-effort.
+    historyIngest.add(message);
     // Fire-and-forget: the handler catches and logs internally; awaiting
     // would block the gateway's event dispatch.
     void handleMessageCreate(message, env, queue, client, registry, memoryConfirms, soulConfirms);
+  });
+
+  // Edits and deletions keep the history index in step with Discord. A
+  // deleted message is often partial; its ids are all the buffer needs.
+  client.on("messageUpdate", (oldMessage, newMessage) => {
+    // Fire-and-forget: an edit of an uncached message may fetch it first.
+    void historyIngest.edit(oldMessage, newMessage);
+  });
+  client.on("messageDelete", (message) => {
+    historyIngest.remove(message);
+  });
+  client.on("messageDeleteBulk", (deleted) => {
+    for (const message of deleted.values()) historyIngest.remove(message);
   });
 
   client.on("interactionCreate", (interaction) => {
@@ -134,7 +159,7 @@ async function main(): Promise<void> {
   });
 
   const healthServer = startHealthServer(env.healthPort);
-  registerShutdown(client, healthServer);
+  registerShutdown(client, healthServer, historyIngest);
 
   await client.login(env.discordBotToken);
   console.log(JSON.stringify({ event: "login" }));
@@ -243,6 +268,10 @@ async function runGeneration(
     );
   }
 
+  // The guild's public channels as they are right now: the Worker reads
+  // stored history of these channels only. None in a DM.
+  const publicIds = publicChannelIds(message.guild);
+
   const request: GenerationRequest = {
     // messageId is the dedup key on the Worker — use the trigger event (the
     // mention), not the fallback content source, so a bare mention that
@@ -255,6 +284,7 @@ async function runGeneration(
     // A thread passes its parent so the Worker's channel allowlist admits it
     // when the parent channel is listed.
     parentChannelId: message.channel.isThread() ? message.channel.parentId : null,
+    ...(publicIds === undefined ? {} : { publicChannelIds: publicIds }),
     userId: message.author.id,
     userDisplayName:
       message.member?.displayName || message.author.displayName || message.author.username,
@@ -862,9 +892,14 @@ async function startRegenerate(
       console.log(JSON.stringify({ event: "regenerate_target_missing", messageId }));
       return;
     }
+    // The frozen request is as old as the reply it re-runs. Which channels
+    // are public is read again, so a channel made private since stays unread.
+    const request: GenerationRequest = channel.isDMBased()
+      ? entry.request
+      : { ...entry.request, publicChannelIds: publicChannelIds(channel.guild) };
     await executeGeneration(
       channel,
-      entry.request,
+      request,
       env,
       { regenerate: true, target: { entry, head, notify } },
       registry,
@@ -996,22 +1031,53 @@ function startHealthServer(port: number): Server {
   return server;
 }
 
-/** Tear down the client and health server on SIGTERM / SIGINT. */
-function registerShutdown(client: Client, server: Server): void {
+/**
+ * Backstop for a shutdown. It outlasts one history ingest request
+ * ({@link INGEST_TIMEOUT_MS}), so the final flush in `registerShutdown` is
+ * never cut off by this timer.
+ */
+const SHUTDOWN_GRACE_MS = INGEST_TIMEOUT_MS + 5_000;
+
+/**
+ * Tear down the client and health server on SIGTERM / SIGINT: stop the
+ * gateway, deliver the history index changes still buffered, then exit once
+ * the health server is closed.
+ */
+function registerShutdown(
+  client: Client,
+  server: Server,
+  historyIngest: HistoryIngestBuffer,
+): void {
   let shuttingDown = false;
   const shutdown = (signal: string): void => {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(JSON.stringify({ event: "shutdown", signal }));
     // Fire-and-forget: process exit below is driven by server.close (with a
-    // 5s failsafe), not by awaiting the gateway teardown.
+    // 5s failsafe), not by awaiting the gateway teardown. The gateway goes
+    // first so no message arrives behind the final history flush, which is
+    // best-effort: the failsafe below still bounds the exit.
     void client.destroy();
-    server.close(() => {
-      console.log(JSON.stringify({ event: "health_closed" }));
-      process.exit(0);
-    });
-    // Don't hang forever if the server won't close promptly.
-    setTimeout(() => process.exit(0), 5_000).unref();
+    void historyIngest
+      .stop()
+      .catch((error) => {
+        console.log(
+          JSON.stringify({
+            event: "history_ingest_stop_error",
+            error: error instanceof Error ? error.name : typeof error,
+          }),
+        );
+      })
+      .finally(() => {
+        server.close(() => {
+          console.log(JSON.stringify({ event: "health_closed" }));
+          process.exit(0);
+        });
+      });
+    // The backstop for the exit: longer than an ingest request can take, so
+    // it never cuts off the flush above. A container runtime's own stop grace
+    // may still end the process sooner.
+    setTimeout(() => process.exit(0), SHUTDOWN_GRACE_MS).unref();
   };
   process.on("SIGTERM", () => shutdown("SIGTERM"));
   process.on("SIGINT", () => shutdown("SIGINT"));

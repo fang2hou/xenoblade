@@ -72,6 +72,14 @@ export interface GenerationRequest {
    * allowlist admits a thread whose parent channel is listed.
    */
   parentChannelId?: string | null;
+  /**
+   * Channels of the guild that are public right now, as the Runtime's channel
+   * cache sees them: every member can read them, and a private thread never
+   * counts. When set, the history tools read stored messages of these
+   * channels only, so a channel made private after its messages were indexed
+   * is no longer readable. Omitted in a DM.
+   */
+  publicChannelIds?: string[];
   userId: string;
   userDisplayName: string;
   summonKind: SummonKind;
@@ -360,6 +368,53 @@ export interface ContextRestoreRequest {
 export type ContextRestoreResult =
   | { status: "ok"; restored: boolean; remainingUndos: number }
   | { status: "error"; code: string };
+
+// ── Guild Message History Index (90-day, FTS5) ────────────────────────────
+
+/**
+ * One message of an allowed public guild channel as the Runtime indexes it.
+ * DMs are never indexed, and a message carries text.
+ */
+export interface IndexedMessageUpsert {
+  messageId: string;
+  channelId: string;
+  /** Parent channel id when `channelId` is a thread, else null. */
+  parentChannelId: string | null;
+  authorId: string;
+  authorName: string;
+  isBot: boolean;
+  content: string;
+  /** Id of the message this one replies to, else null. */
+  replyToId: string | null;
+  /** Epoch ms the message was sent on Discord. */
+  createdAt: number;
+  /** Epoch ms of the last edit the Runtime saw. */
+  updatedAt: number;
+}
+
+/**
+ * Batched message changes of one guild: messages to add or re-index, and ids
+ * of deleted messages. At most 50 `upserts` and 100 `deletes` per request.
+ */
+export interface MessageIngestRequest {
+  guildId: string;
+  upserts: IndexedMessageUpsert[];
+  deletes: string[];
+}
+
+export type MessageIngestResponse =
+  | {
+      status: "ok";
+      upserted: number;
+      deleted: number;
+      /** Upserts left unstored: their channel is not allowed, or the guild is disabled. */
+      skipped: number;
+      /** Upserts left unstored: malformed, textless, already expired, or an id another guild owns. */
+      rejected: number;
+      /** Expired messages removed from the index by this request. */
+      pruned: number;
+    }
+  | { status: "error"; code: "invalid_body" | "ingest_failed" };
 
 // ── Health ────────────────────────────────────────────────────────────────
 
