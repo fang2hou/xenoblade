@@ -110,7 +110,7 @@ It runs the same checks locally that CI runs (`ci.yml`: `mise run check` + `mise
 Production deploys run in CI (`deploy.yml`) after `ci.yml` passes on `main`. Order matters:
 
 1. **D1 remote migration first** — CI applies `wrangler d1 migrations apply xenoblade --remote` before the Worker deploy; locally, run `pnpm --filter @xenoblade/platform-worker db:migrate` first.
-2. **Worker secrets** (once, via `wrangler secret put`): `INTERNAL_API_TOKEN`, `OPENROUTER_API_KEY`; optional: `BRAVE_SEARCH_API_KEY`, `BRAVE_ANSWER_API_KEY`, `GITHUB_MCP_TOKEN`, `ARTIFICIAL_ANALYSIS_API_KEY`. Discord credentials do **not** belong on the Worker.
+2. **Worker secrets** (once, via `wrangler secret put`): `INTERNAL_API_TOKEN`, `OPENROUTER_API_KEY`; optional: `BRAVE_SEARCH_API_KEY`, `BRAVE_ANSWER_API_KEY`, `GITHUB_MCP_TOKEN`, `ARTIFICIAL_ANALYSIS_API_KEY`, `ADMIN_GUILD_ID`, `ADMIN_OWNER_USER_ID` (CI syncs `ADMIN_*` when set in GitHub Secrets). Discord credentials do **not** belong on the Worker.
 3. **Worker deploy** — `wrangler deploy` with `CLOUDFLARE_API_TOKEN`, then health verification (`/internal/v1/health` must return `status: "ok"`).
 4. **Runtime deploy** — build `linux/arm64` image, push to the self-hosted registry, SSH: `docker compose pull && down && up -d` (SIGTERM closes the Gateway socket gracefully first — Discord allows only one Gateway session per token), then `/health` poll on `:8397`.
 5. **Host `.env`** (runtime container): `DISCORD_BOT_TOKEN`, `DISCORD_APPLICATION_ID`, `WORKER_URL`, `INTERNAL_API_TOKEN`.

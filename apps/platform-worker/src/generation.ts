@@ -2,12 +2,21 @@ import { APICallError, generateText, isStepCount, type ModelMessage, type ToolSe
 
 import { composeSystemPrompt, createModel, GENERATION_LIMITS, getModelChain } from "@xenoblade/ai";
 import type {
+  AdminActionPlan,
   GenerationRequest,
   GenerationResult,
   GenerationUsage,
   GuildMemory,
   UserMemory,
 } from "@xenoblade/contracts";
+
+import {
+  ADMIN_PLAN_TTL_MS,
+  createAdminPlan,
+  getAdminConfig,
+  hashAdminPlanPayload,
+  isAdminSession,
+} from "./admin-plans";
 
 import {
   claimMessage,
@@ -34,8 +43,10 @@ import { extractSources } from "./sources";
 import { extractSoulProposal, formatSoulSegment, getBotSoul } from "./soul";
 import { recordLastReply, recordLastTurn } from "./thread-sessions";
 import {
+  ADMIN_GUIDANCE,
   buildGenerationMessages,
   buildTextOnlyGenerationMessages,
+  formatAdminReadResultsBlock,
   MEMORY_GUIDANCE,
   SAFETY_SYSTEM,
   formatSourcesBlock,
@@ -44,11 +55,14 @@ import {
   closeMcpClients,
   connectMcpServers,
   createFirstPartyTools,
+  extractAdminOperations,
   extractAskPrompt,
+  extractDiscordReadRequests,
   hasRetry,
   hasThreadPause,
   pauseThread,
   stoppedOnAskUser,
+  stoppedOnDiscordRead,
 } from "./tools";
 
 function formatMemoryBlock(displayName: string, memories: readonly UserMemory[]): string {
@@ -287,21 +301,25 @@ async function runGenerationPipeline(
     return { status: "rejected", requestId, code: "disabled" };
   }
 
-  // Budget
-  let reservationId: number;
-  try {
-    reservationId = (await reserveGeneration(env.DB, req.containerId, now)).reservationId;
-  } catch (error) {
-    if (error instanceof GenerationBudgetExceededError) {
-      return { status: "rejected", requestId, code: "budget_exceeded" };
+  const adminSession = isAdminSession(env, req);
+
+  // Budget (continuation hops of an admin read-proxy turn already reserved on hop 0).
+  let reservationId: number | null = null;
+  if (!(adminSession && req.adminContinuation === true)) {
+    try {
+      reservationId = (await reserveGeneration(env.DB, req.containerId, now)).reservationId;
+    } catch (error) {
+      if (error instanceof GenerationBudgetExceededError) {
+        return { status: "rejected", requestId, code: "budget_exceeded" };
+      }
+      return {
+        status: "error",
+        requestId,
+        code: "reserve_failed",
+        message: String(error),
+        retryable: true,
+      };
     }
-    return {
-      status: "error",
-      requestId,
-      code: "reserve_failed",
-      message: String(error),
-      retryable: true,
-    };
   }
 
   // Context + prompt
@@ -319,26 +337,28 @@ async function runGenerationPipeline(
   } catch (error) {
     console.log(JSON.stringify({ event: "memory_read_error", error: String(error) }));
   }
-  const soul = await getBotSoul(env.DB, req.scopeId);
-  // A guild's shared memory reaches guild conversations only: a DM never
-  // reads it. It precedes the user's personal memory so that every member of
-  // the same guild shares the same prefix up to that point.
-  const guildMemory = req.scopeId === DM_SCOPE ? [] : await getGuildMemory(env.DB, req.scopeId);
+  // In owner-only admin sessions, skip guild-writable `bot_soul` and
+  // `guild_memory` so ordinary members in public channels cannot inject
+  // instructions into the admin system prompt.
+  const soulSegment = adminSession
+    ? ADMIN_GUIDANCE
+    : formatSoulSegment((await getBotSoul(env.DB, req.scopeId)).content);
+  const guildMemory =
+    adminSession || req.scopeId === DM_SCOPE ? [] : await getGuildMemory(env.DB, req.scopeId);
   const system = composeSystemPrompt({
     safety: SAFETY_SYSTEM,
     base: MEMORY_GUIDANCE,
-    soul: formatSoulSegment(soul.content),
+    soul: soulSegment,
     guildMemory: formatGuildMemoryBlock(guildMemory),
     persona,
     now: new Date(now),
   });
 
-  // Reference block of sources cited in earlier replies of this container, so
-  // "where is the source" follow-ups stay answerable without a rendered
-  // footer (ADR-007 amendment). Best-effort read; empty on any failure.
-  const sourcesBlock = formatSourcesBlock(
-    await getRecentSources(env.DB, { containerId: req.containerId, now }),
-  );
+  // Reference block of sources cited in earlier replies of this container, plus
+  // any Runtime-proxied live Discord read results on admin continuation hops.
+  const sourcesBlock =
+    formatSourcesBlock(await getRecentSources(env.DB, { containerId: req.containerId, now })) +
+    (adminSession ? formatAdminReadResultsBlock(req.adminReadResults ?? []) : "");
 
   // Tools — ALL models get ALL tools (MCP + first-party + vision); the soul,
   // memory, and history tools act on this request's user, scope, and channel
@@ -384,9 +404,9 @@ async function runGenerationPipeline(
             system,
             messages: attemptMessages,
             tools: allTools,
-            // A question for the user ends the run: nothing in a later step
-            // of this one can build on an answer that has not been given.
-            stopWhen: [isStepCount(MAX_STEPS), stoppedOnAskUser],
+            // A question for the user or a Runtime-proxied Discord read ends
+            // the current hop cleanly.
+            stopWhen: [isStepCount(MAX_STEPS), stoppedOnAskUser, stoppedOnDiscordRead],
             // The last step keeps `tools` defined so OpenRouter serializes
             // `tool_choice: "none"` and keeps the prompt cache warm, paired
             // with an explicit synthesis notice so the model answers directly.
@@ -415,10 +435,14 @@ async function runGenerationPipeline(
         hasExtraCacheRead = false;
         hasExtraCacheWrite = false;
 
-        // A run that stopped on a question has no answer text to check: the
-        // question is its result, and the user's answer is the next turn.
+        // A run that stopped on a question or a Runtime-proxied Discord read
+        // has no final answer text to validate on this hop.
         const askedUser = extractAskPrompt(result.toolResults ?? []) !== undefined;
-        if (!askedUser && containsLeakedToolMarkup(finalReply)) {
+        const pendingReads = adminSession
+          ? extractDiscordReadRequests(result.toolResults ?? [])
+          : [];
+        const hopSuspended = askedUser || pendingReads.length > 0;
+        if (!hopSuspended && containsLeakedToolMarkup(finalReply)) {
           console.log(
             JSON.stringify({
               event: "tool_markup_leaked",
@@ -493,7 +517,7 @@ async function runGenerationPipeline(
           }
         }
 
-        if (!askedUser && finalReply.trim() === "") {
+        if (!hopSuspended && finalReply.trim() === "") {
           console.log(
             JSON.stringify({
               event: "empty_generation",
@@ -536,7 +560,7 @@ async function runGenerationPipeline(
     const named = error instanceof Error || error instanceof DOMException ? error : null;
     const code = named === null ? "GENERATION_FAILED" : named.name;
     const errorMsg = named === null ? String(error) : named.message;
-    await safeFinish(env.DB, reservationId);
+    if (reservationId !== null) await safeFinish(env.DB, reservationId);
     await safeRecord(env.DB, {
       id: requestId,
       containerId: req.containerId,
@@ -578,7 +602,7 @@ async function runGenerationPipeline(
     durationMs: Date.now() - now,
   };
 
-  await safeFinish(env.DB, reservationId);
+  if (reservationId !== null) await safeFinish(env.DB, reservationId);
   await safeRecord(env.DB, {
     id: requestId,
     containerId: req.containerId,
@@ -632,6 +656,72 @@ async function runGenerationPipeline(
   const guildMemoryProposals = extractGuildMemoryProposals(result.toolResults ?? []);
   const soulProposal = extractSoulProposal(result.toolResults ?? []);
   const askPrompt = extractAskPrompt(result.toolResults ?? []);
+  const discordReadRequests = adminSession
+    ? extractDiscordReadRequests(result.toolResults ?? [])
+    : [];
+
+  if (discordReadRequests.length > 0) {
+    console.log(
+      JSON.stringify({
+        event: "generation_admin_reads_requested",
+        messageId: req.messageId,
+        model: usedModel,
+        reads: discordReadRequests.length,
+      }),
+    );
+    return {
+      status: "completed",
+      requestId,
+      reply: "",
+      usage,
+      sources,
+      discordReadRequests,
+    };
+  }
+
+  let adminActionPlan: AdminActionPlan | undefined;
+  if (adminSession) {
+    const adminConfig = getAdminConfig(env);
+    const operations = extractAdminOperations(result.toolResults ?? []);
+    if (adminConfig !== null && operations.length > 0) {
+      const planNow = Date.now();
+      const risk = operations.some((op) => op.risk === "high") ? "high" : "standard";
+      const payloadHash = await hashAdminPlanPayload(
+        adminConfig.guildId,
+        adminConfig.ownerUserId,
+        operations,
+      );
+      const summary = operations
+        .map((op) => op.description)
+        .join("; ")
+        .slice(0, 300);
+      const plan: AdminActionPlan = {
+        id: crypto.randomUUID(),
+        guildId: adminConfig.guildId,
+        channelId: req.channelId,
+        ownerUserId: adminConfig.ownerUserId,
+        summary,
+        operations,
+        risk,
+        payloadHash,
+        createdAt: planNow,
+        expiresAt: planNow + ADMIN_PLAN_TTL_MS,
+      };
+      try {
+        await createAdminPlan(env.DB, plan);
+        adminActionPlan = plan;
+      } catch (error) {
+        console.log(
+          JSON.stringify({
+            event: "admin_plan_persist_error",
+            messageId: req.messageId,
+            error: error instanceof Error ? error.name : typeof error,
+          }),
+        );
+      }
+    }
+  }
+
   await recordInteractionSources(env.DB, {
     interactionId: requestId,
     containerId: req.containerId,
@@ -695,6 +785,7 @@ async function runGenerationPipeline(
       guildMemoryProposals: guildMemoryProposals.length,
       soulProposal: soulProposal !== undefined,
       askPrompt: askPrompt !== undefined,
+      adminActionPlan: adminActionPlan !== undefined,
       threadDeactivated,
       retried,
     }),
@@ -709,6 +800,7 @@ async function runGenerationPipeline(
     ...(guildMemoryProposals.length > 0 ? { guildMemoryProposals } : {}),
     ...(soulProposal !== undefined ? { soulProposal } : {}),
     ...(askPrompt !== undefined ? { askPrompt } : {}),
+    ...(adminActionPlan !== undefined ? { adminActionPlan } : {}),
     ...(threadDeactivated ? { threadDeactivated: true } : {}),
     ...(retried ? { retriedLastReply: true } : {}),
   };

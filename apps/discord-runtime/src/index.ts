@@ -5,6 +5,7 @@ import { Client, GatewayIntentBits, Partials } from "discord.js";
 import type { ChatInputCommandInteraction } from "discord.js";
 
 import { loadEnv } from "./env";
+import { AdminConfirmRegistry } from "./admin-confirm";
 import { AskPromptRegistry } from "./ask-confirm";
 import { MemoryConfirmRegistry } from "./memory-confirm";
 import { SoulConfirmRegistry } from "./soul-confirm";
@@ -31,6 +32,7 @@ async function main(): Promise<void> {
     retryRequests: new RetryRequests(),
     memoryConfirms: new MemoryConfirmRegistry(),
     soulConfirms: new SoulConfirmRegistry(),
+    adminConfirms: new AdminConfirmRegistry(),
     threadSessions: new ThreadSessions({
       workerUrl: env.workerUrl,
       token: env.internalApiToken,
@@ -39,6 +41,7 @@ async function main(): Promise<void> {
   const client = new Client({
     intents: [
       GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildMembers,
       GatewayIntentBits.GuildMessages,
       GatewayIntentBits.MessageContent,
       GatewayIntentBits.DirectMessages,

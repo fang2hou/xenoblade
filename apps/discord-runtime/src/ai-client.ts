@@ -1,4 +1,12 @@
 import type {
+  AdminPlanCancelRequest,
+  AdminPlanCancelResponse,
+  AdminPlanClaimRequest,
+  AdminPlanClaimResponse,
+  AdminPlanCompleteRequest,
+  AdminPlanCompleteResponse,
+  AdminPlanGetRequest,
+  AdminPlanGetResponse,
   ChannelAllowedRequest,
   ChannelAllowedResponse,
   ContextClearRequest,
@@ -227,6 +235,62 @@ export function settingsOp(
 ): Promise<SettingsResponse> {
   return postJson<SettingsResponse>(
     `${workerUrl}/internal/v1/settings`,
+    req,
+    token,
+    CONTROL_TIMEOUT_MS,
+  );
+}
+
+/** Read a persisted server administration plan from the Worker. */
+export function getAdminPlan(
+  req: AdminPlanGetRequest,
+  workerUrl: string,
+  token: string,
+): Promise<AdminPlanGetResponse> {
+  return postJson<AdminPlanGetResponse>(
+    `${workerUrl}/internal/v1/admin/plans/get`,
+    req,
+    token,
+    CONTROL_TIMEOUT_MS,
+  );
+}
+
+/** Atomically claim a pending server administration plan before execution. */
+export function claimAdminPlan(
+  req: AdminPlanClaimRequest,
+  workerUrl: string,
+  token: string,
+): Promise<AdminPlanClaimResponse> {
+  return postJson<AdminPlanClaimResponse>(
+    `${workerUrl}/internal/v1/admin/plans/claim`,
+    req,
+    token,
+    CONTROL_TIMEOUT_MS,
+  );
+}
+
+/** Record execution outcomes for a claimed server administration plan. */
+export function completeAdminPlan(
+  req: AdminPlanCompleteRequest,
+  workerUrl: string,
+  token: string,
+): Promise<AdminPlanCompleteResponse> {
+  return postJson<AdminPlanCompleteResponse>(
+    `${workerUrl}/internal/v1/admin/plans/complete`,
+    req,
+    token,
+    CONTROL_TIMEOUT_MS,
+  );
+}
+
+/** Cancel a pending server administration plan on the Worker. */
+export function cancelAdminPlan(
+  req: AdminPlanCancelRequest,
+  workerUrl: string,
+  token: string,
+): Promise<AdminPlanCancelResponse> {
+  return postJson<AdminPlanCancelResponse>(
+    `${workerUrl}/internal/v1/admin/plans/cancel`,
     req,
     token,
     CONTROL_TIMEOUT_MS,

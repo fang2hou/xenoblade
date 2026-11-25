@@ -128,6 +128,31 @@ export interface GenerationRequest {
    * of a started thread sends any.
    */
   anchorHistory?: HistoryMessage[];
+  /**
+   * Set to true by the Runtime ONLY when the turn runs inside a verified
+   * non-public channel (or a thread under one) of the configured admin guild,
+   * triggered by the configured owner. The Worker independently re-checks the
+   * configured guild/owner IDs and rejects any channel present in
+   * `publicChannelIds`.
+   */
+  adminMode?: boolean;
+  /**
+   * Channel/category IDs that must not be deleted, locked, or stripped of
+   * permissions during this admin turn (the active admin channel/thread, its
+   * parent private channel, and its parent category).
+   */
+  adminProtectedChannelIds?: string[];
+  /**
+   * Read-only Discord REST results gathered by the Runtime across continuation
+   * hops for this turn (ADR-002 compliant: the Worker never holds a Discord
+   * token or calls back to the Runtime).
+   */
+  adminReadResults?: DiscordReadResult[];
+  /**
+   * True for internal read-proxy continuation hops of the same user turn, so
+   * the Worker skips charging an extra 24h budget reservation.
+   */
+  adminContinuation?: boolean;
 }
 
 export interface GenerationUsage {
@@ -174,6 +199,19 @@ export type GenerationResult =
        * later history, so the next retry can walk back to the question.
        */
       retriedLastReply?: boolean;
+      /**
+       * Read-only Discord REST queries requested by the model during an admin
+       * turn. When present, the Runtime executes them locally with its Discord
+       * token (after verifying target-guild scope) and posts a continuation
+       * request carrying `adminReadResults` instead of posting a reply yet.
+       */
+      discordReadRequests?: DiscordReadRequest[];
+      /**
+       * Frozen, D1-persisted server administration plan proposed during an
+       * admin turn. Nothing executes until the configured owner approves its
+       * confirmation card (with Modal confirmation for high-risk plans).
+       */
+      adminActionPlan?: AdminActionPlan;
     }
   | {
       status: "rejected";
@@ -586,6 +624,142 @@ export type MessageIngestResponse =
       pruned: number;
     }
   | { status: "error"; code: "invalid_body" | "ingest_failed" };
+
+// ── Server Administration (Owner-Approved, ADR-002 Compliant) ─────────────
+
+/** One read-only Discord REST v10 query the Worker asks the Runtime to run. */
+export interface DiscordReadRequest {
+  id: string;
+  /** Normalized Discord REST v10 path starting with `/`, without query string. */
+  path: string;
+  /** Optional query parameters appended by the Runtime. */
+  query?: Record<string, string>;
+}
+
+/** Result of one Runtime-executed read-only Discord REST v10 query. */
+export interface DiscordReadResult {
+  id: string;
+  path: string;
+  query?: Record<string, string>;
+  ok: boolean;
+  status?: number;
+  data?: unknown;
+  error?: string;
+}
+
+export type AdminHttpMethod = "POST" | "PATCH" | "PUT" | "DELETE";
+
+export type AdminRiskLevel = "standard" | "high";
+
+export type AdminPlanStatus =
+  | "pending"
+  | "executing"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "expired";
+
+/**
+ * One frozen Discord REST v10 write operation inside an {@link AdminActionPlan}.
+ * The approval card renders directly from this structure, and the Runtime
+ * executes these exact fields verbatim after owner approval — never re-invoking
+ * the model.
+ */
+export interface AdminRestOperation {
+  id: string;
+  /** Structured action tag (e.g. `channel.update`, `role.assign`, `rest.custom`). */
+  actionType: string;
+  /** Deterministic human-readable summary derived from the exact operation fields. */
+  description: string;
+  method: AdminHttpMethod;
+  /** Normalized Discord REST v10 path starting with `/`. */
+  path: string;
+  /** Optional JSON body sent verbatim to Discord REST v10. */
+  body?: Record<string, unknown> | Array<Record<string, unknown>>;
+  /** Optional short reason included in `X-Audit-Log-Reason`. */
+  auditReason?: string;
+  /** Risk classification assigned deterministically by code. */
+  risk: AdminRiskLevel;
+  /** Machine-readable reasons why this operation was classified high risk. */
+  riskReasons?: string[];
+}
+
+/** A frozen, auditable server administration plan awaiting owner approval. */
+export interface AdminActionPlan {
+  id: string;
+  guildId: string;
+  channelId: string;
+  ownerUserId: string;
+  summary: string;
+  operations: AdminRestOperation[];
+  risk: AdminRiskLevel;
+  /** Hex SHA-256 over canonical JSON of `{ guildId, ownerUserId, operations }`. */
+  payloadHash: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
+/** Per-step execution outcome recorded after the Runtime runs a claimed plan. */
+export interface AdminStepResult {
+  id: string;
+  status: "succeeded" | "failed" | "skipped";
+  httpStatus?: number;
+  error?: string;
+}
+
+export interface AdminPlanGetRequest {
+  planId: string;
+  guildId: string;
+  ownerUserId: string;
+}
+
+export type AdminPlanGetResponse =
+  | { status: "ok"; plan: AdminActionPlan; planStatus: AdminPlanStatus }
+  | { status: "error"; code: "invalid_body" | "not_found" | "not_owner" | "plan_failed" };
+
+export interface AdminPlanClaimRequest {
+  planId: string;
+  guildId: string;
+  ownerUserId: string;
+  /** When known (in-memory card), verified against the persisted hash. */
+  payloadHash?: string;
+}
+
+export type AdminPlanClaimResponse =
+  | { status: "ok"; plan: AdminActionPlan }
+  | {
+      status: "error";
+      code:
+        | "invalid_body"
+        | "not_found"
+        | "not_owner"
+        | "expired"
+        | "already_settled"
+        | "hash_mismatch"
+        | "plan_failed";
+    };
+
+export interface AdminPlanCompleteRequest {
+  planId: string;
+  guildId: string;
+  ownerUserId: string;
+  outcome: "completed" | "failed";
+  results: AdminStepResult[];
+}
+
+export type AdminPlanCompleteResponse =
+  | { status: "ok" }
+  | { status: "error"; code: "invalid_body" | "not_found" | "plan_failed" };
+
+export interface AdminPlanCancelRequest {
+  planId: string;
+  guildId: string;
+  ownerUserId: string;
+}
+
+export type AdminPlanCancelResponse =
+  | { status: "ok"; cancelled: boolean }
+  | { status: "error"; code: "invalid_body" | "not_owner" | "plan_failed" };
 
 // ── Health ────────────────────────────────────────────────────────────────
 

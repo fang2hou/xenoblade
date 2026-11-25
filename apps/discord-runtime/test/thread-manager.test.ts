@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
-import { ChannelType, DiscordAPIError, type Message } from "discord.js";
+import {
+  ChannelType,
+  DiscordAPIError,
+  PermissionFlagsBits,
+  PermissionsBitField,
+  type Message,
+} from "discord.js";
 import type {
   GenerationRequest,
   HistoryMessage,
@@ -219,6 +225,20 @@ describe("startDiscussionThread", () => {
     expect(started?.thread.id).toBe(THREAD);
     expect(reads).toEqual([[20, "m9"]]);
     expect(started?.anchorHistory.map((anchor) => anchor.id)).toEqual(["m7", "m8"]);
+    expect(calls).toEqual(["startThread"]);
+  });
+
+  it("allows starting a thread when the bot holds Administrator without explicit SendMessagesInThreads", async () => {
+    const { message, calls } = summonMessage();
+    const adminOnlyPermissions = new PermissionsBitField(PermissionFlagsBits.Administrator);
+    // Replace the stub with a real discord.js PermissionsBitField so `checkAdmin` is tested directly.
+    (message.channel as unknown as { permissionsFor: () => PermissionsBitField }).permissionsFor =
+      () => adminOnlyPermissions;
+    const { fetchHistory } = stubHistory();
+
+    const started = await startDiscussionThread(message, { name: "Admin thread", fetchHistory });
+
+    expect(started?.thread.id).toBe(THREAD);
     expect(calls).toEqual(["startThread"]);
   });
 

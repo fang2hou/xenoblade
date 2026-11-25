@@ -94,6 +94,27 @@ const zh = {
     busy: "正在更新人设，请稍候。",
     expiredNotice: "该确认已失效（机器人可能已重启或已超时）。",
   },
+  adminConfirm: {
+    header: (count: number) => `待审批的服务器管理操作（共 ${count} 步）：`,
+    headerHighRisk: (count: number) =>
+      `⚠️ 警示：包含高危/破坏性服务器管理操作（共 ${count} 步），请仔细核对后再点击批准：`,
+    footer: "仅群主点击「批准执行」后按上述参数原样执行（10 分钟内有效）。",
+    escapeNote: "字段里的 \\n 表示换行，\\t 表示制表符，\\u{…} 表示其他不可见字符。",
+    attachmentNote:
+      "变更清单超出单条消息长度，完整参数见附件 admin-action-plan.txt（批准后按附件内容原样执行）。",
+    approve: "批准执行",
+    approveHighRisk: "确认高危批准",
+    cancel: "取消",
+    notOwner: "只有群主可以审批服务器管理操作。",
+    busy: "该管理计划正在执行中，请稍候。",
+    expired: "⏱️ 未在有效期内审批，未执行任何服务器变更。",
+    expiredNotice: "该管理计划已失效或已处理。",
+    cancelled: "已取消，未执行任何服务器变更。",
+    succeeded: (count: number) => `✅ 服务器管理操作已全部执行完成（${count}/${count}）。`,
+    partialFailed: (ok: number, total: number) =>
+      `⚠️ 服务器管理操作部分执行失败（成功 ${ok}/${total}，后续步骤已中止）。`,
+    failed: "❌ 服务器管理操作执行失败，请检查权限或审计日志。",
+  },
   usage: {
     failure: "加载用量统计失败，请稍后重试。",
     you: (hours: number) => `**你 — 最近 ${hours} 小时**`,
@@ -219,6 +240,24 @@ export type Messages = {
     notOwner: string;
     busy: string;
     expiredNotice: string;
+  };
+  adminConfirm: {
+    header: (count: number) => string;
+    headerHighRisk: (count: number) => string;
+    footer: string;
+    escapeNote: string;
+    attachmentNote: string;
+    approve: string;
+    approveHighRisk: string;
+    cancel: string;
+    notOwner: string;
+    busy: string;
+    expired: string;
+    expiredNotice: string;
+    cancelled: string;
+    succeeded: (count: number) => string;
+    partialFailed: (ok: number, total: number) => string;
+    failed: string;
   };
   usage: {
     failure: string;
@@ -354,6 +393,34 @@ const en: Messages = {
     notOwner: "Only the user who requested this change can confirm it.",
     busy: "The persona update is already in progress — please wait.",
     expiredNotice: "This confirmation has expired (the bot may have restarted or timed out).",
+  },
+  adminConfirm: {
+    header: (count: number) =>
+      count === 1
+        ? "Pending server administration action (1 step):"
+        : `Pending server administration actions (${count} steps):`,
+    headerHighRisk: (count: number) =>
+      count === 1
+        ? "⚠️ Warning: High-risk / destructive server administration action (1 step) — review carefully before approving:"
+        : `⚠️ Warning: High-risk / destructive server administration actions (${count} steps) — review carefully before approving:`,
+    footer:
+      "Only the server owner can approve. Operations run verbatim once approved (valid for 10 minutes).",
+    escapeNote: "\\n marks a line break, \\t a tab, and \\u{…} another invisible character.",
+    attachmentNote:
+      "The full operation list is too long for one message. It is attached as admin-action-plan.txt and will execute verbatim once approved.",
+    approve: "Approve",
+    approveHighRisk: "Approve High-Risk",
+    cancel: "Cancel",
+    notOwner: "Only the server owner can approve server administration actions.",
+    busy: "This administration plan is already executing — please wait.",
+    expired: "⏱️ Not approved in time — no server changes were made.",
+    expiredNotice: "This administration plan has expired or is already settled.",
+    cancelled: "Cancelled — no server changes were made.",
+    succeeded: (count: number) =>
+      `✅ Server administration plan completed (${count}/${count} succeeded).`,
+    partialFailed: (ok: number, total: number) =>
+      `⚠️ Server administration plan partially failed (${ok}/${total} succeeded; remaining steps aborted).`,
+    failed: "❌ Server administration plan failed. Check bot permissions and audit logs.",
   },
   usage: {
     failure: "Failed to load the usage summary. Please try again later.",

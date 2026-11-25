@@ -3,6 +3,7 @@ import type { Client, Message, MessageComponentInteraction, SendableChannels } f
 
 import type {
   DiscordAttachment,
+  DiscordReadResult,
   GenerationRequest,
   GenerationResult,
   HistoryMessage,
@@ -10,6 +11,13 @@ import type {
   UiLanguage,
 } from "@xenoblade/contracts";
 
+import {
+  handleAdminConfirmInteraction,
+  isAdminConfirmCustomId,
+  postAdminConfirmation,
+  type AdminConfirmRegistry,
+} from "./admin-confirm";
+import { executeDiscordReads } from "./admin-executor";
 import type { EnvConfig } from "./env";
 import { containerIdFromMessage, scopeIdFromMessage } from "./conversation-scope";
 import {
@@ -50,7 +58,7 @@ import { sendTyping } from "./output";
 import { StagedStatus } from "./staged-status";
 import { generate } from "./ai-client";
 import { handleDmMessage } from "./dm-commands";
-import { publicChannelIds } from "./history-ingest";
+import { isPublicChannel, publicChannelIds } from "./history-ingest";
 import { resolveUiLanguageBounded } from "./language";
 import { messages, stagedMilestones } from "./i18n";
 
@@ -69,6 +77,7 @@ export interface Runtime {
   retryRequests: RetryRequests;
   memoryConfirms: MemoryConfirmRegistry;
   soulConfirms: SoulConfirmRegistry;
+  adminConfirms?: AdminConfirmRegistry;
   threadSessions: ThreadSessions;
 }
 
@@ -136,7 +145,7 @@ export async function handleMessageCreate(
           channelId: dmMessage.channelId,
           thread: null,
         };
-        dispatch(runtime, dmMessage, messageTurn(dmMessage, DM_CHAT), target);
+        dispatch(runtime, dmMessage, messageTurn(dmMessage, DM_CHAT), target, client);
       });
       return;
     }
@@ -177,12 +186,18 @@ export async function handleMessageCreate(
         }
       }
       const decision = trigger.kind === "summon" ? trigger.decision : THREAD_CHAT;
-      dispatch(runtime, message, messageTurn(message, decision), {
-        channel,
-        containerId: containerIdFromMessage(message),
-        channelId: channel.id,
-        thread,
-      });
+      dispatch(
+        runtime,
+        message,
+        messageTurn(message, decision),
+        {
+          channel,
+          containerId: containerIdFromMessage(message),
+          channelId: channel.id,
+          thread,
+        },
+        client,
+      );
       return;
     }
 
@@ -194,7 +209,7 @@ export async function handleMessageCreate(
     // The Worker would not answer this summon at all: a disabled guild, or a
     // channel off its allowlist. Nothing is said, and no thread is started.
     if (route.kind === "refused") return;
-    dispatch(runtime, message, turn, route.target);
+    dispatch(runtime, message, turn, route.target, client);
   } catch (error) {
     console.log(
       JSON.stringify({
@@ -251,7 +266,13 @@ async function routeChannelSummon(
 }
 
 /** Log a trigger and queue its generation behind whatever the container is running. */
-function dispatch(runtime: Runtime, message: Message, turn: Turn, target: Target): void {
+function dispatch(
+  runtime: Runtime,
+  message: Message,
+  turn: Turn,
+  target: Target,
+  client: Client,
+): void {
   console.log(
     JSON.stringify({
       event: "trigger",
@@ -262,7 +283,9 @@ function dispatch(runtime: Runtime, message: Message, turn: Turn, target: Target
       inThread: target.thread !== null,
     }),
   );
-  runtime.queue.enqueue(target.containerId, () => runGeneration(message, turn, target, runtime));
+  runtime.queue.enqueue(target.containerId, () =>
+    runGeneration(message, turn, target, runtime, client),
+  );
 }
 
 /** The conversation a message already sits in: a channel, where no thread is started. */
@@ -334,11 +357,50 @@ const THREAD_GATE_WINDOW = 8;
  * build the request, and hand off to {@link executeGeneration}. Runs inside
  * the per-container queue.
  */
+/** Maximum Runtime-proxied live Discord read hops allowed within a single user turn. */
+const MAX_ADMIN_READ_HOPS = 6;
+
+/**
+ * Evaluate whether a turn is eligible for owner-only server administration:
+ * requires configured `ADMIN_GUILD_ID` & `ADMIN_OWNER_USER_ID`, matching guild
+ * and owner user, and real-time verification that the channel (or its parent
+ * channel when in a thread) is non-public (`@everyone` lacks `ViewChannel`).
+ * Returns the protected channel/parent/category IDs when eligible, else null.
+ */
+function resolveAdminTurnContext(
+  channel: SendableChannels,
+  scopeId: string,
+  parentChannelId: string | null,
+  userId: string,
+  env: EnvConfig,
+): string[] | null {
+  const admin = env.admin;
+  if (admin == null) return null;
+  if (scopeId !== admin.guildId || userId !== admin.ownerUserId) return null;
+  if (channel.isDMBased()) return null;
+  const guild = "guild" in channel ? channel.guild : undefined;
+  if (!guild) return null;
+
+  const effectiveChannel =
+    parentChannelId !== null ? (guild.channels?.cache?.get(parentChannelId) ?? channel) : channel;
+  if (isPublicChannel(effectiveChannel, guild.roles?.everyone)) return null;
+
+  const protectedIds = new Set<string>([channel.id]);
+  if (parentChannelId !== null) protectedIds.add(parentChannelId);
+  const categoryId =
+    "parentId" in effectiveChannel && typeof effectiveChannel.parentId === "string"
+      ? effectiveChannel.parentId
+      : null;
+  if (categoryId !== null) protectedIds.add(categoryId);
+  return [...protectedIds];
+}
+
 async function runGeneration(
   message: Message,
   turn: Turn,
   target: Target,
   runtime: Runtime,
+  client: Client,
 ): Promise<void> {
   const rawHistory = await fetchTurnHistory(target.channel);
   const userDisplayName =
@@ -361,15 +423,27 @@ async function runGeneration(
     target.containerId,
     runtime.retryRequests,
   );
+  const scopeId = scopeIdFromMessage(message);
+  const parentChannelId = target.thread?.parentId ?? null;
   const publicIds = publicChannelIds(message.guild);
+  const adminProtectedIds = resolveAdminTurnContext(
+    target.channel,
+    scopeId,
+    parentChannelId,
+    message.author.id,
+    runtime.env,
+  );
   const request: GenerationRequest = {
     messageId: turn.messageId,
     messageCreatedAt: message.createdTimestamp,
     containerId: target.containerId,
-    scopeId: scopeIdFromMessage(message),
+    scopeId,
     channelId: target.channelId,
-    parentChannelId: target.thread?.parentId ?? null,
+    parentChannelId,
     ...(publicIds === undefined ? {} : { publicChannelIds: publicIds }),
+    ...(adminProtectedIds === null
+      ? {}
+      : { adminMode: true, adminProtectedChannelIds: adminProtectedIds }),
     userId: message.author.id,
     userDisplayName,
     summonKind: turn.kind,
@@ -381,7 +455,7 @@ async function runGeneration(
   };
   logRequest(request);
 
-  await executeGeneration(target.channel, request, runtime);
+  await executeGeneration(target.channel, request, runtime, client);
 }
 
 /**
@@ -606,14 +680,27 @@ async function runContinuation(
     request.containerId,
     runtime.retryRequests,
   );
-  // Which channels are public is read again: the request is as old as the
-  // question, and a channel made private since stays unread.
+  // Re-evaluate both public channels and admin eligibility in case channel
+  // visibility changed while the question card waited.
+  const adminProtectedIds = resolveAdminTurnContext(
+    channel,
+    request.scopeId,
+    request.parentChannelId ?? null,
+    request.userId,
+    runtime.env,
+  );
   const current: GenerationRequest = channel.isDMBased()
     ? request
-    : { ...request, publicChannelIds: publicChannelIds(channel.guild) };
+    : {
+        ...request,
+        publicChannelIds: publicChannelIds(channel.guild),
+        ...(adminProtectedIds === null
+          ? { adminMode: undefined, adminProtectedChannelIds: undefined }
+          : { adminMode: true, adminProtectedChannelIds: adminProtectedIds }),
+      };
   logRequest(current);
 
-  await executeGeneration(channel, { ...current, history }, runtime);
+  await executeGeneration(channel, { ...current, history }, runtime, client);
 }
 
 /** Log a generation's shape: ids, kinds, and counts — never content. */
@@ -641,6 +728,7 @@ async function executeGeneration(
   channel: SendableChannels,
   request: GenerationRequest,
   runtime: Runtime,
+  client: Client,
 ): Promise<void> {
   // Keep typing indicator alive during generation. Discord's typing
   // indicator expires after ~10s; refresh every 8s until done.
@@ -660,9 +748,57 @@ async function executeGeneration(
   const staged = new StagedStatus(channel, { milestones: stagedMilestones(language) });
   staged.start();
 
-  let result: GenerationResult;
+  let currentRequest: GenerationRequest = request;
+  const accumulatedReads: DiscordReadResult[] = [];
+  let result: GenerationResult | undefined;
+
   try {
-    result = await generate(request, runtime.env.workerUrl, runtime.env.internalApiToken);
+    for (let hop = 0; hop <= MAX_ADMIN_READ_HOPS; hop += 1) {
+      result = await generate(currentRequest, runtime.env.workerUrl, runtime.env.internalApiToken);
+      if (
+        result.status === "completed" &&
+        result.discordReadRequests !== undefined &&
+        result.discordReadRequests.length > 0 &&
+        request.adminMode === true &&
+        runtime.env.admin != null
+      ) {
+        if (hop === MAX_ADMIN_READ_HOPS) {
+          console.log(
+            JSON.stringify({
+              event: "admin_read_hop_limit_reached",
+              messageId: request.messageId,
+              hops: hop,
+            }),
+          );
+          clearInterval(typingInterval);
+          await settleFailure(staged, messages(language).generation.failure, request.messageId);
+          return;
+        }
+        const fetched = await executeDiscordReads(
+          client,
+          runtime.env.admin,
+          result.discordReadRequests,
+        );
+        accumulatedReads.push(...fetched);
+        console.log(
+          JSON.stringify({
+            event: "admin_reads_executed",
+            messageId: request.messageId,
+            hop: hop + 1,
+            reads: fetched.length,
+            ok: fetched.filter((r) => r.ok).length,
+          }),
+        );
+        currentRequest = {
+          ...request,
+          messageId: `${request.messageId}:ar:${hop + 1}`,
+          adminContinuation: true,
+          adminReadResults: [...accumulatedReads],
+        };
+        continue;
+      }
+      break;
+    }
   } catch (error) {
     clearInterval(typingInterval);
     console.log(
@@ -677,6 +813,10 @@ async function executeGeneration(
   }
 
   clearInterval(typingInterval);
+  if (result === undefined) {
+    await settleFailure(staged, messages(language).generation.failure, request.messageId);
+    return;
+  }
   await applyGenerationResult(result, { request, staged, channel, language, runtime });
 }
 
@@ -896,6 +1036,23 @@ async function postProposals(result: CompletedResult, ctx: PostContext): Promise
       ctx.runtime.soulConfirms,
     );
   }
+  if (result.adminActionPlan !== undefined && ctx.runtime.adminConfirms !== undefined) {
+    console.log(
+      JSON.stringify({
+        event: "admin_plan_posted",
+        messageId,
+        planId: result.adminActionPlan.id,
+        operations: result.adminActionPlan.operations.length,
+        risk: result.adminActionPlan.risk,
+      }),
+    );
+    await postAdminConfirmation(
+      ctx.channel,
+      result.adminActionPlan,
+      messages(ctx.language).adminConfirm,
+      ctx.runtime.adminConfirms,
+    );
+  }
 }
 
 /**
@@ -922,6 +1079,17 @@ export async function handleComponentInteraction(
     }
     if (isSoulConfirmCustomId(customId)) {
       await handleSoulConfirmInteraction(interaction, runtime.env, runtime.soulConfirms);
+      return;
+    }
+    if (isAdminConfirmCustomId(customId)) {
+      if (runtime.adminConfirms !== undefined) {
+        await handleAdminConfirmInteraction(
+          interaction,
+          client,
+          runtime.env,
+          runtime.adminConfirms,
+        );
+      }
       return;
     }
     if (isAskCustomId(customId)) {

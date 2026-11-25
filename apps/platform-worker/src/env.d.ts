@@ -15,4 +15,7 @@ interface Env {
   BRAVE_ANSWER_API_KEY: string;
   GITHUB_MCP_TOKEN: string;
   ARTIFICIAL_ANALYSIS_API_KEY: string;
+  /** Optional owner-approved server administration gate (both required to enable). */
+  ADMIN_GUILD_ID?: string;
+  ADMIN_OWNER_USER_ID?: string;
 }
