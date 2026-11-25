@@ -1,6 +1,12 @@
 import { APICallError, generateText, isStepCount, type ModelMessage, type ToolSet } from "ai";
 
-import { composeSystemPrompt, createModel, GENERATION_LIMITS, getModelChain } from "@xenoblade/ai";
+import {
+  ADMIN_GENERATION_LIMITS,
+  composeSystemPrompt,
+  createModel,
+  GENERATION_LIMITS,
+  getModelChain,
+} from "@xenoblade/ai";
 import type {
   AdminActionPlan,
   GenerationRequest,
@@ -185,6 +191,25 @@ class GenerationDeadlineError extends Error {
   constructor() {
     super("Model chain exceeded its time budget");
     this.name = "GenerationDeadlineError";
+  }
+}
+
+/**
+ * Thrown when a generation hits its output token ceiling (`finishReason === "length"`)
+ * and cannot produce a clean reply, so the pipeline reports truncation instead
+ * of blindly re-running the same overflowing prompt on a fallback model.
+ */
+class OutputTruncatedError extends Error {
+  readonly finishReason = "length";
+  readonly outputTokens: number | null;
+  readonly steps: number;
+  constructor(modelId: string, outputTokens: number | null, steps: number) {
+    super(
+      `${modelId} hit output token limit (steps=${steps}, outputTokens=${outputTokens ?? "unknown"}); split large changes into smaller batches`,
+    );
+    this.name = "OutputTruncatedError";
+    this.outputTokens = outputTokens;
+    this.steps = steps;
   }
 }
 
@@ -394,6 +419,18 @@ async function runGenerationPipeline(
       if (remainingMs < MIN_ATTEMPT_MS) {
         throw new GenerationDeadlineError();
       }
+      usedModel = config.id;
+      const attemptMaxOutputTokens =
+        config.maxOutputTokens ??
+        (adminSession
+          ? ADMIN_GENERATION_LIMITS.maxOutputTokens
+          : GENERATION_LIMITS.maxOutputTokens);
+      const attemptTimeout = adminSession
+        ? {
+            totalMs: Math.min(ADMIN_GENERATION_LIMITS.timeout.totalMs, remainingMs),
+            stepMs: Math.min(ADMIN_GENERATION_LIMITS.timeout.stepMs, remainingMs),
+          }
+        : Math.min(GENERATION_LIMITS.timeout.totalMs, remainingMs);
       try {
         const model = createModel(env, config, sessionId);
         const attemptMessages = isPrimary ? messagesWithImages : messagesTextOnly;
@@ -418,15 +455,14 @@ async function runGenerationPipeline(
                   }
                 : undefined,
             maxRetries: 1,
-            timeout: Math.min(GENERATION_LIMITS.timeout.totalMs, remainingMs),
-            maxOutputTokens: config.maxOutputTokens ?? GENERATION_LIMITS.maxOutputTokens,
+            timeout: attemptTimeout,
+            maxOutputTokens: attemptMaxOutputTokens,
             // Omitted, not defaulted: reasoning models reject any temperature but their own.
             ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
           }),
           remainingMs,
         );
 
-        usedModel = config.id;
         finalReply = result.text;
         extraInputTokens = 0;
         extraOutputTokens = 0;
@@ -442,6 +478,7 @@ async function runGenerationPipeline(
           ? extractDiscordReadRequests(result.toolResults ?? [])
           : [];
         const hopSuspended = askedUser || pendingReads.length > 0;
+        const outputTokens = result.usage?.outputTokens ?? null;
         if (!hopSuspended && containsLeakedToolMarkup(finalReply)) {
           console.log(
             JSON.stringify({
@@ -449,6 +486,8 @@ async function runGenerationPipeline(
               messageId: req.messageId,
               model: config.id,
               steps: result.steps.length,
+              finishReason: result.finishReason,
+              outputTokens,
             }),
           );
           const rescueRemainingMs = chainDeadline - Date.now();
@@ -458,6 +497,12 @@ async function runGenerationPipeline(
               : [];
           let rescued = false;
           if (priorMessages.length > 0 && rescueRemainingMs >= MIN_ATTEMPT_MS) {
+            const rescueTimeout = adminSession
+              ? {
+                  totalMs: Math.min(ADMIN_GENERATION_LIMITS.timeout.totalMs, rescueRemainingMs),
+                  stepMs: Math.min(ADMIN_GENERATION_LIMITS.timeout.stepMs, rescueRemainingMs),
+                }
+              : Math.min(GENERATION_LIMITS.timeout.totalMs, rescueRemainingMs);
             try {
               const rescue = await withDeadline(
                 generateText({
@@ -472,8 +517,8 @@ async function runGenerationPipeline(
                   toolChoice: "none",
                   stopWhen: isStepCount(1),
                   maxRetries: 0,
-                  timeout: Math.min(GENERATION_LIMITS.timeout.totalMs, rescueRemainingMs),
-                  maxOutputTokens: config.maxOutputTokens ?? GENERATION_LIMITS.maxOutputTokens,
+                  timeout: rescueTimeout,
+                  maxOutputTokens: attemptMaxOutputTokens,
                   ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
                 }),
                 rescueRemainingMs,
@@ -512,6 +557,9 @@ async function runGenerationPipeline(
             }
           }
           if (!rescued) {
+            if (result.finishReason === "length") {
+              throw new OutputTruncatedError(config.id, outputTokens, result.steps.length);
+            }
             if (i < chain.length - 1) continue;
             throw new Error(`${config.id} leaked raw tool markup`);
           }
@@ -523,8 +571,14 @@ async function runGenerationPipeline(
               event: "empty_generation",
               messageId: req.messageId,
               model: config.id,
+              steps: result.steps.length,
+              finishReason: result.finishReason,
+              outputTokens,
             }),
           );
+          if (result.finishReason === "length") {
+            throw new OutputTruncatedError(config.id, outputTokens, result.steps.length);
+          }
           if (i < chain.length - 1) continue;
           throw new Error(`${config.id} returned empty text`);
         }
@@ -542,10 +596,20 @@ async function runGenerationPipeline(
             ...(APICallError.isInstance(error) && error.statusCode !== undefined
               ? { statusCode: error.statusCode }
               : {}),
+            ...(error instanceof OutputTruncatedError
+              ? {
+                  finishReason: error.finishReason,
+                  outputTokens: error.outputTokens,
+                  steps: error.steps,
+                }
+              : {}),
           }),
         );
-        // The chain's time is gone: nothing is left to try another model with.
-        if (error instanceof GenerationDeadlineError) throw error;
+        // The chain's time is gone, or the output hit its token ceiling:
+        // retrying the same overflowing prompt on another model will not help.
+        if (error instanceof GenerationDeadlineError || error instanceof OutputTruncatedError) {
+          throw error;
+        }
         // Rethrow as-is: everything in this try (createModel, generateText,
         // the empty-text check) throws Error instances, so the terminal
         // failure keeps its original Error shape for the caller.

@@ -177,7 +177,8 @@ describe("executeAdminPlan", () => {
       error: "bot_managed_role_forbidden",
     });
 
-    // Parent category of the admin channel is protected too.
+    // Parent category of the admin channel is protected against deletion, @everyone exposure,
+    // and owner/bot lockout denies, while allowing safe non-destructive role overwrite edits.
     const categoryLockoutPlan = makePlan([
       {
         id: "op-cat",
@@ -191,6 +192,66 @@ describe("executeAdminPlan", () => {
     expect((await executeAdminPlan(client, ADMIN, categoryLockoutPlan)).results[0]).toMatchObject({
       error: "admin_channel_lockout_forbidden",
     });
+
+    const exposeEveryonePlan = makePlan([
+      {
+        id: "op-expose",
+        actionType: "channel.update",
+        description: "Expose admin channel to @everyone",
+        method: "PATCH",
+        path: `/channels/${ADMIN_CHANNEL}`,
+        body: {
+          permission_overwrites: [{ id: ADMIN.guildId, type: 0, allow: "1024", deny: "0" }],
+        },
+        risk: "high",
+      },
+    ]);
+    expect((await executeAdminPlan(client, ADMIN, exposeEveryonePlan)).results[0]).toMatchObject({
+      error: "admin_channel_lockout_forbidden",
+    });
+
+    const denyBotRolePlan = makePlan([
+      {
+        id: "op-deny-bot",
+        actionType: "channel.overwrite.set",
+        description: "Deny bot role SendMessages on admin channel",
+        method: "PUT",
+        path: `/channels/${ADMIN_CHANNEL}/permissions/${BOT_MANAGED_ROLE}`,
+        body: { type: 0, allow: "0", deny: "2048" },
+        risk: "high",
+      },
+    ]);
+    expect((await executeAdminPlan(client, ADMIN, denyBotRolePlan)).results[0]).toMatchObject({
+      error: "admin_channel_lockout_forbidden",
+    });
+
+    const safeOverwritePlan = makePlan([
+      {
+        id: "op-safe-patch",
+        actionType: "channel.update",
+        description: "Refactor overwrites on admin channel",
+        method: "PATCH",
+        path: `/channels/${ADMIN_CHANNEL}`,
+        body: {
+          permission_overwrites: [
+            { id: ADMIN.guildId, type: 0, allow: "0", deny: "1024" },
+            { id: "555555555555555555", type: 0, allow: "1024", deny: "0" },
+          ],
+        },
+        risk: "high",
+      },
+      {
+        id: "op-safe-del-ow",
+        actionType: "channel.overwrite.delete",
+        description: "Delete redundant role overwrite on admin channel",
+        method: "DELETE",
+        path: `/channels/${ADMIN_CHANNEL}/permissions/555555555555555555`,
+        risk: "high",
+      },
+    ]);
+    const safeRes = await executeAdminPlan(client, ADMIN, safeOverwritePlan);
+    expect(safeRes.outcome).toBe("completed");
+    expect(safeRes.results.every((r) => r.status === "succeeded")).toBe(true);
 
     // Foreign invite cannot be deleted.
     const foreignInvitePlan = makePlan([
@@ -206,6 +267,6 @@ describe("executeAdminPlan", () => {
     expect((await executeAdminPlan(client, ADMIN, foreignInvitePlan)).results[0]).toMatchObject({
       error: "invite_not_in_target_guild",
     });
-    expect(rest.delete).not.toHaveBeenCalled();
+    expect(rest.delete).toHaveBeenCalledTimes(1);
   });
 });

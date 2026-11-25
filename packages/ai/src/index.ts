@@ -39,6 +39,15 @@ export const GENERATION_LIMITS = {
   timeout: { totalMs: 60_000, firstChunkMs: 15_000, chunkMs: 5_000 },
 } as const;
 
+/**
+ * Elevated generation budget for owner-only server administration sessions,
+ * which combine reasoning with multi-step bulk planning tool calls.
+ */
+export const ADMIN_GENERATION_LIMITS = {
+  maxOutputTokens: 16_384,
+  timeout: { totalMs: 110_000, stepMs: 45_000 },
+} as const;
+
 export interface AiEnv {
   OPENROUTER_API_KEY?: string;
   /** JSON string of a partial Record<ModelRole, ModelConfig[]>. Overrides

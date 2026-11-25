@@ -22,7 +22,7 @@ import { isRecord } from "./guards";
 export const ADMIN_PLAN_TTL_MS = 10 * 60 * 1000;
 
 /** Maximum Discord REST write operations allowed in a single approval plan. */
-export const MAX_ADMIN_OPERATIONS = 15;
+export const MAX_ADMIN_OPERATIONS = 30;
 
 /** Valid Discord Snowflake pattern (17–20 decimal digits). */
 const SNOWFLAKE_RE = /^\d{17,20}$/;
@@ -199,16 +199,27 @@ export function encodePermissionNames(
   return { ok: true, bitfield: mask.toString(10), canonical };
 }
 
+const VIEW_CHANNEL_BIT = 1n << 10n;
+const LOCKOUT_DENY_MASK = (1n << 10n) | (1n << 11n) | (1n << 38n);
+
+function parsePermissionBitfield(raw: unknown): bigint {
+  if (typeof raw === "string" && /^\d+$/.test(raw.trim())) {
+    return BigInt(raw.trim());
+  }
+  if (typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0) {
+    return BigInt(raw);
+  }
+  return 0n;
+}
+
+function hasAnyPermissionBit(raw: unknown, mask: bigint): boolean {
+  return (parsePermissionBitfield(raw) & mask) !== 0n;
+}
+
 /** Decode any sensitive permissions present in a decimal bitfield string or number. */
 export function decodeSensitivePermissions(raw: unknown): string[] {
-  let mask: bigint;
-  if (typeof raw === "string" && /^\d+$/.test(raw.trim())) {
-    mask = BigInt(raw.trim());
-  } else if (typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0) {
-    mask = BigInt(raw);
-  } else {
-    return [];
-  }
+  const mask = parsePermissionBitfield(raw);
+  if (mask === 0n) return [];
   const found: string[] = [];
   for (const name of SENSITIVE_PERMISSION_NAMES) {
     const bit = DISCORD_PERMISSION_BITS[name];
@@ -233,6 +244,10 @@ export interface PathValidationOptions {
   method?: AdminHttpMethod;
   /** Active admin channel/thread, its parent channel, and parent category IDs. */
   protectedChannelIds?: readonly string[];
+  /** Optional REST payload inspected for anti-lockout rules on protected channels. */
+  body?: Record<string, unknown> | Array<Record<string, unknown>>;
+  /** Additional user/role IDs (e.g. bot user or managed role) shielded from deny lockouts. */
+  protectedActorIds?: readonly string[];
 }
 
 /**
@@ -245,7 +260,7 @@ export function validateAdminRestPath(
   mode: "read" | "write",
   options: PathValidationOptions = {},
 ): PathValidationResult {
-  const { method, protectedChannelIds = [] } = options;
+  const { method, protectedChannelIds = [], body, protectedActorIds = [] } = options;
   const trimmed = rawPath.trim();
   if (!trimmed.startsWith("/") || trimmed.length > 256) {
     return { ok: false, reason: "invalid_path" };
@@ -292,10 +307,34 @@ export function validateAdminRestPath(
       return { ok: false, reason: "invalid_channel_id" };
     }
     if (mode === "write" && protectedChannelIds.includes(targetId)) {
-      // Anti-lockout: never delete, edit, or modify permission overwrites on
-      // the active admin channel/thread, its parent channel, or its category.
-      if (segments.length === 2 || sub1 === "permissions") {
-        return { ok: false, reason: "admin_channel_lockout_forbidden" };
+      const lockoutTargets = new Set<string>([cfg.ownerUserId, ...protectedActorIds]);
+      const objBody = body !== undefined && !Array.isArray(body) ? body : undefined;
+      if (segments.length === 2) {
+        if (method === "DELETE") {
+          return { ok: false, reason: "admin_channel_lockout_forbidden" };
+        }
+        if (
+          method === "PATCH" &&
+          objBody !== undefined &&
+          Array.isArray(objBody.permission_overwrites)
+        ) {
+          for (const item of objBody.permission_overwrites) {
+            if (!isRecord(item) || typeof item.id !== "string") continue;
+            if (item.id === cfg.guildId && hasAnyPermissionBit(item.allow, VIEW_CHANNEL_BIT)) {
+              return { ok: false, reason: "admin_channel_lockout_forbidden" };
+            }
+            if (lockoutTargets.has(item.id) && hasAnyPermissionBit(item.deny, LOCKOUT_DENY_MASK)) {
+              return { ok: false, reason: "admin_channel_lockout_forbidden" };
+            }
+          }
+        }
+      } else if (sub1 === "permissions" && method === "PUT" && sub2 !== undefined) {
+        if (sub2 === cfg.guildId && hasAnyPermissionBit(objBody?.allow, VIEW_CHANNEL_BIT)) {
+          return { ok: false, reason: "admin_channel_lockout_forbidden" };
+        }
+        if (lockoutTargets.has(sub2) && hasAnyPermissionBit(objBody?.deny, LOCKOUT_DENY_MASK)) {
+          return { ok: false, reason: "admin_channel_lockout_forbidden" };
+        }
       }
     }
     return { ok: true, normalizedPath };
@@ -333,6 +372,7 @@ export function classifyOperationRisk(
   normalizedPath: string,
   body: Record<string, unknown> | Array<Record<string, unknown>> | undefined,
   cfg: AdminConfig,
+  protectedChannelIds: readonly string[] = [],
 ): { risk: AdminRiskLevel; riskReasons: string[] } {
   const reasons: string[] = [];
   const segments = normalizedPath.split("/").filter((s) => s.length > 0);
@@ -361,6 +401,13 @@ export function classifyOperationRisk(
     }
   }
   if (root === "channels") {
+    if (
+      targetId !== undefined &&
+      protectedChannelIds.includes(targetId) &&
+      (segments.length === 2 || sub1 === "permissions")
+    ) {
+      reasons.push("protected_channel_change");
+    }
     if (sub1 === "messages" && sub2 === "bulk-delete") {
       reasons.push("bulk_delete_messages");
     }

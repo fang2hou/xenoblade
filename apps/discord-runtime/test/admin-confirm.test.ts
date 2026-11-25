@@ -8,11 +8,13 @@ import {
 import type { AdminActionPlan } from "@xenoblade/contracts";
 
 import {
+  ADMIN_PLAN_ATTACHMENT_NAME,
   adminButtonCustomId,
   AdminConfirmRegistry,
   buildAdminConfirmCard,
   buildAdminConfirmRow,
   handleAdminConfirmInteraction,
+  renderExecutionOutcome,
 } from "../src/admin-confirm";
 import type { AdminDiscordClient } from "../src/admin-executor";
 import * as aiClient from "../src/ai-client";
@@ -135,6 +137,52 @@ describe("buildAdminConfirmCard & row", () => {
 
     const stdRow = buildAdminConfirmRow(texts, makePlan("standard")).toJSON();
     expect(stdRow.components[0]).toMatchObject({ style: ButtonStyle.Success });
+  });
+
+  it("falls back to attachment for 30-operation plans with permission_overwrites summary and truncates long execution outcomes safely", () => {
+    const texts = messages("zh").adminConfirm;
+    const bulkPlan: AdminActionPlan = {
+      ...makePlan("high"),
+      operations: Array.from({ length: 30 }, (_, i) => ({
+        id: `op-${i + 1}`,
+        actionType: "channel.update",
+        description: `Update channel ${TARGET_CHANNEL_ID} batch item ${i + 1}`,
+        method: "PATCH" as const,
+        path: `/channels/${TARGET_CHANNEL_ID}`,
+        body: {
+          permission_overwrites: [
+            { id: GUILD_ID, type: 0, allow: "0", deny: "1024" },
+            { id: "555555555555555555", type: 0, allow: "1024", deny: "0" },
+          ],
+        },
+        risk: "high" as const,
+        riskReasons: ["everyone_overwrite_change"],
+      })),
+    };
+
+    const card = buildAdminConfirmCard(texts, bulkPlan);
+    expect(card.content.length).toBeLessThanOrEqual(2000);
+    expect(card.attachment).toBeDefined();
+    expect(card.attachment?.name).toBe(ADMIN_PLAN_ATTACHMENT_NAME);
+    const attachmentText = Buffer.from(card.attachment!.attachment as Buffer).toString("utf8");
+    expect(attachmentText).toContain("[30] [HIGH] channel.update");
+    expect(attachmentText).toContain("permission_overwrites: 2 entries");
+
+    const results = bulkPlan.operations.map((op, idx) =>
+      idx === 24
+        ? {
+            id: op.id,
+            status: "failed" as const,
+            error: "DiscordAPIError(50013): Missing Permissions",
+          }
+        : idx < 24
+          ? { id: op.id, status: "succeeded" as const, httpStatus: 200 }
+          : { id: op.id, status: "skipped" as const },
+    );
+    const outcomeText = renderExecutionOutcome(bulkPlan, "failed", results, texts);
+    expect(outcomeText.length).toBeLessThanOrEqual(2000);
+    expect(outcomeText).toContain("FAILED");
+    expect(outcomeText).toContain("Missing Permissions");
   });
 });
 
