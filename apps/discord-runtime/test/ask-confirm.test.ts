@@ -11,12 +11,7 @@ import {
   type MessageCreateOptions,
   type MessageEditOptions,
 } from "discord.js";
-import type {
-  AskUserPrompt,
-  GenerationRequest,
-  HistoryMessage,
-  UiLanguage,
-} from "@xenoblade/contracts";
+import type { AskUserPrompt, GenerationRequest, UiLanguage } from "@xenoblade/contracts";
 
 import {
   ASK_CARD_WINDOW_MS,
@@ -24,14 +19,14 @@ import {
   askCustomId,
   buildAskCard,
   buildAskRow,
-  continuationRequest,
   dismissPendingCards,
   handleAskInteraction,
   isAskCustomId,
   parseAskCustomId,
   postAskCard,
   resolveAskAction,
-  type AskChoice,
+  settleChoice,
+  type AskClaim,
   type AskEntry,
   type ReadableChannel,
 } from "../src/ask-confirm";
@@ -201,6 +196,9 @@ function unknownMessage(): DiscordAPIError {
   );
 }
 
+/** When the click happened, as Discord timestamps interactions. */
+const CLICKED_AT = 4242;
+
 /** A button click on a card, with its acks and refusals. */
 function click(customId: string, options: { userId?: string; card?: Message } = {}) {
   const deferUpdate = vi.fn<() => Promise<void>>(async () => undefined);
@@ -209,6 +207,7 @@ function click(customId: string, options: { userId?: string; card?: Message } = 
     customId,
     user: { id: options.userId ?? OWNER },
     message: options.card ?? fakeMessage(),
+    createdTimestamp: CLICKED_AT,
     deferUpdate,
     reply,
   };
@@ -220,10 +219,21 @@ function click(customId: string, options: { userId?: string; card?: Message } = 
   };
 }
 
-/** The handler's view of the Runtime: the registry and what a click hands over to. */
+/** The handler's view of the Runtime: the registry, and where an acknowledged click is handed to the conversation's queue. */
 function runtime(registry: AskPromptRegistry) {
-  const choose = vi.fn<(choice: AskChoice) => Promise<void>>(async () => undefined);
-  return { ask: { env, registry, choose }, choose };
+  const confirm = vi.fn<(claim: AskClaim) => void>();
+  return { ask: { env, registry, confirm }, confirm };
+}
+
+/** The claim a click on `optionId` of the posted card would hand over. */
+function claimOf(registry: AskPromptRegistry, optionId: string): AskClaim {
+  const entry = registry.get("p-1");
+  if (entry === undefined || entry.message === null) {
+    throw new Error("expected a posted, tracked card");
+  }
+  const option = PROMPT.options.find((candidate) => candidate.id === optionId);
+  if (option === undefined) throw new Error(`no such option: ${optionId}`);
+  return { entry, option, answeredAt: CLICKED_AT };
 }
 
 /** Post a card for `PROMPT` and hand back what was posted. */
@@ -540,78 +550,34 @@ describe("AskPromptRegistry", () => {
 });
 
 describe("handleAskInteraction", () => {
-  it("acknowledges the click, deletes the card, and hands the chosen option to the continuation", async () => {
+  it("claims the click and acknowledges it, leaving the card and the choice to the conversation's queue", async () => {
     const { registry } = await post();
-    const card = registry.get("p-1")?.message ?? null;
+    const entry = registry.get("p-1");
+    if (entry === undefined || entry.message === null) {
+      throw new Error("expected the posted card to be tracked");
+    }
     const run = runtime(registry);
     const { interaction, deferUpdate, reply } = click("xbl:ask:p-1:proper", {
-      card: card ?? undefined,
+      card: entry.message,
     });
 
     await handleAskInteraction(interaction, run.ask);
 
     expect(deferUpdate).toHaveBeenCalledTimes(1);
     expect(reply).not.toHaveBeenCalled();
-    if (card === null || card === undefined) throw new Error("expected a posted card");
-    expect(spiesOf(card).delete).toHaveBeenCalledTimes(1);
-    expect(registry.get("p-1")).toBeUndefined();
-    expect(run.choose).toHaveBeenCalledTimes(1);
-    expect(run.choose.mock.calls[0]?.[0]).toMatchObject({
-      request: REQUEST,
-      language: "zh",
-      promptId: "p-1",
+    // Nothing is deleted or settled outside the queue, where a typed reply's cleanup runs too.
+    expect(spiesOf(entry.message).delete).not.toHaveBeenCalled();
+    expect(registry.get("p-1")).toBe(entry);
+    expect(entry.busy).toBe(true);
+    expect(run.confirm).toHaveBeenCalledTimes(1);
+    expect(run.confirm.mock.calls[0]?.[0]).toMatchObject({
+      entry,
       option: { id: "proper", label: "Proper rewrite" },
-      card: {
-        id: CARD,
-        authorId: "bot",
-        isBot: true,
-        createdAt: 1000,
-        text: "Which approach do you want?\n[可选项] Quick fix / Proper rewrite / Ask me later",
-      },
+      answeredAt: CLICKED_AT,
     });
   });
 
-  it("turns the choice into the continuation's request", async () => {
-    const choice: AskChoice = {
-      request: REQUEST,
-      language: "zh",
-      promptId: "p-1",
-      option: PROMPT.options[1] ?? { id: "proper", label: "Proper rewrite" },
-      card: {
-        id: CARD,
-        text: "",
-        authorId: "bot",
-        authorName: "Xenoblade",
-        isBot: true,
-        createdAt: 1000,
-      },
-    };
-
-    expect(continuationRequest(choice)).toEqual({
-      ...REQUEST,
-      messageId: "m1:ask:p-1",
-      summonKind: "component",
-      content: "[确认选择]: Proper rewrite",
-      history: [],
-    });
-  });
-
-  it("puts the choice in words in the card's language", () => {
-    const card = {
-      id: CARD,
-      text: "",
-      authorId: "bot",
-      authorName: "Xenoblade",
-      isBot: true,
-      createdAt: 1000,
-    };
-
-    expect(continuationRequest({ ...choiceOf("quick"), language: "en", card }).content).toBe(
-      "[Choice]: Quick fix",
-    );
-  });
-
-  it("carries a click out once: a second one on the same card is refused", async () => {
+  it("hands a click over once: a second one on the same card is refused while the first waits", async () => {
     const { registry } = await post();
     const card = registry.get("p-1")?.message ?? null;
     const run = runtime(registry);
@@ -623,9 +589,10 @@ describe("handleAskInteraction", () => {
 
     await handleAskInteraction(second.interaction, run.ask);
 
-    expect(run.choose).toHaveBeenCalledTimes(1);
+    expect(run.confirm).toHaveBeenCalledTimes(1);
     expect(second.deferUpdate).not.toHaveBeenCalled();
     expect(second.reply).toHaveBeenCalledTimes(1);
+    expect(await refusedWith(second.reply)).toBe(messages("zh").askConfirm.busy);
   });
 
   it("refuses a click that lands while the first is still being carried out", async () => {
@@ -641,10 +608,9 @@ describe("handleAskInteraction", () => {
     await handleAskInteraction(interaction, run.ask);
 
     expect(deferUpdate).not.toHaveBeenCalled();
-    expect(reply).toHaveBeenCalledTimes(1);
     expect(await refusedWith(reply)).toBe(messages("zh").askConfirm.busy);
     expect(spiesOf(entry.message).delete).not.toHaveBeenCalled();
-    expect(run.choose).not.toHaveBeenCalled();
+    expect(run.confirm).not.toHaveBeenCalled();
   });
 
   it("refuses anyone but the user who was asked, leaving the card for them", async () => {
@@ -664,7 +630,8 @@ describe("handleAskInteraction", () => {
     expect(deferUpdate).not.toHaveBeenCalled();
     expect(spiesOf(entry.message).delete).not.toHaveBeenCalled();
     expect(registry.get("p-1")).toBe(entry);
-    expect(run.choose).not.toHaveBeenCalled();
+    expect(entry.busy).toBe(false);
+    expect(run.confirm).not.toHaveBeenCalled();
   });
 
   it("fails closed on a card this process no longer tracks, as after a restart", async () => {
@@ -677,7 +644,7 @@ describe("handleAskInteraction", () => {
     expect(await refusedWith(reply)).toBe(messages("zh").askConfirm.expiredNotice);
     expect(deferUpdate).not.toHaveBeenCalled();
     expect(spiesOf(card).delete).not.toHaveBeenCalled();
-    expect(run.choose).not.toHaveBeenCalled();
+    expect(run.confirm).not.toHaveBeenCalled();
   });
 
   it("fails closed on a button that fires on a message other than its card", async () => {
@@ -690,7 +657,7 @@ describe("handleAskInteraction", () => {
     await handleAskInteraction(interaction, run.ask);
 
     expect(await refusedWith(reply)).toBe(messages("zh").askConfirm.expiredNotice);
-    expect(run.choose).not.toHaveBeenCalled();
+    expect(run.confirm).not.toHaveBeenCalled();
   });
 
   it("ignores the customIds of other button families", async () => {
@@ -701,37 +668,7 @@ describe("handleAskInteraction", () => {
 
     expect(deferUpdate).not.toHaveBeenCalled();
     expect(reply).not.toHaveBeenCalled();
-    expect(run.choose).not.toHaveBeenCalled();
-  });
-
-  it("carries the choice out even when the card is already gone", async () => {
-    const { registry } = await post();
-    const entry = registry.get("p-1");
-    const card = fakeMessage();
-    spiesOf(card).delete.mockRejectedValue(unknownMessage());
-    if (entry === undefined) throw new Error("expected the posted card to be tracked");
-    entry.message = card;
-    const run = runtime(registry);
-
-    await handleAskInteraction(click("xbl:ask:p-1:quick", { card }).interaction, run.ask);
-
-    expect(run.choose).toHaveBeenCalledTimes(1);
-    expect(loggedEvents()).not.toContain("ask_card_delete_error");
-  });
-
-  it("carries the choice out, and logs the failure, when the card cannot be deleted", async () => {
-    const { registry } = await post();
-    const entry = registry.get("p-1");
-    const card = fakeMessage();
-    spiesOf(card).delete.mockRejectedValue(new Error("Missing Access"));
-    if (entry === undefined) throw new Error("expected the posted card to be tracked");
-    entry.message = card;
-    const run = runtime(registry);
-
-    await handleAskInteraction(click("xbl:ask:p-1:quick", { card }).interaction, run.ask);
-
-    expect(run.choose).toHaveBeenCalledTimes(1);
-    expect(loggedEvents()).toContain("ask_card_delete_error");
+    expect(run.confirm).not.toHaveBeenCalled();
   });
 
   it("refuses in the clicker's own language", async () => {
@@ -742,6 +679,96 @@ describe("handleAskInteraction", () => {
     await handleAskInteraction(refusal.interaction, run.ask);
 
     expect(await refusedWith(refusal.reply)).toBe(messages("en").askConfirm.expiredNotice);
+  });
+});
+
+describe("settleChoice", () => {
+  it("deletes the card, settles the question, and turns the choice into the continuation's request", async () => {
+    const { registry } = await post();
+    const claim = claimOf(registry, "proper");
+    const card = claim.entry.message;
+    if (card === null) throw new Error("expected a posted card");
+
+    const settled = await settleChoice(registry, claim);
+
+    expect(spiesOf(card).delete).toHaveBeenCalledTimes(1);
+    expect(registry.get("p-1")).toBeUndefined();
+    expect(settled).toEqual({
+      request: {
+        ...REQUEST,
+        messageId: "m1:ask:p-1",
+        messageCreatedAt: CLICKED_AT,
+        summonKind: "component",
+        content: "[确认选择]: Proper rewrite",
+        history: [],
+      },
+      card: {
+        id: CARD,
+        authorId: "bot",
+        authorName: "Xenoblade",
+        isBot: true,
+        createdAt: 1000,
+        text: "Which approach do you want?\n[可选项] Quick fix / Proper rewrite / Ask me later",
+      },
+      cardDeleted: true,
+    });
+  });
+
+  it("puts the choice in words in the card's language", async () => {
+    const registry = new AskPromptRegistry();
+    await postAskCard(
+      fakeChannel().channel,
+      { prompt: PROMPT, reply: "", request: REQUEST, language: "en" },
+      registry,
+    );
+
+    const settled = await settleChoice(registry, claimOf(registry, "quick"));
+
+    expect(settled?.request.content).toBe("[Choice]: Quick fix");
+  });
+
+  it("answers null, and touches nothing, when a typed reply that ran first already settled the card", async () => {
+    const { registry } = await post();
+    const claim = claimOf(registry, "proper");
+    const card = claim.entry.message;
+    if (card === null) throw new Error("expected a posted card");
+    // What a typed reply's cleanup leaves behind: the question settled, its card deleted.
+    registry.remove("p-1");
+
+    expect(await settleChoice(registry, claim)).toBeNull();
+
+    expect(spiesOf(card).delete).not.toHaveBeenCalled();
+    expect(loggedEvents()).not.toContain("ask_card_answered");
+  });
+
+  it("counts a card that is already gone as deleted", async () => {
+    const { registry } = await post();
+    const claim = claimOf(registry, "quick");
+    const card = claim.entry.message;
+    if (card === null) throw new Error("expected a posted card");
+    spiesOf(card).delete.mockRejectedValue(unknownMessage());
+
+    const settled = await settleChoice(registry, claim);
+
+    expect(settled?.cardDeleted).toBe(true);
+    expect(loggedEvents()).not.toContain("ask_card_delete_error");
+  });
+
+  it("carries the choice out, and keeps the card on record, when the card cannot be deleted", async () => {
+    const { registry } = await post();
+    const claim = claimOf(registry, "quick");
+    const card = claim.entry.message;
+    if (card === null) throw new Error("expected a posted card");
+    spiesOf(card).delete.mockRejectedValue(new Error("Missing Access"));
+
+    const settled = await settleChoice(registry, claim);
+
+    expect(settled).toMatchObject({
+      cardDeleted: false,
+      request: { content: "[确认选择]: Quick fix" },
+    });
+    expect(registry.get("p-1")).toBeUndefined();
+    expect(loggedEvents()).toContain("ask_card_delete_error");
   });
 });
 
@@ -758,25 +785,6 @@ async function refusedWith(reply: Mock<(payload: unknown) => Promise<void>>): Pr
   const payload = reply.mock.calls[0]?.[0] as { content: string; flags: number };
   expect(payload.flags).toBe(MessageFlags.Ephemeral);
   return payload.content;
-}
-
-function choiceOf(optionId: string): AskChoice {
-  const option = PROMPT.options.find((candidate) => candidate.id === optionId);
-  if (option === undefined) throw new Error(`no such option: ${optionId}`);
-  return {
-    request: REQUEST,
-    language: "zh",
-    promptId: "p-1",
-    option,
-    card: {
-      id: CARD,
-      text: "",
-      authorId: "bot",
-      authorName: "Xenoblade",
-      isBot: true,
-      createdAt: 1000,
-    },
-  };
 }
 
 describe("question card expiry", () => {
@@ -826,24 +834,25 @@ describe("question card expiry", () => {
 });
 
 describe("dismissPendingCards", () => {
+  /** The card as the bot's turn: its text with its options spelled out. */
+  const CARD_TURN = {
+    id: CARD,
+    text: "Which approach do you want?\n[可选项] Quick fix / Proper rewrite / Ask me later",
+    authorId: "bot",
+    authorName: "Xenoblade",
+    isBot: true,
+    createdAt: 1000,
+  };
+
   it("deletes the cards the process tracks and hands them back as the bot's turns", async () => {
     const { registry } = await post();
     const card = registry.get("p-1")?.message;
     if (card === undefined || card === null) throw new Error("expected a posted card");
     const discord = fakeChannel();
 
-    const turns = await dismissPendingCards(discord.channel, registry, []);
+    const dismissed = await dismissPendingCards(discord.channel, registry, []);
 
-    expect(turns).toEqual([
-      {
-        id: CARD,
-        text: "Which approach do you want?\n[可选项] Quick fix / Proper rewrite / Ask me later",
-        authorId: "bot",
-        authorName: "Xenoblade",
-        isBot: true,
-        createdAt: 1000,
-      },
-    ]);
+    expect(dismissed).toEqual({ turns: [CARD_TURN], deletedIds: [CARD] });
     expect(spiesOf(card).delete).toHaveBeenCalledTimes(1);
     expect(registry.get("p-1")).toBeUndefined();
     expect(discord.fetch).not.toHaveBeenCalled();
@@ -853,31 +862,76 @@ describe("dismissPendingCards", () => {
     const orphan = postedCard("card-9", ["Plan A", "Plan B"]);
     const discord = fakeChannel({ stored: [orphan] });
 
-    const turns = await dismissPendingCards(discord.channel, new AskPromptRegistry(), ["card-9"]);
+    const dismissed = await dismissPendingCards(discord.channel, new AskPromptRegistry(), [
+      "card-9",
+    ]);
 
     expect(discord.fetch).toHaveBeenCalledWith("card-9");
     expect(spiesOf(orphan).delete).toHaveBeenCalledTimes(1);
-    expect(turns).toMatchObject([
-      { id: "card-9", text: "Go on?\n[可选项] Plan A / Plan B", isBot: true },
-    ]);
+    expect(dismissed).toMatchObject({
+      turns: [{ id: "card-9", text: "Go on?\n[可选项] Plan A / Plan B", isBot: true }],
+    });
+    expect(dismissed.deletedIds).toEqual(["card-9"]);
   });
 
-  it("skips a remembered card that is already gone", async () => {
+  it("counts a remembered card that is already gone as deleted", async () => {
     const discord = fakeChannel({ stored: [] });
 
-    const turns: HistoryMessage[] = await dismissPendingCards(
-      discord.channel,
-      new AskPromptRegistry(),
-      ["card-9"],
-    );
+    const dismissed = await dismissPendingCards(discord.channel, new AskPromptRegistry(), [
+      "card-9",
+    ]);
 
-    expect(turns).toEqual([]);
+    expect(dismissed).toEqual({ turns: [], deletedIds: ["card-9"] });
+  });
+
+  it("keeps a card whose delete failed on record, so a later turn tries again", async () => {
+    const { registry } = await post();
+    const card = registry.get("p-1")?.message;
+    if (card === undefined || card === null) throw new Error("expected a posted card");
+    spiesOf(card).delete.mockRejectedValue(new Error("Missing Access"));
+    const discord = fakeChannel();
+
+    const dismissed = await dismissPendingCards(discord.channel, registry, []);
+
+    // Its question still reaches the model, but Discord still shows the card: it is not reported gone.
+    expect(dismissed).toEqual({ turns: [CARD_TURN], deletedIds: [] });
+    expect(registry.get("p-1")).toBeUndefined();
+    expect(loggedEvents()).toContain("ask_card_delete_error");
+  });
+
+  it("keeps a remembered card alone when Discord cannot be reached to fetch it", async () => {
+    const discord = fakeChannel({ stored: [] });
+    discord.fetch.mockRejectedValue(new Error("Socket hang up"));
+
+    const dismissed = await dismissPendingCards(discord.channel, new AskPromptRegistry(), [
+      "card-9",
+    ]);
+
+    expect(dismissed).toEqual({ turns: [], deletedIds: [] });
+  });
+
+  it("splits the two when one card is deleted and another is not", async () => {
+    const gone = postedCard("card-gone", ["A"]);
+    const stuck = postedCard("card-stuck", ["B"]);
+    spiesOf(stuck).delete.mockRejectedValue(new Error("Missing Access"));
+    const discord = fakeChannel({ stored: [gone, stuck] });
+
+    const dismissed = await dismissPendingCards(discord.channel, new AskPromptRegistry(), [
+      "card-gone",
+      "card-stuck",
+    ]);
+
+    expect(dismissed.deletedIds).toEqual(["card-gone"]);
+    expect(dismissed.turns.map((turn) => turn.id)).toEqual(["card-gone", "card-stuck"]);
   });
 
   it("reads nothing when no card is waiting", async () => {
     const discord = fakeChannel();
 
-    expect(await dismissPendingCards(discord.channel, new AskPromptRegistry(), [])).toEqual([]);
+    expect(await dismissPendingCards(discord.channel, new AskPromptRegistry(), [])).toEqual({
+      turns: [],
+      deletedIds: [],
+    });
     expect(discord.fetch).not.toHaveBeenCalled();
   });
 });

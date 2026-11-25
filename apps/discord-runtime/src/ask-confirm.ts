@@ -251,10 +251,17 @@ async function refuse(
   });
 }
 
-/** Delete a card from Discord. A card that is already gone is not a failure. */
-async function deleteCard(message: Message): Promise<void> {
-  await message.delete().catch((error) => {
-    if (error instanceof DiscordAPIError && error.code === UNKNOWN_MESSAGE_CODE) return;
+/**
+ * Delete a card from Discord. True once it is gone — deleted now, or already
+ * gone when tried. False when the delete failed, so the caller keeps the card
+ * on record and a later turn tries again.
+ */
+async function deleteCard(message: Message): Promise<boolean> {
+  try {
+    await message.delete();
+    return true;
+  } catch (error) {
+    if (error instanceof DiscordAPIError && error.code === UNKNOWN_MESSAGE_CODE) return true;
     console.log(
       JSON.stringify({
         event: "ask_card_delete_error",
@@ -262,7 +269,21 @@ async function deleteCard(message: Message): Promise<void> {
         error: String(error),
       }),
     );
-  });
+    return false;
+  }
+}
+
+/** A card the Runtime does not track, fetched from Discord so it can be deleted. */
+type FetchedCard = Message | "gone" | "unavailable";
+
+async function fetchCard(channel: ReadableChannel, messageId: string): Promise<FetchedCard> {
+  try {
+    return await channel.messages.fetch(messageId);
+  } catch (error) {
+    if (error instanceof DiscordAPIError && error.code === UNKNOWN_MESSAGE_CODE) return "gone";
+    console.log(JSON.stringify({ event: "ask_card_fetch_error", messageId, error: String(error) }));
+    return "unavailable";
+  }
 }
 
 /** Drop a card's buttons, so an unanswered one reads as a question to answer in text. */
@@ -391,6 +412,18 @@ function buttonLabels(message: Message): string[] {
   return labels;
 }
 
+/** What deleting a channel's waiting question cards came to. */
+export interface DismissedCards {
+  /** What each card said, as a turn of the bot's own. */
+  turns: HistoryMessage[];
+  /**
+   * The cards that are gone from Discord — deleted now, or already gone. A
+   * card whose delete failed is not among them, so its record stays and a
+   * later turn tries again.
+   */
+  deletedIds: string[];
+}
+
 /**
  * Delete every question card still waiting in the channel, and hand back
  * what each said as a turn of the bot's own. The user answered in text
@@ -399,72 +432,113 @@ function buttonLabels(message: Message): string[] {
  *
  * `recordedIds` are the cards the Worker remembers for the thread: they
  * cover a card this process no longer tracks (a restart in between), whose
- * options are then read off the message. A card that cannot be fetched is
- * already gone and is skipped.
+ * options are then read off the message. A card that is already gone counts
+ * as deleted; one that cannot be reached is left on record.
  */
 export async function dismissPendingCards(
   channel: ReadableChannel,
   registry: AskPromptRegistry,
   recordedIds: readonly string[],
-): Promise<HistoryMessage[]> {
+): Promise<DismissedCards> {
   const tracked = new Map(
     registry.inChannel(channel.id).map((entry) => [entry.message?.id ?? "", entry] as const),
   );
   const ids = new Set([...recordedIds, ...tracked.keys()]);
   ids.delete("");
 
-  const turns: HistoryMessage[] = [];
+  const dismissed: DismissedCards = { turns: [], deletedIds: [] };
   for (const id of ids) {
     const entry = tracked.get(id);
-    const message = entry?.message ?? (await channel.messages.fetch(id).catch(() => undefined));
-    if (message === undefined || message === null) {
+    const fetched = entry?.message ?? (await fetchCard(channel, id));
+    if (fetched === "gone") {
+      dismissed.deletedIds.push(id);
       if (entry !== undefined) settle(registry, entry);
       continue;
     }
+    // Left alone: it is not known to be gone, and it is still on record.
+    if (fetched === "unavailable") continue;
     const texts = messages(entry?.language ?? DEFAULT_UI_LANGUAGE).askConfirm;
-    turns.push(
+    dismissed.turns.push(
       cardTurn(
-        message,
-        entry?.prompt.options.map((option) => option.label) ?? buttonLabels(message),
+        fetched,
+        entry?.prompt.options.map((option) => option.label) ?? buttonLabels(fetched),
         texts,
       ),
     );
-    await deleteCard(message);
+    if (await deleteCard(fetched)) dismissed.deletedIds.push(id);
     if (entry !== undefined) settle(registry, entry);
   }
-  if (turns.length > 0) {
+  if (dismissed.turns.length > 0) {
     console.log(
-      JSON.stringify({ event: "ask_cards_dismissed", channelId: channel.id, cards: turns.length }),
+      JSON.stringify({
+        event: "ask_cards_dismissed",
+        channelId: channel.id,
+        cards: dismissed.turns.length,
+        deleted: dismissed.deletedIds.length,
+      }),
     );
   }
-  return turns;
+  return dismissed;
 }
 
-/** A question the user answered with a button, and how. */
-export interface AskChoice {
-  /** The generation the question stopped: its scope, speaker, and attachments carry into the continuation. */
-  request: GenerationRequest;
-  /** Language of the card; the user's choice is put into words in it too. */
-  language: UiLanguage;
-  promptId: string;
+/** A click that passed its checks and was acknowledged, to be carried out inside the conversation's queue. */
+export interface AskClaim {
+  entry: AskEntry;
   option: AskUserOption;
+  /** When the user clicked: the continuation's message time. */
+  answeredAt: number;
+}
+
+/** A carried-out click: the continuation's request, the card it answered, and whether that card is gone. */
+export interface SettledChoice {
+  /**
+   * The request of the continuation: the turn the question interrupted, with
+   * the user's choice as its message. Its id derives from the question's, so
+   * a click delivered twice runs once. History is left empty: the
+   * continuation reads the channel again, with the card put back as a turn.
+   */
+  request: GenerationRequest;
   /** The answered card as the bot's own turn, for the continuation to read the question by. */
   card: HistoryMessage;
+  /** False when the card could not be deleted from Discord: its record stays, so a later turn retries. */
+  cardDeleted: boolean;
 }
 
 /**
- * The request of a continuation: the turn the question interrupted, with the
- * user's choice as its message. Its id derives from the question's, so a
- * click delivered twice runs once. History is left empty: the continuation
- * reads the channel again, with the card put back as a turn.
+ * Carry out an acknowledged click — inside the conversation's queue, where
+ * nothing else touches the card meanwhile. The card is deleted and the
+ * question settled only while it is still waiting: a typed reply that ran
+ * first has done both, and its own generation answers for the click, so this
+ * answers null and nothing runs twice.
  */
-export function continuationRequest(choice: AskChoice): GenerationRequest {
+export async function settleChoice(
+  registry: AskPromptRegistry,
+  claim: AskClaim,
+): Promise<SettledChoice | null> {
+  const { entry, option, answeredAt } = claim;
+  // The question was settled while the click waited for its turn.
+  if (registry.get(entry.prompt.id) !== entry) return null;
+  const posted = entry.message;
+  if (posted === null) return null;
+  const card = cardTurn(
+    posted,
+    entry.prompt.options.map((candidate) => candidate.label),
+    messages(entry.language).askConfirm,
+  );
+  const cardDeleted = await deleteCard(posted);
+  settle(registry, entry);
+  console.log(JSON.stringify({ event: "ask_card_answered", messageId: posted.id, cardDeleted }));
   return {
-    ...choice.request,
-    messageId: `${choice.request.messageId}:ask:${choice.promptId}`,
-    summonKind: "component",
-    content: messages(choice.language).askConfirm.chosen(choice.option.label),
-    history: [],
+    request: {
+      ...entry.request,
+      messageId: `${entry.request.messageId}:ask:${entry.prompt.id}`,
+      messageCreatedAt: answeredAt,
+      summonKind: "component",
+      content: messages(entry.language).askConfirm.chosen(option.label),
+      history: [],
+    },
+    card,
+    cardDeleted,
   };
 }
 
@@ -472,8 +546,12 @@ export function continuationRequest(choice: AskChoice): GenerationRequest {
 export interface AskRuntime {
   env: EnvConfig;
   registry: AskPromptRegistry;
-  /** The click was answered: the caller clears the thread's card record and runs the continuation. */
-  choose: (choice: AskChoice) => Promise<void>;
+  /**
+   * A click passed its checks and was acknowledged. The caller hands it to
+   * the conversation's queue, which carries it out through {@link settleChoice}
+   * — behind whatever the conversation is running, and ahead of what follows.
+   */
+  confirm: (claim: AskClaim) => void;
 }
 
 /**
@@ -481,10 +559,11 @@ export interface AskRuntime {
  *
  * Only the user who was asked may click; anyone else gets an ephemeral
  * refusal. A card this process no longer tracks — restart, eviction, settled
- * — fails closed the same way: no crash, no generation. The click is
- * acknowledged first, so nothing later risks Discord's 3-second window; the
- * card is then deleted, so the thread keeps only the question and the final
- * answer, and the user's choice continues the conversation.
+ * — fails closed the same way: no crash, no generation. A click that passes
+ * is claimed (a second one is refused as busy) and acknowledged at once, so
+ * nothing later risks Discord's 3-second window; the choice itself is left
+ * to the conversation's queue, which deletes the card and starts the
+ * continuation in its turn.
  */
 export async function handleAskInteraction(
   interaction: MessageComponentInteraction,
@@ -506,19 +585,5 @@ export async function handleAskInteraction(
 
   entry.busy = true;
   await acknowledge(interaction);
-  const card = cardTurn(
-    entry.message,
-    entry.prompt.options.map((option) => option.label),
-    messages(entry.language).askConfirm,
-  );
-  await deleteCard(entry.message);
-  settle(runtime.registry, entry);
-  console.log(JSON.stringify({ event: "ask_card_answered", messageId, userId }));
-  await runtime.choose({
-    request: entry.request,
-    language: entry.language,
-    promptId: entry.prompt.id,
-    option: decision.option,
-    card,
-  });
+  runtime.confirm({ entry, option: decision.option, answeredAt: interaction.createdTimestamp });
 }

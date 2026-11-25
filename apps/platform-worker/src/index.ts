@@ -16,7 +16,7 @@ import { handleMessageIngest } from "./history-index";
 import { handleGuildMemoryApply, handleMemory } from "./memory";
 import { handleSettings } from "./settings";
 import { handleSoulApply } from "./soul";
-import { handleThreadState } from "./thread-sessions";
+import { handleChannelAllowed, handleThreadState } from "./thread-sessions";
 
 const INTERNAL_PREFIX = "/internal/v1/";
 
@@ -198,6 +198,13 @@ export default {
         result,
         result.status === "ok" ? 200 : result.code === "invalid_body" ? 400 : 500,
       );
+    }
+
+    // POST /internal/v1/threads/allowed (the generation gate, asked before a thread is started)
+    if (request.method === "POST" && path === "/internal/v1/threads/allowed") {
+      const req = await readJson<unknown>(request);
+      const result = await handleChannelAllowed(env.DB, req);
+      return json(result, result.status === "ok" ? 200 : 400);
     }
 
     // POST /internal/v1/messages/ingest (90-day guild history index)

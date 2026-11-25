@@ -4,11 +4,16 @@
 -- decides whether un-summoned messages there summon the bot, and
 -- pending_card_ids_json lists the question cards still waiting for an answer
 -- so they are cleaned up across Runtime restarts. It holds ids and flags
--- only — never message text.
+-- only — never message text. A row is read and changed by thread_id together
+-- with guild_id (enforced in src/thread-sessions.ts): the guild that
+-- registered the thread is the only one that can reach its state.
 --
 -- container_last_turns: the latest prompt and reply of a guild conversation,
--- for the retry_last_reply tool. It stores guild conversations only: a DM
--- (scope_id 'dm') is never written here, enforced in src/thread-sessions.ts.
+-- for the retry_last_reply tool. trigger_created_at is when the prompting
+-- message was sent; it is not moved by a later retry of the same reply, so
+-- it is what the user's context watermark is compared with. It stores guild
+-- conversations only: a DM (scope_id 'dm') is never written here, enforced
+-- in src/thread-sessions.ts.
 CREATE TABLE thread_sessions (
     thread_id              TEXT PRIMARY KEY,
     guild_id               TEXT NOT NULL,
@@ -30,6 +35,7 @@ CREATE TABLE container_last_turns (
     user_id             TEXT NOT NULL,
     user_display_name   TEXT NOT NULL,
     trigger_message_id  TEXT NOT NULL,
+    trigger_created_at  INTEGER NOT NULL,
     trigger_content     TEXT NOT NULL,
     assistant_reply     TEXT NOT NULL,
     updated_at          INTEGER NOT NULL

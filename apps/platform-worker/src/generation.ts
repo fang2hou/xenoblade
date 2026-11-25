@@ -519,16 +519,18 @@ async function runGenerationPipeline(
 
   // What `retry_last_reply` reads next. A turn that stopped on a question has
   // not answered yet and leaves the stored turn alone; one that redid the
-  // last reply replaces that reply, so the prompt stays the user's own.
+  // last reply replaces that reply, so the prompt — and when it was sent —
+  // stay the user's own.
+  const retried = askPrompt === undefined && hasRetry(result.toolResults ?? []);
   if (askPrompt === undefined) {
-    const retried = hasRetry(result.toolResults ?? []);
     const assistantReply = result.text;
+    const storedAt = Date.now();
     await safeRecordTurn(() =>
       retried
         ? recordLastReply(
             env.DB,
             { containerId: req.containerId, scopeId: req.scopeId, assistantReply },
-            Date.now(),
+            storedAt,
           )
         : recordLastTurn(
             env.DB,
@@ -539,10 +541,13 @@ async function runGenerationPipeline(
               userId: req.userId,
               userDisplayName: req.userDisplayName,
               triggerMessageId: req.messageId,
+              // A Runtime that does not say when the message was sent gets the
+              // time of the reply as the prompt's: late, never early.
+              triggerCreatedAt: req.messageCreatedAt ?? storedAt,
               triggerContent: req.content,
               assistantReply,
             },
-            Date.now(),
+            storedAt,
           ),
     );
   }
@@ -562,6 +567,7 @@ async function runGenerationPipeline(
       soulProposal: soulProposal !== undefined,
       askPrompt: askPrompt !== undefined,
       threadDeactivated,
+      retried,
     }),
   );
 
@@ -575,5 +581,6 @@ async function runGenerationPipeline(
     ...(soulProposal !== undefined ? { soulProposal } : {}),
     ...(askPrompt !== undefined ? { askPrompt } : {}),
     ...(threadDeactivated ? { threadDeactivated: true } : {}),
+    ...(retried ? { retriedLastReply: true } : {}),
   };
 }

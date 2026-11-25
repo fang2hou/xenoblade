@@ -98,4 +98,22 @@ describe("fetchHistory", () => {
       },
     ]);
   });
+
+  it("asks Discord for the page before a message, so nothing posted after it is fetched", async () => {
+    const asks: Array<{ limit?: number; before?: string }> = [];
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test double standing in for a discord.js channel
+    const channel = {
+      messages: {
+        fetch: async (options: { limit?: number; before?: string }) => (
+          asks.push(options),
+          new Map()
+        ),
+      },
+    } as unknown as DMChannel;
+
+    await fetchHistory(channel, 20, "m9");
+    await fetchHistory(channel, 20);
+
+    expect(asks).toEqual([{ limit: 20, before: "m9" }, { limit: 20 }]);
+  });
 });

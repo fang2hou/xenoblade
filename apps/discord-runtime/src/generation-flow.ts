@@ -25,11 +25,12 @@ import {
   type SoulConfirmRegistry,
 } from "./soul-confirm";
 import {
-  continuationRequest,
   dismissPendingCards,
   handleAskInteraction,
   isAskCustomId,
   postAskCard,
+  settleChoice,
+  type AskClaim,
   type AskPromptRegistry,
   type ReadableChannel,
 } from "./ask-confirm";
@@ -44,6 +45,7 @@ import {
 } from "./thread-manager";
 import { fetchHistory } from "./history";
 import { renderReply } from "./citations";
+import type { RetryRequests } from "./retry-requests";
 import { sendTyping } from "./output";
 import { StagedStatus } from "./staged-status";
 import { generate } from "./ai-client";
@@ -63,6 +65,8 @@ export interface Runtime {
   queue: TaskQueue;
   /** Unanswered question cards: their buttons, and their cleanup. */
   askCards: AskPromptRegistry;
+  /** Which messages only asked for the bot's previous reply to be redone. */
+  retryRequests: RetryRequests;
   memoryConfirms: MemoryConfirmRegistry;
   soulConfirms: SoulConfirmRegistry;
   threadSessions: ThreadSessions;
@@ -142,13 +146,17 @@ export async function handleMessageCreate(
     const botId = client.user?.id ?? runtime.env.discordApplicationId;
 
     if (channel.isThread()) {
-      const thread: ThreadRef = { id: channel.id, parentId: channel.parentId };
+      const thread: ThreadRef = {
+        guildId: scopeIdFromMessage(message),
+        id: channel.id,
+        parentId: channel.parentId,
+      };
       const trigger = await evaluateThreadTrigger(message, botId, runtime.env.mentionRoleIds, () =>
         runtime.threadSessions.isFollowed(thread),
       );
       if (trigger.kind === "none") return;
       if (trigger.kind === "summon" && trigger.resume) {
-        await runtime.threadSessions.follow(thread, scopeIdFromMessage(message), message.author.id);
+        await runtime.threadSessions.follow(thread, message.author.id);
       }
       const decision = trigger.kind === "summon" ? trigger.decision : THREAD_CHAT;
       dispatch(runtime, message, messageTurn(message, decision), {
@@ -164,12 +172,11 @@ export async function handleMessageCreate(
     if (decision === null) return;
     const turn = messageTurn(message, decision);
 
-    // A thread the bot may not start is no reason not to answer: the summon
-    // then runs in the channel, like a reply to the bot.
-    const started = startsThread(decision.kind, channel)
-      ? await startSummonThread(message, turn, runtime)
-      : null;
-    dispatch(runtime, message, turn, started ?? channelTarget(message, channel));
+    const route = await routeChannelSummon(message, turn, channel, runtime);
+    // The Worker would not answer this summon at all: a disabled guild, or a
+    // channel off its allowlist. Nothing is said, and no thread is started.
+    if (route.kind === "refused") return;
+    dispatch(runtime, message, turn, route.target);
   } catch (error) {
     console.log(
       JSON.stringify({
@@ -179,6 +186,50 @@ export async function handleMessageCreate(
       }),
     );
   }
+}
+
+/** Where a summon sent in a channel is answered: in a thread started on it, in the channel, or nowhere. */
+type SummonRoute =
+  | { kind: "thread"; target: Target }
+  | { kind: "channel"; target: Target }
+  | { kind: "refused" };
+
+/**
+ * Decide where a summon in a regular text channel is answered. A thread is
+ * started only where the Worker answers at all — it reads the guild's switch
+ * and the channel allowlist first, so a disabled guild or a channel off the
+ * list never gets an empty thread of its own. When the Worker cannot say, no
+ * thread is started and the summon is answered in the channel, where the
+ * generation gate decides as before. A thread the bot may not start or
+ * cannot post in is no reason not to answer: the summon then runs in the
+ * channel, like a reply to the bot.
+ */
+async function routeChannelSummon(
+  message: Message,
+  turn: Turn,
+  channel: SendableChannels,
+  runtime: Runtime,
+): Promise<SummonRoute> {
+  const inChannel = (): SummonRoute => ({
+    kind: "channel",
+    target: channelTarget(message, channel),
+  });
+  if (!startsThread(turn.kind, channel)) return inChannel();
+
+  const allowed = await runtime.threadSessions.isChannelAllowed({
+    guildId: scopeIdFromMessage(message),
+    channelId: channel.id,
+  });
+  if (allowed === false) {
+    console.log(
+      JSON.stringify({ event: "summon_refused", messageId: message.id, channelId: channel.id }),
+    );
+    return { kind: "refused" };
+  }
+  if (allowed !== true) return inChannel();
+
+  const started = await startSummonThread(message, turn, runtime);
+  return started === null ? inChannel() : { kind: "thread", target: started };
 }
 
 /** Log a trigger and queue its generation behind whatever the container is running. */
@@ -223,10 +274,10 @@ async function startSummonThread(
   });
   if (started === null) return null;
 
-  const parentId = started.thread.parentId ?? message.channelId;
-  const thread: ThreadRef = { id: started.thread.id, parentId };
   const scopeId = scopeIdFromMessage(message);
-  await runtime.threadSessions.follow(thread, scopeId, message.author.id);
+  const parentId = started.thread.parentId ?? message.channelId;
+  const thread: ThreadRef = { guildId: scopeId, id: started.thread.id, parentId };
+  await runtime.threadSessions.follow(thread, message.author.id);
 
   return {
     channel: started.thread,
@@ -266,10 +317,15 @@ async function runGeneration(
   target: Target,
   runtime: Runtime,
 ): Promise<void> {
-  const history = await readTurnHistory(target.channel, target.thread, runtime);
+  const history = markRedoRequests(
+    await readTurnHistory(target.channel, target.thread, runtime),
+    target.containerId,
+    runtime.retryRequests,
+  );
   const publicIds = publicChannelIds(message.guild);
   const request: GenerationRequest = {
     messageId: turn.messageId,
+    messageCreatedAt: message.createdTimestamp,
     containerId: target.containerId,
     scopeId: scopeIdFromMessage(message),
     channelId: target.channelId,
@@ -294,7 +350,8 @@ async function runGeneration(
  * The history a turn's model will see. Every question card still waiting in
  * the conversation is deleted from Discord first — the user moved on without
  * clicking — and put back as the bot's own turn, so the reply can still read
- * the question it answers.
+ * the question it answers. Only cards that are gone come off the record: one
+ * that could not be deleted waits for a later turn.
  */
 async function readTurnHistory(
   channel: SendableChannels,
@@ -307,8 +364,23 @@ async function readTurnHistory(
 
   const recorded = thread === null ? [] : await runtime.threadSessions.pendingCardIds(thread);
   const cards = await dismissPendingCards(readable, runtime.askCards, recorded);
-  if (thread !== null && recorded.length > 0) await runtime.threadSessions.forgetCards(thread);
-  return restoreCards(history, cards);
+  if (thread !== null) await runtime.threadSessions.forgetCards(thread, cards.deletedIds);
+  return restoreCards(history, cards.turns);
+}
+
+/**
+ * Mark the messages that only asked for the bot's previous reply to be
+ * redone, so the Worker's `retry_last_reply` walks back past them to the
+ * question the user actually asked.
+ */
+function markRedoRequests(
+  history: HistoryMessage[],
+  containerId: string,
+  retries: RetryRequests,
+): HistoryMessage[] {
+  return history.map((entry) =>
+    retries.isRedoRequest(containerId, entry.id) ? { ...entry, retryRequest: true } : entry,
+  );
 }
 
 /** The channel's recent messages; none when they cannot be read. */
@@ -357,6 +429,25 @@ function restoreCards(
 }
 
 /**
+ * A click on a question card, carried out inside the container's queue —
+ * behind whatever the conversation is running, and never alongside a typed
+ * reply's own cleanup of the same cards. The card is deleted and its record
+ * cleared there, and the choice continues the conversation; when a typed
+ * reply that ran first already settled the card, the click has nothing left
+ * to do. A card that could not be deleted stays on record for a later turn.
+ */
+async function runChoice(client: Client, claim: AskClaim, runtime: Runtime): Promise<void> {
+  const choice = await settleChoice(runtime.askCards, claim);
+  if (choice === null) return;
+
+  const thread = threadOf(choice.request);
+  if (thread !== null && choice.cardDeleted) {
+    await runtime.threadSessions.forgetCards(thread, [choice.card.id]);
+  }
+  await runContinuation(client, choice.request, choice.card, runtime);
+}
+
+/**
  * The generation a click on a question card starts: the turn the question
  * interrupted, answered by the chosen option. The card is gone from Discord,
  * so it returns to the history as the bot's turn the choice replies to.
@@ -379,7 +470,11 @@ async function runContinuation(
     return;
   }
 
-  const history = restoreCards(await readTurnHistory(channel, threadOf(request), runtime), [card]);
+  const history = markRedoRequests(
+    restoreCards(await readTurnHistory(channel, threadOf(request), runtime), [card]),
+    request.containerId,
+    runtime.retryRequests,
+  );
   // Which channels are public is read again: the request is as old as the
   // question, and a channel made private since stays unread.
   const current: GenerationRequest = channel.isDMBased()
@@ -499,6 +594,17 @@ async function applyGenerationResult(result: GenerationResult, ctx: PostContext)
     console.log(
       JSON.stringify({ event: "thread_unfollowed", messageId, channelId: ctx.request.channelId }),
     );
+  }
+
+  // The message that asked for the redo is no prompt of its own: the next
+  // retry of the conversation must walk back past it. A continuation's
+  // message never shows up in a later history, so it has nothing to mark.
+  if (
+    result.status === "completed" &&
+    result.retriedLastReply &&
+    ctx.request.summonKind !== "component"
+  ) {
+    ctx.runtime.retryRequests.remember(ctx.request.containerId, messageId);
   }
 
   switch (result.status) {
@@ -664,8 +770,8 @@ async function postProposals(result: CompletedResult, ctx: PostContext): Promise
  * interactionCreate entry point for the bot's buttons. Each family has its
  * own registry and handler: the guild memory cards (`xbl:gmem:*`), the soul
  * cards (`xbl:soul:*`), and the question cards (`xbl:ask:*`). A question
- * card's click deletes the card and carries the chosen option into the next
- * turn of the same conversation.
+ * card's click is carried out inside the conversation's queue, where it
+ * deletes the card and carries the chosen option into the next turn.
  *
  * Anything else fails closed with an ephemeral notice and no action: a
  * reply-control button from before those were retired (ADR-015), or a
@@ -690,15 +796,12 @@ export async function handleComponentInteraction(
       await handleAskInteraction(interaction, {
         env: runtime.env,
         registry: runtime.askCards,
-        choose: async (choice) => {
-          const request = continuationRequest(choice);
-          const thread = threadOf(request);
-          // The card is gone from Discord; its record goes too, ahead of the
-          // continuation that may post the next one.
-          if (thread !== null) await runtime.threadSessions.forgetCards(thread);
-          runtime.queue.enqueue(request.containerId, () =>
-            runContinuation(client, request, choice.card, runtime),
-          );
+        // The click joins the conversation's queue: its card is deleted and
+        // its continuation runs there, serialized with every typed reply's
+        // own cleanup of the same cards.
+        confirm: (claim) => {
+          const containerId = claim.entry.request.containerId;
+          runtime.queue.enqueue(containerId, () => runChoice(client, claim, runtime));
         },
       });
       return;

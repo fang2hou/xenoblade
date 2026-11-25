@@ -9,7 +9,7 @@ import type * as AiPackage from "@xenoblade/ai";
 import type * as Tools from "../src/tools";
 
 import { generate } from "../src/generation";
-import { recordLastTurn } from "../src/thread-sessions";
+import { getLastTurn, recordLastReply, recordLastTurn } from "../src/thread-sessions";
 import {
   createInteractionTools,
   extractAskPrompt,
@@ -90,6 +90,8 @@ const STORED_TURN = {
   userId: "u1",
   userDisplayName: "User",
   triggerMessageId: "m1",
+  /** When the prompting message was sent. */
+  triggerCreatedAt: 500,
   triggerContent: "What is the release day?",
   assistantReply: "Fridays.",
 };
@@ -271,8 +273,10 @@ function askResult(id: string): { toolName: string; output: unknown } {
 
 type StoredTurnRow = {
   trigger_message_id: string;
+  trigger_created_at: number;
   trigger_content: string;
   assistant_reply: string;
+  updated_at: number;
 };
 
 type StoredThreadRow = {
@@ -286,7 +290,7 @@ type StoredThreadRow = {
 async function storedTurn(db: D1Database, containerId: string): Promise<StoredTurnRow | null> {
   return db
     .prepare(
-      "SELECT trigger_message_id, trigger_content, assistant_reply FROM container_last_turns WHERE container_id = ?1",
+      "SELECT trigger_message_id, trigger_created_at, trigger_content, assistant_reply, updated_at FROM container_last_turns WHERE container_id = ?1",
     )
     .bind(containerId)
     .first<StoredTurnRow>();
@@ -630,18 +634,19 @@ describe("retry_last_reply", () => {
     });
   });
 
+  /** A conversation whose visible history holds one later exchange. */
+  const LATER = [
+    ...EXCHANGED,
+    message({ id: "q3", isBot: false, text: "Later question", createdAt: 3000 }),
+    message({ id: "a3", isBot: true, text: "Later answer", createdAt: 3100 }),
+  ];
+
   it("brings back no exchange the user truncated away", async () => {
     const db = createTestD1();
     await recordLastTurn(db, STORED_TURN, 1000);
-    // Everything before t = 3000 was truncated; the stored reply is from t = 1000.
-    const history = [
-      ...EXCHANGED,
-      message({ id: "q3", isBot: false, text: "Later question", createdAt: 3000 }),
-      message({ id: "a3", isBot: true, text: "Later answer", createdAt: 3100 }),
-    ];
 
     const output = await runTool(
-      { ...CHANNEL, history },
+      { ...CHANNEL, history: LATER },
       "retry_last_reply",
       {},
       { db, resetAt: 3000 },
@@ -658,6 +663,144 @@ describe("retry_last_reply", () => {
         {},
         { db, resetAt: 3000 },
       ),
+    ).toEqual({
+      status: "no_previous_turn",
+    });
+  });
+
+  it("goes by when the prompt was sent, not by when its reply was stored", async () => {
+    const db = createTestD1();
+    // The user asked at t = 500 and truncated at t = 3000 while the reply was
+    // still being written; the reply landed at t = 3500.
+    await recordLastTurn(db, STORED_TURN, 3500);
+
+    const output = await runTool(
+      { ...CHANNEL, history: EXCHANGED },
+      "retry_last_reply",
+      {},
+      { db, resetAt: 3000 },
+    );
+
+    // The prompt predates the truncation, so the stored turn is not used — however recent its reply.
+    expect(output).toEqual({ status: "no_previous_turn" });
+  });
+
+  it("does not let retries stored after the truncation revive the prompt", async () => {
+    const db = createTestD1();
+    await recordLastTurn(db, STORED_TURN, 1000);
+    // Two retries, both stored after the user truncated everything before t = 3000.
+    await recordLastReply(
+      db,
+      { containerId: STORED_TURN.containerId, scopeId: "g1", assistantReply: "Friday." },
+      4000,
+    );
+    await recordLastReply(
+      db,
+      { containerId: STORED_TURN.containerId, scopeId: "g1", assistantReply: "Fri." },
+      5000,
+    );
+
+    expect(await getLastTurn(db, STORED_TURN.containerId)).toMatchObject({
+      triggerCreatedAt: 500,
+      assistantReply: "Fri.",
+      updatedAt: 5000,
+    });
+    expect(
+      await runTool(
+        { ...CHANNEL, history: EXCHANGED },
+        "retry_last_reply",
+        {},
+        { db, resetAt: 3000 },
+      ),
+    ).toEqual({ status: "no_previous_turn" });
+  });
+
+  it("reads a stored prompt that was sent after the watermark", async () => {
+    const db = createTestD1();
+    await recordLastTurn(db, { ...STORED_TURN, triggerCreatedAt: 3000 }, 4000);
+
+    const output = await runTool(
+      { ...CHANNEL, history: [] },
+      "retry_last_reply",
+      {},
+      { db, resetAt: 3000 },
+    );
+
+    expect(output).toMatchObject({
+      previousUserPrompt: "What is the release day?",
+      previousAssistantReply: "Fridays.",
+    });
+  });
+
+  /** A conversation where the user asked, then asked twice in a row for the reply to be redone. */
+  const CHAINED = [
+    ...EXCHANGED,
+    message({ id: "redo-1", isBot: false, text: "重试", createdAt: 2000, retryRequest: true }),
+    message({
+      id: "a-redone",
+      isBot: true,
+      authorId: "bot",
+      text: "It deploys on Fridays.",
+      createdAt: 2100,
+    }),
+  ];
+
+  it("walks back past an earlier redo request to the question actually asked", async () => {
+    const output = await runTool({ ...DM, history: CHAINED }, "retry_last_reply", {
+      instruction: "shorter",
+    });
+
+    // The question is the one the redone reply answers; the reply to improve is the latest one to it.
+    expect(output).toEqual({
+      status: "ok",
+      previousUserPrompt: "What is the release day?",
+      previousAssistantReply: "It deploys on Fridays.",
+      instruction: "shorter",
+    });
+  });
+
+  it("walks back any number of redo requests in a row", async () => {
+    const history = [
+      ...CHAINED,
+      message({ id: "redo-2", isBot: false, text: "again", createdAt: 2200, retryRequest: true }),
+      message({
+        id: "a-redone-2",
+        isBot: true,
+        authorId: "bot",
+        text: "Fridays.",
+        createdAt: 2300,
+      }),
+    ];
+
+    const output = await runTool({ ...DM, history }, "retry_last_reply");
+
+    expect(output).toMatchObject({
+      previousUserPrompt: "What is the release day?",
+      previousAssistantReply: "Fridays.",
+    });
+  });
+
+  it("finds nothing to redo when every prompt left is a redo request", async () => {
+    const history = [
+      message({ id: "redo-1", isBot: false, text: "重试", createdAt: 2000, retryRequest: true }),
+      message({
+        id: "a-redone",
+        isBot: true,
+        authorId: "bot",
+        text: "It deploys on Fridays.",
+        createdAt: 2100,
+      }),
+    ];
+
+    expect(await runTool({ ...DM, history }, "retry_last_reply")).toEqual({
+      status: "no_previous_turn",
+    });
+  });
+
+  it("does not walk back past the user's truncation to reach a question", async () => {
+    // The question was asked before the truncation; only the redo requests and their replies are still in view.
+    expect(
+      await runTool({ ...CHANNEL, history: CHAINED }, "retry_last_reply", {}, { resetAt: 1999 }),
     ).toEqual({
       status: "no_previous_turn",
     });
@@ -700,21 +843,43 @@ describe("retry_last_reply", () => {
 });
 
 describe("generation turn record", () => {
-  it("stores a completed guild turn for the next retry", async () => {
+  it("stores a completed guild turn for the next retry, with the time its message was sent", async () => {
     const env = makeEnv();
     const { model } = scriptedModel([{ text: "Fridays." }]);
     await useRealLoop(model);
 
-    await generate(env, { ...CHANNEL, content: "What is the release day?" });
+    const result = await generate(env, {
+      ...CHANNEL,
+      content: "What is the release day?",
+      messageCreatedAt: 4242,
+    });
 
-    expect(await storedTurn(env.DB, CHANNEL.containerId)).toEqual({
+    expect(await storedTurn(env.DB, CHANNEL.containerId)).toMatchObject({
       trigger_message_id: "m2",
+      trigger_created_at: 4242,
       trigger_content: "What is the release day?",
       assistant_reply: "Fridays.",
     });
+    expect(result).not.toHaveProperty("retriedLastReply");
   });
 
-  it("replaces only the reply when the turn redid the last one", async () => {
+  it("stamps a Runtime that does not say when the message was sent with the reply's own time", async () => {
+    const env = makeEnv();
+    const { model } = scriptedModel([{ text: "Fridays." }]);
+    await useRealLoop(model);
+
+    await generate(env, CHANNEL);
+
+    // Late rather than early: a prompt the Runtime did not time reads as newer than it is.
+    expect(await storedTurn(env.DB, CHANNEL.containerId)).toMatchObject({
+      trigger_message_id: "m2",
+      trigger_created_at: expect.any(Number),
+    });
+    const row = await storedTurn(env.DB, CHANNEL.containerId);
+    expect(row?.trigger_created_at).toBe(row?.updated_at);
+  });
+
+  it("replaces only the reply when the turn redid the last one, and says so", async () => {
     const env = makeEnv();
     await recordLastTurn(env.DB, STORED_TURN, 1000);
     const { model, prompts } = scriptedModel([
@@ -723,7 +888,7 @@ describe("generation turn record", () => {
     ]);
     await useRealLoop(model);
 
-    await generate(env, CHANNEL);
+    const result = await generate(env, { ...CHANNEL, messageCreatedAt: 9000 });
 
     expect(toolOutputs(prompts[1] ?? [])).toEqual([
       {
@@ -736,8 +901,11 @@ describe("generation turn record", () => {
         },
       },
     ]);
-    expect(await storedTurn(env.DB, CHANNEL.containerId)).toEqual({
+    expect(result).toMatchObject({ status: "completed", retriedLastReply: true });
+    // The prompt stays the one the user actually wrote, with its own time — not the redo request's.
+    expect(await storedTurn(env.DB, CHANNEL.containerId)).toMatchObject({
       trigger_message_id: "m1",
+      trigger_created_at: 500,
       trigger_content: "What is the release day?",
       assistant_reply: "Friday.",
     });
@@ -751,10 +919,12 @@ describe("generation turn record", () => {
     ]);
     await useRealLoop(model);
 
-    await generate(env, CHANNEL);
+    const result = await generate(env, { ...CHANNEL, messageCreatedAt: 7000 });
 
-    expect(await storedTurn(env.DB, CHANNEL.containerId)).toEqual({
+    expect(result).not.toHaveProperty("retriedLastReply");
+    expect(await storedTurn(env.DB, CHANNEL.containerId)).toMatchObject({
       trigger_message_id: "m2",
+      trigger_created_at: 7000,
       trigger_content: "redo that",
       assistant_reply: "There is no earlier reply to redo.",
     });

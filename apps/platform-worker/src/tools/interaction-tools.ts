@@ -274,8 +274,13 @@ export function hasThreadPause(
 
 /**
  * The latest exchange of the conversation as its history shows it: the bot's
- * newest reply, and the message before it that prompted it. Read backwards
+ * newest reply, and the message before it that asked for it. Read backwards
  * from the end, so it is the turn just before the current message.
+ *
+ * A message marked `retryRequest` only asked for the reply before it to be
+ * redone, so it is walked past: when the user asks twice in a row, the prompt
+ * is still the question they actually asked, and the reply to improve the
+ * latest one to it.
  */
 function lastExchangedTurn(
   req: GenerationRequest,
@@ -290,7 +295,9 @@ function lastExchangedTurn(
       if (message.isBot) reply = message;
       continue;
     }
-    if (!message.isBot) return { userPrompt: message.text, assistantReply: reply.text };
+    if (!message.isBot && message.retryRequest !== true) {
+      return { userPrompt: message.text, assistantReply: reply.text };
+    }
   }
   return null;
 }
@@ -332,12 +339,13 @@ function createRetryLastReplyTool(context: InteractionToolContext) {
       if (req.scopeId !== DM_SCOPE) {
         try {
           const stored = await getLastTurn(db, req.containerId);
-          // A turn stored before the user's context watermark was truncated
-          // away: it is theirs to forget, and this tool does not bring it back.
+          // A prompt sent before the user's context watermark was truncated
+          // away: it is theirs to forget, and this tool does not bring it
+          // back — not through a retry stored after the watermark either.
           if (
             stored !== null &&
             stored.triggerContent.trim() !== "" &&
-            (resetAt <= 0 || stored.updatedAt >= resetAt)
+            (resetAt <= 0 || stored.triggerCreatedAt >= resetAt)
           ) {
             turn = { userPrompt: stored.triggerContent, assistantReply: stored.assistantReply };
           }

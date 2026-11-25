@@ -60,12 +60,29 @@ export interface HistoryMessage {
   authorName: string;
   isBot: boolean;
   createdAt: number;
+  /**
+   * True for a message through which the triggering user only asked for the
+   * bot's previous reply to be redone (`retry_last_reply`). The question
+   * being answered lies further back, so nothing reads such a message as a
+   * prompt of its own.
+   */
+  retryRequest?: boolean;
 }
 
 // ── Generation ────────────────────────────────────────────────────────────
 
 export interface GenerationRequest {
+  /**
+   * Discord message id: the Worker's dedup key. A continuation of a question
+   * card carries an id derived from the question's.
+   */
   messageId: string;
+  /**
+   * When the triggering message was sent, in epoch ms — for a continuation,
+   * when the user answered. The stored turn of a guild conversation keeps it
+   * as the prompt's own time, which later retries never move.
+   */
+  messageCreatedAt?: number;
   containerId: string;
   scopeId: string;
   channelId: string;
@@ -151,6 +168,12 @@ export type GenerationResult =
        * messages there no longer reach the bot until someone summons it again.
        */
       threadDeactivated?: boolean;
+      /**
+       * The run redid the conversation's last reply (`retry_last_reply`). The
+       * Runtime marks the message that asked for it as a `retryRequest` in
+       * later history, so the next retry can walk back to the question.
+       */
+      retriedLastReply?: boolean;
     }
   | {
       status: "rejected";
@@ -216,11 +239,13 @@ export interface ThreadSession {
 }
 
 /**
- * Read or change a thread's session. `upsert` and `set_active` create the row
- * when the thread has none; the card ops act on an existing row only.
+ * Read or change a thread's session. Every op names the thread's guild, and
+ * the Worker acts on the row only when both match: a guild can neither read
+ * nor change another guild's thread state. `upsert` and `set_active` create
+ * the row when the thread has none; the card ops act on an existing row only.
  */
 export type ThreadSessionRequest =
-  | { op: "get"; threadId: string }
+  | { op: "get"; threadId: string; guildId: string }
   /** Registers a thread and makes the bot follow it; an existing row keeps its cards. */
   | {
       op: "upsert";
@@ -238,13 +263,29 @@ export type ThreadSessionRequest =
       createdBy: string;
       active: boolean;
     }
-  | { op: "add_card"; threadId: string; cardMessageId: string }
-  | { op: "clear_cards"; threadId: string };
+  | { op: "add_card"; threadId: string; guildId: string; cardMessageId: string }
+  /** Forgets the listed cards; cards that could not be deleted from Discord stay listed, to be cleaned up by a later turn. */
+  | { op: "clear_cards"; threadId: string; guildId: string; clearedIds: string[] };
 
 /** The session as it stands after the op; `session` is null when no row is (or came) involved. */
 export type ThreadSessionResponse =
   | { status: "ok"; session: ThreadSession | null }
   | { status: "error"; code: "invalid_body" | "thread_state_failed" };
+
+/**
+ * Whether the Worker would answer in a channel at all — the guild's switch
+ * and its channel allowlist, exactly as the generation gate reads them. The
+ * Runtime asks before it starts a thread there, so a disabled guild or a
+ * channel off the allowlist never gets an empty thread of its own.
+ */
+export interface ChannelAllowedRequest {
+  guildId: string;
+  channelId: string;
+}
+
+export type ChannelAllowedResponse =
+  | { status: "ok"; allowed: boolean }
+  | { status: "error"; code: "invalid_body" };
 
 // ── Usage ─────────────────────────────────────────────────────────────────
 

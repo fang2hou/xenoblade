@@ -20,6 +20,7 @@ import { handleControlCommand } from "./control-commands";
 import { handleUsageCommand } from "./usage";
 import type { EnvConfig } from "./env";
 import { handleMessageCreate, handleComponentInteraction, type Runtime } from "./generation-flow";
+import { RetryRequests } from "./retry-requests";
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -27,6 +28,7 @@ async function main(): Promise<void> {
     env,
     queue: new ConversationQueue(),
     askCards: new AskPromptRegistry(),
+    retryRequests: new RetryRequests(),
     memoryConfirms: new MemoryConfirmRegistry(),
     soulConfirms: new SoulConfirmRegistry(),
     threadSessions: new ThreadSessions({
