@@ -43,9 +43,9 @@ import { evaluateTrigger, type TriggerDecision } from "./trigger-policy";
 import { fetchHistory } from "./history";
 import { sendTyping } from "./output";
 import { StagedStatus } from "./staged-status";
-import { generate } from "./ai-client";
+import { generate, INGEST_TIMEOUT_MS } from "./ai-client";
 import { handleDmMessage } from "./dm-commands";
-import { HistoryIngestBuffer } from "./history-ingest";
+import { HistoryIngestBuffer, publicChannelIds } from "./history-ingest";
 import { ConversationQueue } from "./conversation-queue";
 import { registerSlashCommands } from "./slash-commands";
 import { handleLanguageCommand, resolveUiLanguageBounded } from "./language";
@@ -116,7 +116,8 @@ async function main(): Promise<void> {
   // Edits and deletions keep the history index in step with Discord. A
   // deleted message is often partial; its ids are all the buffer needs.
   client.on("messageUpdate", (oldMessage, newMessage) => {
-    historyIngest.edit(oldMessage, newMessage);
+    // Fire-and-forget: an edit of an uncached message may fetch it first.
+    void historyIngest.edit(oldMessage, newMessage);
   });
   client.on("messageDelete", (message) => {
     historyIngest.remove(message);
@@ -267,6 +268,10 @@ async function runGeneration(
     );
   }
 
+  // The guild's public channels as they are right now: the Worker reads
+  // stored history of these channels only. None in a DM.
+  const publicIds = publicChannelIds(message.guild);
+
   const request: GenerationRequest = {
     // messageId is the dedup key on the Worker — use the trigger event (the
     // mention), not the fallback content source, so a bare mention that
@@ -279,6 +284,7 @@ async function runGeneration(
     // A thread passes its parent so the Worker's channel allowlist admits it
     // when the parent channel is listed.
     parentChannelId: message.channel.isThread() ? message.channel.parentId : null,
+    ...(publicIds === undefined ? {} : { publicChannelIds: publicIds }),
     userId: message.author.id,
     userDisplayName:
       message.member?.displayName || message.author.displayName || message.author.username,
@@ -886,9 +892,14 @@ async function startRegenerate(
       console.log(JSON.stringify({ event: "regenerate_target_missing", messageId }));
       return;
     }
+    // The frozen request is as old as the reply it re-runs. Which channels
+    // are public is read again, so a channel made private since stays unread.
+    const request: GenerationRequest = channel.isDMBased()
+      ? entry.request
+      : { ...entry.request, publicChannelIds: publicChannelIds(channel.guild) };
     await executeGeneration(
       channel,
-      entry.request,
+      request,
       env,
       { regenerate: true, target: { entry, head, notify } },
       registry,
@@ -1021,6 +1032,13 @@ function startHealthServer(port: number): Server {
 }
 
 /**
+ * Backstop for a shutdown. It outlasts one history ingest request
+ * ({@link INGEST_TIMEOUT_MS}), so the final flush in `registerShutdown` is
+ * never cut off by this timer.
+ */
+const SHUTDOWN_GRACE_MS = INGEST_TIMEOUT_MS + 5_000;
+
+/**
  * Tear down the client and health server on SIGTERM / SIGINT: stop the
  * gateway, deliver the history index changes still buffered, then exit once
  * the health server is closed.
@@ -1056,8 +1074,10 @@ function registerShutdown(
           process.exit(0);
         });
       });
-    // Don't hang forever if the server won't close promptly.
-    setTimeout(() => process.exit(0), 5_000).unref();
+    // The backstop for the exit: longer than an ingest request can take, so
+    // it never cuts off the flush above. A container runtime's own stop grace
+    // may still end the process sooner.
+    setTimeout(() => process.exit(0), SHUTDOWN_GRACE_MS).unref();
   };
   process.on("SIGTERM", () => shutdown("SIGTERM"));
   process.on("SIGINT", () => shutdown("SIGINT"));

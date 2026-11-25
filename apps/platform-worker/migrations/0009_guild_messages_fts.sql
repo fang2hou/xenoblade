@@ -6,9 +6,15 @@
 -- which keeps both tables in step: guild_messages holds the message, and
 -- guild_messages_fts holds its word-segmented text for full-text search.
 -- Rows older than 90 days are pruned during ingest (src/history-index.ts).
+--
+-- A message's row in guild_messages_fts has the rowid of its row in
+-- guild_messages: the SQLite-owned `id`, never the Discord message id. FTS5
+-- deletes by rowid, and deriving one from a message id would let ids outside
+-- the signed 64-bit range alias each other.
 
 CREATE TABLE guild_messages (
-  message_id        TEXT PRIMARY KEY,
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  message_id        TEXT NOT NULL UNIQUE,
   guild_id          TEXT NOT NULL,
   channel_id        TEXT NOT NULL,
   parent_channel_id TEXT,

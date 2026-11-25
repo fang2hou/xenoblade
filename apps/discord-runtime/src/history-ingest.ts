@@ -1,3 +1,5 @@
+import { ChannelType, PermissionFlagsBits } from "discord.js";
+import type { PermissionsBitField, Role } from "discord.js";
 import type {
   IndexedMessageUpsert,
   MessageIngestRequest,
@@ -20,6 +22,34 @@ export const MAX_QUEUE_SIZE = 200;
 const MAX_REQUEST_SIZE = 50;
 
 /**
+ * What the visibility rule reads from a channel; every discord.js channel
+ * fits. `permissionsFor` gives a role's permissions in the channel, worked out
+ * from its overwrites — for a thread, from its parent channel's — and is null
+ * when that cannot be worked out, as for a thread whose parent is not cached.
+ */
+export interface VisibilityChannel {
+  type: ChannelType;
+  permissionsFor?(role: Role): Readonly<PermissionsBitField> | null;
+}
+
+interface ListedChannel extends VisibilityChannel {
+  id: string;
+}
+
+/** What the visibility rule reads from a guild; a discord.js `Guild` fits. */
+export interface VisibilityGuild {
+  channels: { cache: { values(): Iterable<ListedChannel> } };
+  roles: { everyone: Role | null };
+}
+
+/** The channel of a message as the buffer reads it. */
+interface MessageChannel extends VisibilityChannel {
+  isDMBased?(): boolean;
+  isThread?(): boolean;
+  parentId?: string | null;
+}
+
+/**
  * The fields of a discord.js `Message` the buffer reads. A full message and a
  * partial one both fit: a partial carries `null` for `content` and `author`.
  */
@@ -32,10 +62,13 @@ export interface IngestMessage {
   system: boolean | null;
   createdTimestamp: number;
   editedTimestamp: number | null;
-  channel?: { isThread(): boolean; isDMBased(): boolean; parentId?: string | null } | null;
   author?: { id: string; bot: boolean; displayName: string | null; username: string } | null;
   member?: { displayName: string } | null;
   reference?: { messageId?: string | null } | null;
+  channel?: MessageChannel | null;
+  guild?: VisibilityGuild | null;
+  /** Fetches the whole message from Discord; a partial carries only what the gateway sent. */
+  fetch?(): Promise<IngestMessage>;
 }
 
 /** One buffered change; for a message id only the latest state is kept. */
@@ -63,17 +96,53 @@ type GuildChatMessage = IngestMessage & {
   author: { id: string; bot: boolean; displayName: string | null; username: string };
 };
 
+/**
+ * Is this a channel every member of the guild can read?
+ *
+ * A private thread never is. Anything else is exactly as public as the `@everyone`
+ * role's permissions make it — for a thread, in its parent channel, which is
+ * where a thread's access is decided. What the cache cannot answer counts as
+ * private: only what is provably public is ever indexed.
+ */
+export function isPublicChannel(
+  channel: VisibilityChannel | null | undefined,
+  everyone: Role | null | undefined,
+): boolean {
+  if (channel == null || everyone == null) return false;
+  if (channel.type === ChannelType.PrivateThread) return false;
+  return channel.permissionsFor?.(everyone)?.has(PermissionFlagsBits.ViewChannel) === true;
+}
+
+/**
+ * The guild's channels that are public right now, read from its channel
+ * cache — no request to Discord. Undefined without a guild, as in a DM.
+ */
+export function publicChannelIds(guild: VisibilityGuild | null | undefined): string[] | undefined {
+  if (guild == null) return undefined;
+  const ids: string[] = [];
+  for (const channel of guild.channels.cache.values()) {
+    if (isPublicChannel(channel, guild.roles.everyone)) ids.push(channel.id);
+  }
+  return ids;
+}
+
 function hasText(message: IngestMessage): message is IngestMessage & { content: string } {
   return typeof message.content === "string" && message.content.trim() !== "";
 }
 
+/** A message of a guild channel that every member can read — the only place text is indexed from. */
+function isInPublicChannel(message: IngestMessage): message is IngestMessage & { guildId: string } {
+  if (message.guildId === null || message.channel?.isDMBased?.() === true) return false;
+  return isPublicChannel(message.channel, message.guild?.roles.everyone);
+}
+
 /**
- * Is this a message of a guild channel that is chat — no DM, webhook, another
- * bot, or Discord system notice? Xenoblade's own messages pass, so a question
- * and its answer stay together in the index.
+ * Is this a message of a public guild channel that is chat — no DM, private
+ * channel, webhook, another bot, or Discord system notice? Xenoblade's own
+ * messages pass, so a question and its answer stay together in the index.
  */
 function isGuildChat(message: IngestMessage, botId: string): message is GuildChatMessage {
-  if (message.guildId === null || message.channel?.isDMBased() === true) return false;
+  if (!isInPublicChannel(message)) return false;
   if (message.webhookId !== null || message.system === true) return false;
   const author = message.author;
   return author != null && (!author.bot || author.id === botId);
@@ -97,7 +166,7 @@ function toUpsert(message: GuildChatMessage & { content: string }): GuildChange 
       message: {
         messageId: message.id,
         channelId: message.channelId,
-        parentChannelId: channel?.isThread() === true ? (channel.parentId ?? null) : null,
+        parentChannelId: channel?.isThread?.() === true ? (channel.parentId ?? null) : null,
         authorId: message.author.id,
         authorName: authorDisplayName(message),
         isBot: message.author.bot,
@@ -114,11 +183,12 @@ function toUpsert(message: GuildChatMessage & { content: string }): GuildChange 
  * Buffers guild message changes and delivers them to the Worker's history
  * index in batches.
  *
- * Created, edited, and deleted messages of guild channels are buffered per
- * guild — one entry per message id, its latest state — and sent every
+ * Created, edited, and deleted messages of public guild channels are buffered
+ * per guild — one entry per message id, its latest state — and sent every
  * {@link FLUSH_INTERVAL_MS}, or as soon as a guild holds
- * {@link FLUSH_BATCH_SIZE} changes. DMs, webhooks, other bots, and messages
- * without text never enter; Xenoblade's own replies do.
+ * {@link FLUSH_BATCH_SIZE} changes. DMs, private and role-restricted channels,
+ * private threads, webhooks, other bots, and messages without text never
+ * enter; Xenoblade's own replies do.
  *
  * Delivery is best-effort. A batch the Worker could not take goes back to the
  * front of its buffer and is retried, and no buffer keeps more than
@@ -152,25 +222,19 @@ export class HistoryIngestBuffer {
   }
 
   /**
-   * Queue an edited message. Its new text is re-indexed; a message edited to
-   * no text at all leaves the index instead. An update that left the text
-   * unchanged — an embed, attachment, or component changed — sends nothing.
+   * Bring the index in step with an edited message. Its new text is
+   * re-indexed, and a message edited to no text at all leaves the index. An
+   * update that left the text unchanged — an embed, attachment, or component
+   * changed — sends nothing. An edit that arrives without its author, as one
+   * of a message the cache no longer holds does, has the message fetched once:
+   * nothing is indexed without an author. Never rejects.
    */
-  edit(oldMessage: IngestMessage | null, newMessage: IngestMessage): void {
-    this.safely(() => {
-      const botId = this.options.botId();
-      // A partial update carries no content at all: it says nothing about the text.
-      if (newMessage.content == null || !isGuildChat(newMessage, botId)) return;
-      if (hasText(newMessage)) {
-        if (oldMessage?.content !== newMessage.content) {
-          const upsert = toUpsert(newMessage);
-          this.put(upsert.guildId, upsert.entry);
-        }
-        return;
-      }
-      // The text is gone: a message that carried text — or whose earlier text is unknown — leaves the index.
-      if (oldMessage === null || hasText(oldMessage)) this.remove(newMessage);
-    });
+  async edit(oldMessage: IngestMessage | null, newMessage: IngestMessage): Promise<void> {
+    try {
+      await this.reindex(oldMessage, newMessage);
+    } catch (error) {
+      this.logEventError(error);
+    }
   }
 
   /** Queue a deleted message for removal. A partial message is enough: it still has its ids. */
@@ -196,18 +260,50 @@ export class HistoryIngestBuffer {
     await this.flush();
   }
 
+  private async reindex(
+    oldMessage: IngestMessage | null,
+    newMessage: IngestMessage,
+  ): Promise<void> {
+    // A partial update carries no content at all: it says nothing about the text.
+    if (newMessage.content == null || !isInPublicChannel(newMessage)) return;
+    if (!hasText(newMessage)) {
+      // The text is gone: a message that carried text — or whose earlier text
+      // is unknown — leaves the index, unless it was never chat to begin with.
+      const wasChat = newMessage.author == null || isGuildChat(newMessage, this.options.botId());
+      if (wasChat && (oldMessage === null || hasText(oldMessage))) this.remove(newMessage);
+      return;
+    }
+    if (oldMessage?.content === newMessage.content) return;
+    const botId = this.options.botId();
+    const current = newMessage.author == null ? await newMessage.fetch?.() : newMessage;
+    if (current === undefined || !isGuildChat(current, botId)) return;
+    if (hasText(current)) {
+      if (oldMessage?.content !== current.content) {
+        const upsert = toUpsert(current);
+        this.put(upsert.guildId, upsert.entry);
+      }
+      return;
+    }
+    // The fetch found no text: a newer edit removed it, so the message leaves the index.
+    this.remove(current);
+  }
+
   /** Run one gateway event; indexing is best-effort, so nothing here may break the caller. */
   private safely(step: () => void): void {
     try {
       step();
     } catch (error) {
-      console.log(
-        JSON.stringify({
-          event: "history_ingest_event_error",
-          error: error instanceof Error ? error.name : typeof error,
-        }),
-      );
+      this.logEventError(error);
     }
+  }
+
+  private logEventError(error: unknown): void {
+    console.log(
+      JSON.stringify({
+        event: "history_ingest_event_error",
+        error: error instanceof Error ? error.name : typeof error,
+      }),
+    );
   }
 
   /** Buffer the latest state of a message. The latest state also counts as the newest change. */

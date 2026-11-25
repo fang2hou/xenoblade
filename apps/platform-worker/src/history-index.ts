@@ -23,6 +23,9 @@ export const PRUNE_BATCH_SIZE = 200;
 /** Upserts per write transaction, so one D1 batch stays short in statements and bytes. */
 const UPSERTS_PER_BATCH = 10;
 
+/** Statements that store one message: the row, then its search text out with the old and in with the new. */
+const STATEMENTS_PER_UPSERT = 3;
+
 /** A message dated further ahead than this is not stored: no row may outlive the window. */
 const MAX_CLOCK_SKEW_MS = 24 * 60 * 60 * 1000;
 
@@ -40,6 +43,28 @@ const AUTHOR_FILTER_CANDIDATES = 200;
 /** Channel ids whose stored history may be read; null when the guild allows every channel. */
 type AllowedChannels = readonly string[] | null;
 
+/** The scope every read is bound to. */
+interface ReadScope {
+  guildId: string;
+  /** The guild's channel allowlist; null when every channel is allowed. */
+  allowedChannels: AllowedChannels;
+  /**
+   * The channels that are public right now, as the Runtime sees them. When
+   * set, only messages of these channels are read, however they got into the
+   * index: a channel made private after its messages were stored is no
+   * longer readable. Unset when the Runtime did not say.
+   */
+  publicChannelIds?: readonly string[];
+  /**
+   * The triggering user's context watermark for the container the generation
+   * runs in (ADR-014): messages of `containerChannelId` older than it were
+   * truncated away from that user, so no read may bring them back.
+   */
+  resetAt?: number;
+  containerChannelId?: string;
+  now: number;
+}
+
 /** One indexed message as the read helpers return it. */
 export type IndexedMessage = Omit<IndexedMessageUpsert, "updatedAt">;
 
@@ -48,38 +73,29 @@ export interface IndexedContextMessage extends IndexedMessage {
   isAnchor: boolean;
 }
 
-export interface RecentMessagesQuery {
-  guildId: string;
+export interface RecentMessagesQuery extends ReadScope {
   channelId: string;
-  allowedChannels: AllowedChannels;
   /** Only messages older than this one. */
   beforeMessageId?: string;
   limit: number;
-  now: number;
 }
 
-export interface SearchMessagesQuery {
-  guildId: string;
+export interface SearchMessagesQuery extends ReadScope {
   query: string;
   channelId?: string;
   /** Part of a display name, matched without regard to case. */
   authorName?: string;
   afterMs?: number;
   beforeMs?: number;
-  allowedChannels: AllowedChannels;
   limit: number;
-  now: number;
 }
 
-export interface MessageContextQuery {
-  guildId: string;
+export interface MessageContextQuery extends ReadScope {
   messageId: string;
   /** Earlier messages of the same channel to include. */
   before: number;
   /** Later messages of the same channel to include. */
   after: number;
-  allowedChannels: AllowedChannels;
-  now: number;
 }
 
 // ── Segmentation and query building ───────────────────────────────────────
@@ -117,25 +133,6 @@ export function buildFtsQuery(rawQuery: string): string | null {
     .slice(0, MAX_QUERY_TOKENS)
     .map((token) => `"${token.replaceAll('"', '""')}"`)
     .join(" ");
-}
-
-const SNOWFLAKE = /^\d{1,19}$/;
-
-/**
- * The rowid of a message's row in `guild_messages_fts`, as decimal text.
- *
- * FTS5 finds a row at once only by rowid; a DELETE on any other column scans
- * the whole index. A message's rowid is therefore derived from its id — the
- * snowflake itself, or a 63-bit hash when the id is not a number. It is
- * bound as text and cast in SQL, because a snowflake does not fit a JS number.
- */
-function ftsRowId(messageId: string): string {
-  if (SNOWFLAKE.test(messageId)) return messageId;
-  let hash = 0xcbf29ce484222325n;
-  for (let i = 0; i < messageId.length; i++) {
-    hash = BigInt.asUintN(64, (hash ^ BigInt(messageId.charCodeAt(i))) * 0x100000001b3n);
-  }
-  return String(hash & 0x7fffffffffffffffn);
 }
 
 // ── Ingest ────────────────────────────────────────────────────────────────
@@ -220,13 +217,19 @@ function parseIngestRequest(req: unknown, now: number): IngestRequest | null {
   return { guildId: req.guildId, upserts: [...latest.values()], deletes, rejected };
 }
 
+/**
+ * The stored row of one message of a guild. Keyed by the message id and the
+ * guild together, it is what keeps a guild's writes on its own rows: the id
+ * of a message another guild already owns resolves to nothing here.
+ */
+const OWNED_ROW = "(SELECT id FROM guild_messages WHERE guild_id = ?1 AND message_id = ?2)";
+
 const UPSERT_MESSAGE = `
   INSERT INTO guild_messages
     (message_id, guild_id, channel_id, parent_channel_id, author_id, author_name,
      is_bot, content, reply_to_id, created_at, updated_at)
   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
   ON CONFLICT(message_id) DO UPDATE SET
-    guild_id = excluded.guild_id,
     channel_id = excluded.channel_id,
     parent_channel_id = excluded.parent_channel_id,
     author_id = excluded.author_id,
@@ -235,15 +238,19 @@ const UPSERT_MESSAGE = `
     content = excluded.content,
     reply_to_id = excluded.reply_to_id,
     created_at = excluded.created_at,
-    updated_at = excluded.updated_at`;
+    updated_at = excluded.updated_at
+  WHERE guild_messages.guild_id = excluded.guild_id`;
 
-/** Store a message and re-index its text: the previous version of the row goes first. */
+/**
+ * Store a message and re-index its text: the previous version of its search
+ * row goes first. All three statements run in one batch, and the search row
+ * takes its rowid from the stored row itself, so the two tables cannot drift.
+ */
 function upsertStatements(
   db: D1Database,
   guildId: string,
   message: IndexedMessageUpsert,
 ): D1PreparedStatement[] {
-  const rowId = ftsRowId(message.messageId);
   return [
     db
       .prepare(UPSERT_MESSAGE)
@@ -260,74 +267,60 @@ function upsertStatements(
         message.createdAt,
         message.updatedAt,
       ),
-    db.prepare("DELETE FROM guild_messages_fts WHERE rowid = CAST(?1 AS INTEGER)").bind(rowId),
+    db
+      .prepare(`DELETE FROM guild_messages_fts WHERE rowid = ${OWNED_ROW}`)
+      .bind(guildId, message.messageId),
     db
       .prepare(
         `INSERT INTO guild_messages_fts (rowid, message_id, guild_id, channel_id, segmented_content)
-         VALUES (CAST(?1 AS INTEGER), ?2, ?3, ?4, ?5)`,
+         SELECT id, message_id, guild_id, channel_id, ?3 FROM guild_messages
+         WHERE guild_id = ?1 AND message_id = ?2`,
       )
-      .bind(
-        rowId,
-        message.messageId,
-        guildId,
-        message.channelId,
-        segmentForSearch(message.content),
-      ),
+      .bind(guildId, message.messageId, segmentForSearch(message.content)),
   ];
 }
 
-/** Remove deleted messages of one guild — and only of that guild — from both tables. */
+/** The stored rows of a guild's messages, by their message ids. */
+const OWNED_ROWS =
+  "(SELECT id FROM guild_messages WHERE guild_id = ?1 AND message_id IN (SELECT value FROM json_each(?2)))";
+
+/**
+ * Remove deleted messages of one guild — and only of that guild — from both
+ * tables. The search rows go first: they are found through the stored rows,
+ * which the second statement then removes.
+ */
 function deleteStatements(db: D1Database, guildId: string, messageIds: readonly string[]) {
   return [
     db
-      .prepare(
-        "DELETE FROM guild_messages WHERE guild_id = ?1 AND message_id IN (SELECT value FROM json_each(?2))",
-      )
+      .prepare(`DELETE FROM guild_messages_fts WHERE guild_id = ?1 AND rowid IN ${OWNED_ROWS}`)
       .bind(guildId, JSON.stringify(messageIds)),
     db
-      .prepare(
-        "DELETE FROM guild_messages_fts WHERE guild_id = ?1 AND rowid IN (SELECT CAST(value AS INTEGER) FROM json_each(?2))",
-      )
-      .bind(guildId, JSON.stringify(messageIds.map(ftsRowId))),
+      .prepare(`DELETE FROM guild_messages WHERE id IN ${OWNED_ROWS}`)
+      .bind(guildId, JSON.stringify(messageIds)),
   ];
 }
+
+/** A guild's oldest expired messages, at most {@link PRUNE_BATCH_SIZE} of them. */
+const OLDEST_EXPIRED =
+  "(SELECT id FROM guild_messages WHERE guild_id = ?1 AND created_at < ?2 ORDER BY created_at, id LIMIT ?3)";
 
 /**
  * Statements that remove a guild's oldest expired messages from both tables.
  *
- * The guild's `(guild_id, created_at)` index finds them, and the count is
- * capped so one ingest never holds D1 for long: whatever is left waits for
- * the guild's next ingest.
+ * Both select the same rows with the same predicate, and run in one batch:
+ * the first statement removes only search rows, so the second still finds the
+ * very same stored rows to remove. The guild's `(guild_id, created_at)` index
+ * finds them, and the count is capped so one ingest never holds D1 for long —
+ * whatever is left waits for the guild's next ingest.
  */
-async function pruneStatements(
-  db: D1Database,
-  guildId: string,
-  now: number,
-): Promise<{ statements: D1PreparedStatement[]; pruned: number }> {
-  const cutoff = now - HISTORY_RETENTION_MS;
-  const { results } = await db
-    .prepare(
-      "SELECT message_id FROM guild_messages WHERE guild_id = ?1 AND created_at < ?2 ORDER BY created_at LIMIT ?3",
-    )
-    .bind(guildId, cutoff, PRUNE_BATCH_SIZE)
-    .all<{ message_id: string }>();
-  const expiredIds = (results ?? []).map((row) => row.message_id);
-  if (expiredIds.length === 0) return { statements: [], pruned: 0 };
-  return {
-    statements: [
-      db
-        .prepare(
-          "DELETE FROM guild_messages WHERE guild_id = ?1 AND created_at < ?2 AND message_id IN (SELECT value FROM json_each(?3))",
-        )
-        .bind(guildId, cutoff, JSON.stringify(expiredIds)),
-      db
-        .prepare(
-          "DELETE FROM guild_messages_fts WHERE guild_id = ?1 AND rowid IN (SELECT CAST(value AS INTEGER) FROM json_each(?2))",
-        )
-        .bind(guildId, JSON.stringify(expiredIds.map(ftsRowId))),
-    ],
-    pruned: expiredIds.length,
-  };
+function pruneStatements(db: D1Database, guildId: string, now: number): D1PreparedStatement[] {
+  const params = [guildId, now - HISTORY_RETENTION_MS, PRUNE_BATCH_SIZE];
+  return [
+    db
+      .prepare(`DELETE FROM guild_messages_fts WHERE guild_id = ?1 AND rowid IN ${OLDEST_EXPIRED}`)
+      .bind(...params),
+    db.prepare(`DELETE FROM guild_messages WHERE id IN ${OLDEST_EXPIRED}`).bind(...params),
+  ];
 }
 
 function chunks<T>(items: readonly T[], size: number): T[][] {
@@ -336,15 +329,22 @@ function chunks<T>(items: readonly T[], size: number): T[][] {
   return groups;
 }
 
+/** Rows a statement changed, as D1 reports it. */
+function changes(result: D1Result | undefined): number {
+  return result?.meta.changes ?? 0;
+}
+
 /**
  * Index a batch of guild message changes (`POST /internal/v1/messages/ingest`).
  *
  * Only messages of channels the guild allows the bot in are stored, under the
- * guild's `enabled` switch; the rest are counted as skipped. Deletes are
- * always carried out, and last, so a deleted message leaves the index even
- * when the same request also upserts it. Every write is idempotent, so a
- * request that fails halfway can simply be sent again. Never throws: a bad
- * payload answers `invalid_body`, a failed write `ingest_failed`.
+ * guild's `enabled` switch; the rest are counted as skipped. Every write is
+ * keyed by the guild, so a request can only ever touch that guild's rows.
+ * Deletes are always carried out, and last, so a deleted message leaves the
+ * index even when the same request also upserts it. Each batch is atomic and
+ * every write is idempotent, so a request that fails halfway can simply be
+ * sent again. Never throws: a bad payload answers `invalid_body`, a failed
+ * write `ingest_failed`.
  */
 export async function handleMessageIngest(
   db: D1Database,
@@ -379,32 +379,40 @@ export async function handleMessageIngest(
       if (allowed) stored.push(upsert);
     }
 
-    const { statements: prune, pruned } = await pruneStatements(db, guildId, now);
+    let upserted = 0;
     for (const batch of chunks(stored, UPSERTS_PER_BATCH)) {
-      await db.batch(batch.flatMap((message) => upsertStatements(db, guildId, message)));
+      const results = await db.batch(
+        batch.flatMap((message) => upsertStatements(db, guildId, message)),
+      );
+      // A stored row counts; a message id another guild already owns changed nothing.
+      for (let i = 0; i < batch.length; i++) {
+        upserted += changes(results[i * STATEMENTS_PER_UPSERT]);
+      }
     }
+
     const removals = deletes.size > 0 ? deleteStatements(db, guildId, [...deletes]) : [];
-    if (removals.length > 0 || prune.length > 0) await db.batch([...removals, ...prune]);
+    const outcomes = await db.batch([...removals, ...pruneStatements(db, guildId, now)]);
+    const pruned = changes(outcomes[removals.length + 1]);
 
     console.log(
       JSON.stringify({
         event: "history_ingest",
         guildId,
         channelIds: [...channelIds],
-        upserted: stored.length,
+        upserted,
         deleted: deletes.size,
         skipped: upserts.length - stored.length,
-        rejected,
+        rejected: rejected + stored.length - upserted,
         pruned,
         durationMs: Date.now() - startedAt,
       }),
     );
     return {
       status: "ok",
-      upserted: stored.length,
+      upserted,
       deleted: deletes.size,
       skipped: upserts.length - stored.length,
-      rejected,
+      rejected: rejected + stored.length - upserted,
       pruned,
     };
   } catch (error) {
@@ -461,6 +469,37 @@ class Binds {
   }
 }
 
+/** True when the scope itself admits no channel at all. */
+function readsNothing(scope: ReadScope): boolean {
+  return scope.allowedChannels?.length === 0 || scope.publicChannelIds?.length === 0;
+}
+
+/**
+ * The `WHERE` terms every read shares, beyond the message's own: its guild,
+ * the 90-day window, the channel allowlist, the channels that are public
+ * now, and the triggering user's truncation of the current container.
+ */
+function scopeTerms(bind: Binds, scope: ReadScope): string[] {
+  const terms = [
+    `gm.guild_id = ${bind.add(scope.guildId)}`,
+    `gm.created_at >= ${bind.add(scope.now - HISTORY_RETENTION_MS)}`,
+  ];
+  const allowlist = allowlistTerm(bind, scope.allowedChannels, "gm.");
+  if (allowlist !== null) terms.push(allowlist);
+  if (scope.publicChannelIds !== undefined) {
+    terms.push(
+      `gm.channel_id IN (SELECT value FROM json_each(${bind.add(JSON.stringify(scope.publicChannelIds))}))`,
+    );
+  }
+  const resetAt = scope.resetAt ?? 0;
+  if (resetAt > 0 && scope.containerChannelId !== undefined) {
+    terms.push(
+      `(gm.channel_id <> ${bind.add(scope.containerChannelId)} OR gm.created_at >= ${bind.add(resetAt)})`,
+    );
+  }
+  return terms;
+}
+
 /**
  * `WHERE` term admitting only allowlisted channels — a thread through its
  * listed parent. Null without an allowlist, when every channel is allowed.
@@ -486,27 +525,24 @@ function isLikeExact(filter: string): boolean {
 /**
  * The newest messages of one channel, oldest first.
  *
- * Scoped to the guild, the 90-day window, and the channel allowlist. With
- * `beforeMessageId`, only messages older than that one — the next page back.
+ * Scoped to the guild, the 90-day window, the channel allowlist, the channels
+ * that are public now, and the triggering user's truncation of this channel,
+ * if it is the one the generation runs in. With `beforeMessageId`, only
+ * messages older than that one — the next page back.
  */
 export async function getRecentIndexedMessages(
   db: D1Database,
   query: RecentMessagesQuery,
 ): Promise<IndexedMessage[]> {
-  if (query.allowedChannels?.length === 0) return [];
+  if (readsNothing(query)) return [];
   const bind = new Binds();
   const guild = bind.add(query.guildId);
-  const where = [
-    `gm.guild_id = ${guild}`,
-    `gm.created_at >= ${bind.add(query.now - HISTORY_RETENTION_MS)}`,
-    `gm.channel_id = ${bind.add(query.channelId)}`,
-  ];
+  const where = scopeTerms(bind, query);
+  where.push(`gm.channel_id = ${bind.add(query.channelId)}`);
   if (query.beforeMessageId !== undefined) {
     const anchor = `SELECT created_at, message_id FROM guild_messages WHERE guild_id = ${guild} AND message_id = ${bind.add(query.beforeMessageId)}`;
     where.push(`(gm.created_at, gm.message_id) < (${anchor})`);
   }
-  const allowlist = allowlistTerm(bind, query.allowedChannels, "gm.");
-  if (allowlist !== null) where.push(allowlist);
 
   const { results } = await db
     .prepare(
@@ -524,28 +560,25 @@ export async function getRecentIndexedMessages(
  * Search a guild's history: messages matching every word of `query`, best
  * match first and, among equals, newest first.
  *
- * Scoped to the guild, the 90-day window, and the channel allowlist; narrower
- * with a channel, an author name, and a time range.
+ * Scoped like every read — guild, 90-day window, allowlist, the channels
+ * that are public now, the triggering user's truncation of the current
+ * container — and narrower with a channel, an author name, and a time range.
  */
 export async function searchIndexedMessages(
   db: D1Database,
   query: SearchMessagesQuery,
 ): Promise<IndexedMessage[]> {
   const match = buildFtsQuery(query.query);
-  if (match === null || query.allowedChannels?.length === 0) return [];
+  if (match === null || readsNothing(query)) return [];
   const since = query.now - HISTORY_RETENTION_MS;
   if (query.beforeMs !== undefined && query.beforeMs <= since) return [];
 
   const bind = new Binds();
-  const where = [
-    `guild_messages_fts MATCH ${bind.add(match)}`,
-    `gm.guild_id = ${bind.add(query.guildId)}`,
-    `gm.created_at >= ${bind.add(Math.max(query.afterMs ?? since, since))}`,
-  ];
+  const where = scopeTerms(bind, query);
+  where.push(`guild_messages_fts MATCH ${bind.add(match)}`);
+  where.push(`gm.created_at >= ${bind.add(Math.max(query.afterMs ?? since, since))}`);
   if (query.beforeMs !== undefined) where.push(`gm.created_at < ${bind.add(query.beforeMs)}`);
   if (query.channelId !== undefined) where.push(`gm.channel_id = ${bind.add(query.channelId)}`);
-  const allowlist = allowlistTerm(bind, query.allowedChannels, "gm.");
-  if (allowlist !== null) where.push(allowlist);
 
   const name = query.authorName === "" ? undefined : query.authorName;
   let readLimit = query.limit;
@@ -564,7 +597,7 @@ export async function searchIndexedMessages(
   const { results } = await db
     .prepare(
       `SELECT ${GM_COLUMNS} FROM guild_messages_fts AS fts
-       JOIN guild_messages AS gm ON gm.message_id = fts.message_id
+       JOIN guild_messages AS gm ON gm.id = fts.rowid
        WHERE ${where.join(" AND ")}
        ORDER BY fts.rank, gm.created_at DESC, gm.message_id DESC
        LIMIT ${bind.add(readLimit)}`,
@@ -585,29 +618,30 @@ export async function searchIndexedMessages(
  * as the anchor.
  *
  * The anchor must belong to the guild, be recent enough, and sit in an
- * allowed channel — otherwise nothing is returned, without saying which.
+ * allowed, public channel — and, in the channel the generation runs in, be
+ * newer than the triggering user's truncation — otherwise nothing is
+ * returned, without saying which.
  */
 export async function getIndexedMessageContext(
   db: D1Database,
   query: MessageContextQuery,
 ): Promise<IndexedContextMessage[]> {
-  if (query.allowedChannels?.length === 0) return [];
+  if (readsNothing(query)) return [];
   const since = query.now - HISTORY_RETENTION_MS;
   const bind = new Binds();
-  const where = [
-    `gm.guild_id = ${bind.add(query.guildId)}`,
-    `gm.message_id = ${bind.add(query.messageId)}`,
-    `gm.created_at >= ${bind.add(since)}`,
-  ];
-  const allowlist = allowlistTerm(bind, query.allowedChannels, "gm.");
-  if (allowlist !== null) where.push(allowlist);
+  const where = scopeTerms(bind, query);
+  where.push(`gm.message_id = ${bind.add(query.messageId)}`);
   const anchor = await db
     .prepare(`SELECT ${GM_COLUMNS} FROM guild_messages AS gm WHERE ${where.join(" AND ")}`)
     .bind(...bind.values)
     .first<MessageRow>();
   if (!anchor) return [];
 
-  // The anchor's channel passed the allowlist, so its neighbours need no check of their own.
+  // The anchor passed every scope check, and its neighbours share its channel,
+  // so they pass the same ones — all but the truncation, which is a matter of
+  // time: in the container's own channel nothing older than it comes back.
+  const inContainer = anchor.channel_id === query.containerChannelId;
+  const floor = Math.max(since, inContainer ? (query.resetAt ?? 0) : 0);
   const neighbors = async (earlier: boolean, count: number): Promise<MessageRow[]> => {
     if (count === 0) return [];
     const { results } = await db
@@ -618,7 +652,7 @@ export async function getIndexedMessageContext(
          ORDER BY gm.created_at ${earlier ? "DESC" : "ASC"}, gm.message_id ${earlier ? "DESC" : "ASC"}
          LIMIT ?6`,
       )
-      .bind(query.guildId, anchor.channel_id, since, anchor.created_at, anchor.message_id, count)
+      .bind(query.guildId, anchor.channel_id, floor, anchor.created_at, anchor.message_id, count)
       .all<MessageRow>();
     return results ?? [];
   };

@@ -30,8 +30,8 @@ import type {
 export const GENERATION_TIMEOUT_MS = 150_000;
 /** Timeout for short Worker control-plane calls. */
 const CONTROL_TIMEOUT_MS = 15_000;
-/** Timeout for one history ingest request; a slow Worker must not hold back the buffer for long. */
-const INGEST_TIMEOUT_MS = 10_000;
+/** Timeout for one history ingest request; a slow Worker must not hold back the buffer for long. Shutdown waits at least this long for a flush in flight. */
+export const INGEST_TIMEOUT_MS = 10_000;
 
 /**
  * Send a generation request to the Platform Worker and return the result.
@@ -226,15 +226,9 @@ async function requestJson<T>(url: string, init: RequestInit, timeoutMs: number)
   }
 
   if (!response.ok) {
-    const errorBody = await response.text().catch(() => "");
-    console.log(
-      JSON.stringify({
-        event: "worker_http_error",
-        url,
-        status: response.status,
-        body: errorBody.slice(0, 200),
-      }),
-    );
+    // Status and route only. An error body can echo a request body, and an
+    // ingest request carries message text.
+    console.log(JSON.stringify({ event: "worker_http_error", url, status: response.status }));
     throw new Error(`Worker HTTP ${response.status} for ${url}`);
   }
 

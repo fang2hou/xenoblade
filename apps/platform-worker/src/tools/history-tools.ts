@@ -10,7 +10,7 @@ import {
   type IndexedMessage,
 } from "../history-index";
 
-/** What a history tool may read: the generation's guild, and the channel it runs in. */
+/** What a history tool may read: the generation's guild, the channel it runs in, and what bounds a read. */
 export interface HistoryToolContext {
   db: D1Database;
   /** The generation's scope: a guild id, or `"dm"`, which has no history. */
@@ -19,6 +19,18 @@ export interface HistoryToolContext {
   channelId: string;
   /** Parent channel when `channelId` is a thread, else null. */
   parentChannelId: string | null;
+  /**
+   * Channels of the guild that are public right now; unset when the Runtime
+   * did not say. Messages of any other channel are never read, however they
+   * got into the index.
+   */
+  publicChannelIds?: string[];
+  /**
+   * The triggering user's context watermark for the channel the generation
+   * runs in (ADR-014): messages of that channel older than it were truncated
+   * away from this user, and no tool may bring them back. 0 when there is none.
+   */
+  resetAt: number;
 }
 
 /** One stored message as a history tool reports it; `createdAt` is ISO 8601. */
@@ -96,6 +108,18 @@ interface HistoryScope extends HistoryToolContext {
   allowedChannels: () => Promise<string[] | null>;
 }
 
+/** What every read of one generation is bound to, with the guild's allowlist resolved. */
+async function readScope(scope: HistoryScope, now: number) {
+  return {
+    guildId: scope.scopeId,
+    allowedChannels: await scope.allowedChannels(),
+    ...(scope.publicChannelIds === undefined ? {} : { publicChannelIds: scope.publicChannelIds }),
+    resetAt: scope.resetAt,
+    containerChannelId: scope.channelId,
+    now,
+  };
+}
+
 type HistoryToolName = "get_recent_messages" | "search_chat_history" | "get_message_context";
 
 /**
@@ -150,16 +174,69 @@ function clampCount(value: number | undefined, fallback: number, min: number, ma
   return Math.min(max, Math.max(min, Math.floor(value)));
 }
 
+/** The first moment a Discord message can have: the snowflake epoch, 2015-01-01T00:00:00Z. */
+const MIN_EPOCH_MS = 1_420_070_400_000;
+
+/** The last instant a four-digit year can name: 9999-12-31T23:59:59.999Z. */
+const MAX_EPOCH_MS = 253_402_300_799_999;
+
+const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
+const ISO_DATETIME =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?(Z|[+-]\d{2}:\d{2})?$/;
+
+/** Days in a month of a year, leap years included. */
+function daysInMonth(year: number, month: number): number {
+  const probe = new Date(0);
+  probe.setUTCFullYear(year, month, 0);
+  return probe.getUTCDate();
+}
+
 /**
- * A time bound as epoch ms: a digit string is epoch ms itself, anything else
- * a date. JavaScript reads a zone-less date-time in the machine's local zone,
- * so one is read as UTC here — the zone the index keeps. Null when unparseable.
+ * A time bound as epoch ms, read strictly.
+ *
+ * Either plain epoch milliseconds, or an ISO 8601 calendar date (`2026-11-01`)
+ * or date-time (`2026-11-01T08:00`, `…T08:00:00.250Z`, `…T08:00+08:00`). A
+ * date-time without a zone is read as UTC — the zone the index keeps — never
+ * in the machine's own.
+ *
+ * Refused, as null: a date that does not exist, a field out of range, any
+ * other wording, and a time no message can have — before Discord's first
+ * message or past the year 9999. `Date.parse` would take the first kinds: it
+ * normalizes 2026-02-30 into March and reads "yesterday" as a date. The last
+ * kind catches digits that are not epoch milliseconds: a basic-format date
+ * (`20261101`) or an epoch in seconds, which would otherwise read as 1970.
  */
 function toEpochMs(value: string): number | null {
-  const text = value.trim();
-  if (/^\d+$/.test(text)) return Number(text);
-  const ms = Date.parse(/^\d{4}-\d{2}-\d{2}T[\d:.]+$/.test(text) ? `${text}Z` : text);
-  return Number.isFinite(ms) ? ms : null;
+  if (/^\d{1,15}$/.test(value)) return inRange(Number(value));
+  const parts = ISO_DATETIME.exec(value) ?? ISO_DATE.exec(value);
+  if (parts === null) return null;
+  const [, year, month, day, hour = "0", minute = "0", second = "0", fraction = "", zone] = parts;
+  if (year === undefined || month === undefined || day === undefined) return null;
+  const years = Number(year);
+  const months = Number(month);
+  const days = Number(day);
+  if (months < 1 || months > 12 || days < 1 || days > daysInMonth(years, months)) return null;
+  const hours = Number(hour);
+  const minutes = Number(minute);
+  const seconds = Number(second);
+  if (hours > 23 || minutes > 59 || seconds > 59) return null;
+
+  const offset = zone === undefined || zone === "Z" ? 0 : offsetMinutes(zone);
+  const date = new Date(0);
+  date.setUTCFullYear(years, months - 1, days);
+  date.setUTCHours(hours, minutes, seconds, Number(fraction.padEnd(3, "0")));
+  return inRange(date.getTime() - offset * 60_000);
+}
+
+/** The instant, or null when no message can have it. */
+function inRange(epochMs: number): number | null {
+  return epochMs >= MIN_EPOCH_MS && epochMs <= MAX_EPOCH_MS ? epochMs : null;
+}
+
+/** Minutes east of UTC that a `Z` or `±HH:MM` zone names. */
+function offsetMinutes(zone: string): number {
+  const sign = zone.startsWith("-") ? -1 : 1;
+  return sign * (Number(zone.slice(1, 3)) * 60 + Number(zone.slice(4, 6)));
 }
 
 /** The longest message text of a result with `count` messages, under the total budget. */
@@ -267,14 +344,12 @@ function createRecentMessagesTool(scope: HistoryScope) {
       const startedAt = Date.now();
       try {
         const messages = await getRecentIndexedMessages(scope.db, {
-          guildId: scope.scopeId,
+          ...(await readScope(scope, startedAt)),
           channelId,
-          allowedChannels: await scope.allowedChannels(),
           ...(input.before_message_id === undefined
             ? {}
             : { beforeMessageId: input.before_message_id }),
           limit,
-          now: startedAt,
         });
         logRead("get_recent_messages", scope, channelId, startedAt, messages.length);
         return { messages: toToolMessages(messages) };
@@ -339,15 +414,13 @@ function createSearchTool(scope: HistoryScope) {
       const startedAt = Date.now();
       try {
         const messages = await searchIndexedMessages(scope.db, {
-          guildId: scope.scopeId,
+          ...(await readScope(scope, startedAt)),
           query: input.query,
           ...(input.channel_id === undefined ? {} : { channelId: input.channel_id }),
           ...(input.author_name === undefined ? {} : { authorName: input.author_name }),
           ...(afterMs === undefined ? {} : { afterMs }),
           ...(beforeMs === undefined ? {} : { beforeMs }),
-          allowedChannels: await scope.allowedChannels(),
           limit,
-          now: startedAt,
         });
         logRead("search_chat_history", scope, input.channel_id, startedAt, messages.length);
         return { messages: toToolMessages(messages) };
@@ -389,12 +462,10 @@ function createMessageContextTool(scope: HistoryScope) {
       const startedAt = Date.now();
       try {
         const context = await getIndexedMessageContext(scope.db, {
-          guildId: scope.scopeId,
+          ...(await readScope(scope, startedAt)),
           messageId: input.message_id,
           before: clampCount(input.before, DEFAULT_CONTEXT_NEIGHBORS, 0, MAX_CONTEXT_NEIGHBORS),
           after: clampCount(input.after, DEFAULT_CONTEXT_NEIGHBORS, 0, MAX_CONTEXT_NEIGHBORS),
-          allowedChannels: await scope.allowedChannels(),
-          now: startedAt,
         });
         logRead("get_message_context", scope, context[0]?.channelId, startedAt, context.length);
         if (context.length === 0) return { error: "message_not_found" };
@@ -418,9 +489,10 @@ function createMessageContextTool(scope: HistoryScope) {
  * `search_chat_history`, and `get_message_context`.
  *
  * They read only stored messages of the generation's guild, within the last
- * 90 days, in the channels of the guild's allowlist — resolved once per
- * generation, at the first read. A DM has no guild history to reach, so a DM
- * generation gets none of these tools.
+ * 90 days, in the channels of the guild's allowlist that are public now, and
+ * — in the channel the generation runs in — no further back than the
+ * triggering user's context truncation. A DM has no guild history to reach,
+ * so a DM generation gets none of these tools.
  */
 export function createHistoryTools(context: HistoryToolContext): ToolSet {
   const { scopeId, db } = context;

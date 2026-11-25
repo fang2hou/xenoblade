@@ -72,6 +72,14 @@ export interface GenerationRequest {
    * allowlist admits a thread whose parent channel is listed.
    */
   parentChannelId?: string | null;
+  /**
+   * Channels of the guild that are public right now, as the Runtime's channel
+   * cache sees them: every member can read them, and a private thread never
+   * counts. When set, the history tools read stored messages of these
+   * channels only, so a channel made private after its messages were indexed
+   * is no longer readable. Omitted in a DM.
+   */
+  publicChannelIds?: string[];
   userId: string;
   userDisplayName: string;
   summonKind: SummonKind;
@@ -401,7 +409,7 @@ export type MessageIngestResponse =
       deleted: number;
       /** Upserts left unstored: their channel is not allowed, or the guild is disabled. */
       skipped: number;
-      /** Upserts left unstored: malformed, or already older than the retention window. */
+      /** Upserts left unstored: malformed, textless, already expired, or an id another guild owns. */
       rejected: number;
       /** Expired messages removed from the index by this request. */
       pruned: number;

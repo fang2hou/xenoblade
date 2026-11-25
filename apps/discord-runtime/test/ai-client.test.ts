@@ -68,13 +68,26 @@ describe("ingestMessages", () => {
     expect(response).toEqual(stored);
   });
 
-  it("rejects when the Worker refuses the batch, so the buffer keeps it", async () => {
-    vi.spyOn(console, "log").mockImplementation(() => undefined);
+  it("rejects when the Worker refuses the batch, and logs the status and route only", async () => {
+    // A body that echoes the request back, as an error page can.
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => Response.json({ status: "error", code: "invalid_body" }, { status: 400 })),
+      vi.fn<(url: string, init?: RequestInit) => Promise<Response>>(
+        async () => new Response('echo: "s3cret message body"', { status: 400 }),
+      ),
     );
 
     await expect(ingestMessages(batch, WORKER, "secret")).rejects.toThrow("Worker HTTP 400");
+
+    // The whole log line: no body field, and nothing of what the body said.
+    expect(log).toHaveBeenCalledTimes(1);
+    const line = String(log.mock.calls[0]?.[0]);
+    expect(JSON.parse(line)).toEqual({
+      event: "worker_http_error",
+      url: `${WORKER}/internal/v1/messages/ingest`,
+      status: 400,
+    });
+    expect(line).not.toContain("s3cret");
   });
 });

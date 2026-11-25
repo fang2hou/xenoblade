@@ -88,6 +88,46 @@ async function storedIds(db: D1Database): Promise<string[]> {
   return (results ?? []).map((row) => row.message_id);
 }
 
+/** The ids of a result's rows, as one comparable list. */
+function rowIds(rows: { id: number }[] | undefined): string {
+  return (rows ?? []).map((row) => row.id).join(",");
+}
+
+/** True while every stored row has a search row of the same id, and no other does. */
+async function inStep(db: D1Database): Promise<boolean> {
+  const stored = await db
+    .prepare("SELECT id FROM guild_messages ORDER BY id")
+    .all<{ id: number }>();
+  const indexed = await db
+    .prepare("SELECT rowid AS id FROM guild_messages_fts ORDER BY id")
+    .all<{ id: number }>();
+  return rowIds(stored.results) === rowIds(indexed.results);
+}
+
+/** A D1 whose statements containing `needle` fail when run — an outage midway through a batch. */
+function failingOn(db: D1Database, needle: string): D1Database {
+  return {
+    prepare: (query: string) => {
+      const statement = db.prepare(query);
+      if (!query.includes(needle)) return statement;
+      return {
+        bind: (...values: unknown[]) => {
+          const bound = statement.bind(...values);
+          return {
+            first: () => bound.first(),
+            all: () => bound.all(),
+            run: async () => {
+              throw new Error("D1 unavailable");
+            },
+          };
+        },
+      };
+    },
+    batch: (statements: D1PreparedStatement[]) => db.batch(statements),
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test double wrapping the SQLite facade
+  } as unknown as D1Database;
+}
+
 function found(messages: readonly { messageId: string }[]): string[] {
   return messages.map((m) => m.messageId);
 }
@@ -492,12 +532,14 @@ describe("handleMessageIngest", () => {
     expect(first).toMatchObject({ status: "ok", upserted: 1, pruned: PRUNE_BATCH_SIZE });
     expect(await rowCount(db, "guild_messages")).toBe(6);
     expect(await rowCount(db, "guild_messages_fts")).toBe(6);
+    expect(await inStep(db)).toBe(true);
 
     const second = await ingest(db, { guildId: G1, upserts: [], deletes: [] });
 
     expect(second).toMatchObject({ status: "ok", pruned: 5 });
     expect(await storedIds(db)).toEqual([mid(999)]);
     expect(await rowCount(db, "guild_messages_fts")).toBe(1);
+    expect(await inStep(db)).toBe(true);
   });
 
   it("prunes only the ingesting guild's expired messages", async () => {
@@ -510,6 +552,27 @@ describe("handleMessageIngest", () => {
       pruned: 1,
     });
     expect(await storedIds(db)).toEqual([mid(2)]);
+    expect(await inStep(db)).toBe(true);
+  });
+
+  it("rolls a prune back whole when it cannot finish, so the tables stay in step", async () => {
+    const db = createTestD1();
+    const agedAt = NOW - HISTORY_RETENTION_MS - 3_600_000;
+    await store(db, [message(1, { createdAt: agedAt, updatedAt: agedAt })], G1, agedAt + 60_000);
+    await store(db, [message(2, { createdAt: agedAt, updatedAt: agedAt })], G1, agedAt + 60_000);
+
+    // The second half of the prune — removing the stored rows — cannot run.
+    const result = await ingest(failingOn(db, "DELETE FROM guild_messages WHERE id IN"), {
+      guildId: G1,
+      upserts: [],
+      deletes: [],
+    });
+
+    // The first half was undone with it: neither table lost a row.
+    expect(result).toEqual({ status: "error", code: "ingest_failed" });
+    expect(await storedIds(db)).toEqual([mid(1), mid(2)]);
+    expect(await rowCount(db, "guild_messages_fts")).toBe(2);
+    expect(await inStep(db)).toBe(true);
   });
 
   it("answers ingest_failed when the database fails, without logging message text", async () => {
@@ -835,6 +898,178 @@ async function post(
     {} as ExecutionContext,
   );
 }
+
+describe("SQLite-owned ids and guild ownership", () => {
+  it("gives message ids beyond the signed 64-bit range rows of their own", async () => {
+    const db = createTestD1();
+    // Both overflow a signed 64-bit integer, where a cast would clamp them onto the same value.
+    const beyond = "9223372036854775808";
+    const further = "18446744073709551616";
+
+    await store(db, [
+      message(1, { messageId: beyond, content: "first beyond" }),
+      message(2, { messageId: further, content: "second beyond" }),
+    ]);
+
+    expect(await rowCount(db, "guild_messages")).toBe(2);
+    expect(await rowCount(db, "guild_messages_fts")).toBe(2);
+    expect(found(await search(db, "beyond"))).toEqual([further, beyond]);
+
+    await ingest(db, { guildId: G1, upserts: [], deletes: [beyond] });
+
+    expect(await rowCount(db, "guild_messages_fts")).toBe(1);
+    expect(found(await search(db, "beyond"))).toEqual([further]);
+  });
+
+  it("never lets another guild overwrite a message id it does not own", async () => {
+    const db = createTestD1();
+    await store(db, [message(1, { content: "owned by the first guild" })], G1);
+
+    const foreign = await ingest(db, {
+      guildId: G2,
+      upserts: [message(1, { content: "claimed by the second guild" })],
+      deletes: [],
+    });
+
+    expect(foreign).toMatchObject({ status: "ok", upserted: 0, rejected: 1 });
+    const { results } = await db
+      .prepare("SELECT guild_id, content FROM guild_messages")
+      .all<{ guild_id: string; content: string }>();
+    expect(results).toEqual([{ guild_id: G1, content: "owned by the first guild" }]);
+    expect(found(await search(db, "owned", { guildId: G1 }))).toEqual([mid(1)]);
+    expect(await search(db, "claimed", { guildId: G1 })).toEqual([]);
+    expect(await search(db, "owned", { guildId: G2 })).toEqual([]);
+    expect(await inStep(db)).toBe(true);
+  });
+
+  it("lets a guild keep re-indexing and deleting its own message under the same id", async () => {
+    const db = createTestD1();
+    await store(db, [message(1, { content: "first wording" })], G1);
+
+    await store(db, [message(1, { content: "second wording" })], G1);
+
+    expect(await search(db, "first wording")).toEqual([]);
+    expect(found(await search(db, "second wording"))).toEqual([mid(1)]);
+    expect(await ingest(db, { guildId: G1, upserts: [], deletes: [mid(1)] })).toMatchObject({
+      deleted: 1,
+    });
+    expect(await rowCount(db, "guild_messages_fts")).toBe(0);
+  });
+});
+
+describe("reads honor which channels are public now", () => {
+  async function seeded(): Promise<D1Database> {
+    const db = createTestD1();
+    await store(db, [
+      message(1),
+      message(2, { channelId: C2 }),
+      message(3, { channelId: THREAD, parentChannelId: C1 }),
+    ]);
+    return db;
+  }
+
+  it("read nothing of a channel that stopped being public after it was indexed", async () => {
+    const db = await seeded();
+    const scope = { publicChannelIds: [C1] };
+    const expand = (messageId: string) =>
+      getIndexedMessageContext(db, {
+        guildId: G1,
+        messageId,
+        before: 5,
+        after: 5,
+        allowedChannels: null,
+        now: NOW,
+        ...scope,
+      });
+
+    expect(await recent(db, C2, scope)).toEqual([]);
+    expect(found(await search(db, "message", scope))).toEqual([mid(1)]);
+    expect(await expand(mid(2))).toEqual([]);
+    // Public again, and its messages are back.
+    expect(found(await recent(db, C2, { publicChannelIds: [C1, C2] }))).toEqual([mid(2)]);
+    // A Runtime that named no public channel leaves the read unfiltered.
+    expect(found(await recent(db, C2))).toEqual([mid(2)]);
+    expect(await recent(db, C1, { publicChannelIds: [] })).toEqual([]);
+  });
+
+  it("counts a thread as public only by its own id — a public parent does not vouch for it", async () => {
+    const db = await seeded();
+
+    expect(await recent(db, THREAD, { publicChannelIds: [C1] })).toEqual([]);
+    expect(found(await recent(db, THREAD, { publicChannelIds: [THREAD] }))).toEqual([mid(3)]);
+  });
+
+  it("reads only channels that are both allowlisted and public", async () => {
+    const db = await seeded();
+    // C1 is allowlisted but no longer public; C2 is public but not allowlisted.
+    const scope = { allowedChannels: [C1], publicChannelIds: [C2, THREAD] };
+
+    // The thread passes both: public in its own right, allowlisted through its parent.
+    expect(found(await search(db, "message", scope))).toEqual([mid(3)]);
+    expect(found(await recent(db, THREAD, scope))).toEqual([mid(3)]);
+    expect(await recent(db, C1, scope)).toEqual([]);
+    expect(await recent(db, C2, scope)).toEqual([]);
+  });
+});
+
+describe("reads honor the triggering user's truncation", () => {
+  /** Six messages in the current channel, and one in another. */
+  async function seeded(): Promise<D1Database> {
+    const db = createTestD1();
+    await store(db, [
+      ...Array.from({ length: 6 }, (_, i) => message(i + 1)),
+      message(50, { channelId: C2 }),
+    ]);
+    return db;
+  }
+  // The user truncated the current channel just before its fourth message.
+  const truncated = { resetAt: NOW - 100_000 + 4, containerChannelId: C1 };
+  const expand = (db: D1Database, messageId: string, scope: object) =>
+    getIndexedMessageContext(db, {
+      guildId: G1,
+      messageId,
+      before: 5,
+      after: 5,
+      allowedChannels: null,
+      now: NOW,
+      ...scope,
+    });
+
+  it("keep the truncated messages of the current channel out of every read", async () => {
+    const db = await seeded();
+
+    expect(found(await recent(db, C1, truncated))).toEqual([mid(4), mid(5), mid(6)]);
+    // Best match first, then newest: the other channel's message was never truncated.
+    expect(found(await search(db, "message", truncated))).toEqual([
+      mid(50),
+      mid(6),
+      mid(5),
+      mid(4),
+    ]);
+    const window = await expand(db, mid(4), truncated);
+    expect(window.map((m) => [m.messageId, m.isAnchor])).toEqual([
+      [mid(4), true],
+      [mid(5), false],
+      [mid(6), false],
+    ]);
+    // A truncated message is not expanded either.
+    expect(await expand(db, mid(2), truncated)).toEqual([]);
+  });
+
+  it("apply to the current channel only, and a watermark of 0 is no truncation", async () => {
+    const db = await seeded();
+
+    expect(found(await recent(db, C2, truncated))).toEqual([mid(50)]);
+    expect(found(await recent(db, C1, { resetAt: 0, containerChannelId: C1 }))).toEqual([
+      mid(1),
+      mid(2),
+      mid(3),
+      mid(4),
+      mid(5),
+      mid(6),
+    ]);
+  });
+});
 
 describe("POST /internal/v1/messages/ingest", () => {
   function makeEnv(db = createTestD1()): Env {

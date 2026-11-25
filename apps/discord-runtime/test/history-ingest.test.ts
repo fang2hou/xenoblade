@@ -1,13 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { ChannelType, PermissionFlagsBits, PermissionsBitField } from "discord.js";
+import type { Role } from "discord.js";
 import type { MessageIngestRequest, MessageIngestResponse } from "@xenoblade/contracts";
 
 import {
   FLUSH_BATCH_SIZE,
   FLUSH_INTERVAL_MS,
   HistoryIngestBuffer,
+  isPublicChannel,
   type IngestMessage,
   MAX_QUEUE_SIZE,
+  publicChannelIds,
+  type VisibilityGuild,
 } from "../src/history-ingest";
 
 const G1 = "100000000000000001";
@@ -66,6 +71,52 @@ function harness(): Harness {
   };
 }
 
+/** The channel of a message as the buffer reads it, told apart by its id. */
+interface FakeChannel extends NonNullable<IngestMessage["channel"]> {
+  id: string;
+}
+
+/** The `@everyone` role; only its identity matters to the buffer. */
+const EVERYONE = { id: G1 } as unknown as Role;
+
+const VIEWABLE = new PermissionsBitField(PermissionFlagsBits.ViewChannel);
+const HIDDEN = new PermissionsBitField(0n);
+
+/** A guild channel every member can read, unless overridden. */
+function channel(overrides: Partial<FakeChannel> = {}): FakeChannel {
+  return {
+    id: C1,
+    type: ChannelType.GuildText,
+    isThread: () => false,
+    isDMBased: () => false,
+    parentId: null,
+    permissionsFor: () => VIEWABLE,
+    ...overrides,
+  };
+}
+
+/**
+ * A public thread under `C1`. discord.js answers a thread's permissions with
+ * its parent channel's — or null when the parent is no longer cached.
+ */
+function thread(id: string, overrides: Partial<FakeChannel> = {}): FakeChannel {
+  return channel({
+    id,
+    type: ChannelType.PublicThread,
+    isThread: () => true,
+    parentId: C1,
+    ...overrides,
+  });
+}
+
+/** A guild whose `@everyone` role is `everyone` and which caches `channels`. */
+function guild(channels: FakeChannel[], everyone: Role | null = EVERYONE): VisibilityGuild {
+  return {
+    channels: { cache: new Map(channels.map((cached) => [cached.id, cached])) },
+    roles: { everyone },
+  };
+}
+
 function message(overrides: Partial<IngestMessage> = {}): IngestMessage {
   return {
     id: "300000000000000001",
@@ -76,7 +127,8 @@ function message(overrides: Partial<IngestMessage> = {}): IngestMessage {
     system: false,
     createdTimestamp: SENT_AT,
     editedTimestamp: null,
-    channel: { isThread: () => false, isDMBased: () => false, parentId: null },
+    channel: channel(),
+    guild: guild([channel()]),
     author: { id: "u1", bot: false, displayName: "Display Name", username: "username" },
     member: null,
     reference: null,
@@ -144,7 +196,7 @@ describe("what enters the index", () => {
 
     h.buffer.add(
       message({
-        channel: { isThread: () => true, isDMBased: () => false, parentId: C2 },
+        channel: thread(THREAD, { parentId: C2 }),
         channelId: THREAD,
         reference: { messageId: "300000000000000009" },
       }),
@@ -201,10 +253,28 @@ describe("what enters the index", () => {
 
   it.each([
     ["a DM by its missing guild", message({ guildId: null })],
+    ["a DM by its channel", message({ channel: channel({ isDMBased: () => true }) })],
     [
-      "a DM by its channel",
-      message({ channel: { isThread: () => false, isDMBased: () => true, parentId: null } }),
+      "a private thread, though its parent is public",
+      message({ channelId: THREAD, channel: thread(THREAD, { type: ChannelType.PrivateThread }) }),
     ],
+    [
+      "a thread whose parent channel @everyone cannot view",
+      message({ channelId: THREAD, channel: thread(THREAD, { permissionsFor: () => HIDDEN }) }),
+    ],
+    [
+      "a thread whose parent is no longer cached",
+      message({ channelId: THREAD, channel: thread(THREAD, { permissionsFor: () => null }) }),
+    ],
+    [
+      "a channel @everyone cannot view",
+      message({ channel: channel({ permissionsFor: () => HIDDEN }) }),
+    ],
+    [
+      "a channel whose permissions cannot be worked out",
+      message({ channel: channel({ permissionsFor: undefined }) }),
+    ],
+    ["a message of a guild that is not cached", message({ guild: null })],
     ["a webhook message", message({ webhookId: "400000000000000001" })],
     [
       "another bot's message",
@@ -246,13 +316,69 @@ describe("what enters the index", () => {
   });
 });
 
+describe("only public channels are indexed", () => {
+  it("indexes a public thread under a public parent", async () => {
+    const h = start();
+
+    h.buffer.add(message({ channelId: THREAD, channel: thread(THREAD) }));
+    await h.buffer.flush();
+
+    expect(allUpserts(h.requests)).toEqual([
+      expect.objectContaining({ channelId: THREAD, parentChannelId: C1 }),
+    ]);
+  });
+
+  it("stops indexing a channel the moment @everyone loses access to it", async () => {
+    const h = start();
+    const shared = channel();
+
+    h.buffer.add(numbered(1, { channel: shared }));
+    Object.assign(shared, { permissionsFor: () => HIDDEN });
+    h.buffer.add(numbered(2, { channel: shared }));
+    await h.buffer.flush();
+
+    expect(allUpserts(h.requests).map((m) => m.messageId)).toEqual([numberedId(1)]);
+  });
+
+  it("counts a channel as public exactly when @everyone can view it", () => {
+    expect(isPublicChannel(channel(), EVERYONE)).toBe(true);
+    expect(isPublicChannel(thread(THREAD), EVERYONE)).toBe(true);
+    expect(isPublicChannel(channel({ permissionsFor: () => HIDDEN }), EVERYONE)).toBe(false);
+    expect(isPublicChannel(thread(THREAD, { permissionsFor: () => null }), EVERYONE)).toBe(false);
+    // Private by type, though its parent is public.
+    expect(isPublicChannel(thread(THREAD, { type: ChannelType.PrivateThread }), EVERYONE)).toBe(
+      false,
+    );
+    expect(isPublicChannel(channel({ permissionsFor: undefined }), EVERYONE)).toBe(false);
+    expect(isPublicChannel(channel(), null)).toBe(false);
+    expect(isPublicChannel(null, EVERYONE)).toBe(false);
+  });
+
+  it("lists a guild's public channels, and nothing else", () => {
+    const secretThread = "200000000000000004";
+    const orphanThread = "200000000000000005";
+    const cached = [
+      channel({ id: C1 }),
+      channel({ id: C2, permissionsFor: () => HIDDEN }),
+      thread(THREAD),
+      thread(secretThread, { type: ChannelType.PrivateThread }),
+      thread(orphanThread, { permissionsFor: () => null }),
+    ];
+
+    expect(publicChannelIds(guild(cached))).toEqual([C1, THREAD]);
+    expect(publicChannelIds(guild([channel({ permissionsFor: () => HIDDEN })]))).toEqual([]);
+    expect(publicChannelIds(guild([channel()], null))).toEqual([]);
+    expect(publicChannelIds(null)).toBeUndefined();
+  });
+});
+
 describe("edits", () => {
   const before = message({ content: "before" });
 
   it("re-indexes a message whose text changed", async () => {
     const h = start();
 
-    h.buffer.edit(before, message({ content: "after", editedTimestamp: SENT_AT + 5_000 }));
+    await h.buffer.edit(before, message({ content: "after", editedTimestamp: SENT_AT + 5_000 }));
     await h.buffer.flush();
 
     expect(allUpserts(h.requests)).toEqual([
@@ -263,7 +389,7 @@ describe("edits", () => {
   it("sends nothing when the text did not change", async () => {
     const h = start();
 
-    h.buffer.edit(before, message({ content: "before", editedTimestamp: SENT_AT + 5_000 }));
+    await h.buffer.edit(before, message({ content: "before", editedTimestamp: SENT_AT + 5_000 }));
     await h.buffer.flush();
 
     expect(h.requests).toEqual([]);
@@ -273,7 +399,7 @@ describe("edits", () => {
     const h = start();
 
     // An uncached message arrives with no old version at all.
-    h.buffer.edit(null, message({ content: "after" }));
+    await h.buffer.edit(null, message({ content: "after" }));
     await h.buffer.flush();
 
     expect(allUpserts(h.requests)).toEqual([expect.objectContaining({ content: "after" })]);
@@ -282,7 +408,7 @@ describe("edits", () => {
   it("removes a message that was edited to no text", async () => {
     const h = start();
 
-    h.buffer.edit(before, message({ content: "   " }));
+    await h.buffer.edit(before, message({ content: "   " }));
     await h.buffer.flush();
 
     expect(h.requests).toEqual([{ guildId: G1, upserts: [], deletes: ["300000000000000001"] }]);
@@ -292,16 +418,90 @@ describe("edits", () => {
     const h = start();
 
     // `content` is null: the update says nothing about the message's text.
-    h.buffer.edit(before, message({ content: null }));
+    await h.buffer.edit(before, message({ content: null }));
     await h.buffer.flush();
 
+    expect(h.requests).toEqual([]);
+  });
+
+  it("fetches the message once when an edit arrives without its author", async () => {
+    const h = start();
+    const fetched = message({
+      content: "after",
+      author: { id: "u9", bot: false, displayName: "Late Arrival", username: "late" },
+    });
+    const fetch = vi.fn<() => Promise<IngestMessage>>(async () => fetched);
+
+    await h.buffer.edit(null, message({ content: "after", author: null, fetch }));
+    await h.buffer.flush();
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(allUpserts(h.requests)).toEqual([
+      expect.objectContaining({ content: "after", authorId: "u9", authorName: "Late Arrival" }),
+    ]);
+  });
+
+  it("does not fetch when the author is there, or when the text did not change", async () => {
+    const h = start();
+    const fetch = vi.fn<() => Promise<IngestMessage>>(async () => message({ content: "after" }));
+
+    await h.buffer.edit(before, message({ content: "after" }));
+    await h.buffer.edit(before, message({ content: "before", author: null, fetch }));
+    await h.buffer.flush();
+
+    expect(fetch).not.toHaveBeenCalled();
+    expect(allUpserts(h.requests).map((m) => [m.content, m.authorId])).toEqual([["after", "u1"]]);
+  });
+
+  it("removes the message when what was fetched turns out to have no text", async () => {
+    const h = start();
+
+    await h.buffer.edit(
+      before,
+      message({ content: "after", author: null, fetch: async () => message({ content: "   " }) }),
+    );
+    await h.buffer.flush();
+
+    expect(h.requests).toEqual([{ guildId: G1, upserts: [], deletes: ["300000000000000001"] }]);
+  });
+
+  it("carries on when the fetch fails", async () => {
+    const h = start();
+    const fetch = vi.fn<() => Promise<IngestMessage>>(async () => {
+      throw new Error("Unknown message");
+    });
+
+    await h.buffer.edit(null, message({ content: "after", author: null, fetch }));
+    await h.buffer.flush();
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(h.requests).toEqual([]);
+    expect(logLines().some((line) => line.includes("history_ingest_event_error"))).toBe(true);
+  });
+
+  it("neither fetches nor sends an edit of a channel that is not public", async () => {
+    const h = start();
+    const fetch = vi.fn<() => Promise<IngestMessage>>(async () => message({ content: "after" }));
+
+    await h.buffer.edit(
+      null,
+      message({
+        content: "after",
+        author: null,
+        fetch,
+        channel: channel({ permissionsFor: () => HIDDEN }),
+      }),
+    );
+    await h.buffer.flush();
+
+    expect(fetch).not.toHaveBeenCalled();
     expect(h.requests).toEqual([]);
   });
 
   it("ignores an edit of a message that never enters the index", async () => {
     const h = start();
 
-    h.buffer.edit(
+    await h.buffer.edit(
       message({ webhookId: "400000000000000001" }),
       message({ webhookId: "400000000000000001", content: "" }),
     );
@@ -345,7 +545,10 @@ describe("batching", () => {
     const h = start();
 
     h.buffer.add(numbered(1, { content: "first" }));
-    h.buffer.edit(message({ content: "first" }), message({ id: numberedId(1), content: "second" }));
+    await h.buffer.edit(
+      message({ content: "first" }),
+      message({ id: numberedId(1), content: "second" }),
+    );
     h.buffer.add(numbered(2));
     h.buffer.remove(numbered(2));
     h.buffer.remove(numbered(3));
@@ -426,7 +629,7 @@ describe("when the Worker cannot take a batch", () => {
     expect(h.requests).toHaveLength(1);
 
     // Message 1 is edited while its first version waits for a retry.
-    h.buffer.edit(
+    await h.buffer.edit(
       message({ id: numberedId(1), content: "first" }),
       message({ id: numberedId(1), content: "second" }),
     );
@@ -576,13 +779,11 @@ describe("robustness", () => {
     h.buffer.add(
       message({
         id: "300000000000000099",
-        channel: {
-          isThread: () => false,
+        channel: channel({
           isDMBased: () => {
             throw new TypeError("channel gone");
           },
-          parentId: null,
-        },
+        }),
       }),
     );
     h.buffer.add(numbered(1));

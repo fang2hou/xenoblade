@@ -82,12 +82,12 @@ function aRequest(overrides: Partial<GenerationRequest> = {}): GenerationRequest
   };
 }
 
-/** The triggering user in a channel of guild g1. */
+/** The triggering user in a channel of guild g1, having truncated nothing there. */
 function guildContext(
   db = createTestD1(),
   extra: Partial<HistoryToolContext> = {},
 ): HistoryToolContext {
-  return { db, scopeId: G1, channelId: C1, parentChannelId: null, ...extra };
+  return { db, scopeId: G1, channelId: C1, parentChannelId: null, resetAt: 0, ...extra };
 }
 
 /** A test D1 that also counts how often it reads the guild's config. */
@@ -505,7 +505,7 @@ describe("history tools scope", () => {
   ];
 
   it("offers the three history tools to a guild generation", () => {
-    const tools = createFirstPartyTools(env(createTestD1()), aRequest());
+    const tools = createFirstPartyTools(env(createTestD1()), aRequest(), 0);
 
     for (const name of HISTORY_TOOLS) expect(tools[name]?.execute).toBeTypeOf("function");
   });
@@ -514,6 +514,7 @@ describe("history tools scope", () => {
     const tools = createFirstPartyTools(
       env(createTestD1()),
       aRequest({ scopeId: "dm", containerId: "discord:@me:42", channelId: "42" }),
+      0,
     );
 
     for (const name of HISTORY_TOOLS) expect(tools).not.toHaveProperty(name);
@@ -523,6 +524,7 @@ describe("history tools scope", () => {
         scopeId: "dm",
         channelId: "42",
         parentChannelId: null,
+        resetAt: 0,
       }),
     ).toEqual({});
   });
@@ -595,6 +597,188 @@ describe("history tools scope", () => {
     await run(tools, "get_message_context", { message_id: "m1" });
 
     expect(configReads() - readsAfterIngest).toBe(1);
+  });
+});
+
+describe("history tools and what may be read back", () => {
+  /** Six messages in the current channel, and one in another. */
+  async function seeded(): Promise<HistoryToolContext> {
+    const context = guildContext();
+    await store(context.db, [
+      ...Array.from({ length: 6 }, (_, i) => message(i + 1)),
+      message(50, { channelId: C2 }),
+    ]);
+    return context;
+  }
+
+  it("read nothing of a channel that stopped being public, whichever tool is asked", async () => {
+    const context = await seeded();
+    const tools = createHistoryTools({ ...context, publicChannelIds: [C1] });
+
+    expect(await run<HistoryToolOutput>(tools, "get_recent_messages", { channel_id: C2 })).toEqual({
+      messages: [],
+    });
+    expect(
+      ids(await run<HistoryToolOutput>(tools, "search_chat_history", { query: "message 50" })),
+    ).toEqual([]);
+    expect(
+      await run<HistoryContextOutput>(tools, "get_message_context", { message_id: "m50" }),
+    ).toEqual({
+      error: "message_not_found",
+    });
+    // Public again, and its messages are back.
+    const reopened = createHistoryTools({ ...context, publicChannelIds: [C1, C2] });
+    expect(
+      ids(await run<HistoryToolOutput>(reopened, "get_recent_messages", { channel_id: C2 })),
+    ).toEqual(["m50"]);
+  });
+
+  it("take the public channels from the generation request", async () => {
+    const context = await seeded();
+
+    const tools = createFirstPartyTools(
+      env(context.db),
+      aRequest({ publicChannelIds: [C1] }),
+      context.resetAt,
+    );
+
+    expect(await run<HistoryToolOutput>(tools, "get_recent_messages", { channel_id: C2 })).toEqual({
+      messages: [],
+    });
+  });
+
+  it("keep what the triggering user truncated out of the current channel, in every tool", async () => {
+    const context = guildContext();
+    const stored = Array.from({ length: 6 }, (_, i) => message(i + 1));
+    await store(context.db, stored);
+    // The user truncated this channel just before its fourth message.
+    const resetAt = stored[3]?.createdAt ?? 0;
+    const tools = createHistoryTools({ ...context, resetAt });
+
+    expect(ids(await run<HistoryToolOutput>(tools, "get_recent_messages", {}))).toEqual([
+      "m4",
+      "m5",
+      "m6",
+    ]);
+    expect(
+      ids(await run<HistoryToolOutput>(tools, "search_chat_history", { query: "message number" })),
+    ).toEqual(["m6", "m5", "m4"]);
+    expect(
+      await run<HistoryContextOutput>(tools, "get_message_context", { message_id: "m2" }),
+    ).toEqual({
+      error: "message_not_found",
+    });
+    const window = await run<HistoryContextOutput>(tools, "get_message_context", {
+      message_id: "m4",
+    });
+    expect(anchors(window)).toEqual([
+      ["m4", true],
+      ["m5", false],
+      ["m6", false],
+    ]);
+  });
+
+  it("take the watermark from the generation, next to the request", async () => {
+    const context = guildContext();
+    const stored = Array.from({ length: 6 }, (_, i) => message(i + 1));
+    await store(context.db, stored);
+
+    const tools = createFirstPartyTools(env(context.db), aRequest(), stored[3]?.createdAt ?? 0);
+
+    expect(ids(await run<HistoryToolOutput>(tools, "get_recent_messages", {}))).toEqual([
+      "m4",
+      "m5",
+      "m6",
+    ]);
+  });
+
+  it("confine the truncation to the channel the generation runs in", async () => {
+    const context = guildContext(createTestD1(), { channelId: THREAD, parentChannelId: PARENT });
+    const inParent = message(1, { channelId: PARENT, createdAt: Date.now() - 60 * 60_000 });
+    const inThread = message(2, { channelId: THREAD, createdAt: Date.now() - 5 * 60_000 });
+    await store(context.db, [inParent, inThread]);
+    // The user truncated the thread between the two messages.
+    const tools = createHistoryTools({ ...context, resetAt: inThread.createdAt });
+
+    expect(ids(await run<HistoryToolOutput>(tools, "get_recent_messages", {}))).toEqual(["m2"]);
+    expect(
+      ids(await run<HistoryToolOutput>(tools, "get_recent_messages", { channel_id: "parent" })),
+    ).toEqual(["m1"]);
+  });
+});
+
+describe("time bounds are read strictly", () => {
+  async function boundAfter(bound: string): Promise<HistoryToolOutput> {
+    const context = guildContext();
+    await store(context.db, [message(1)]);
+    return run<HistoryToolOutput>(createHistoryTools(context), "search_chat_history", {
+      query: "message",
+      after: bound,
+    });
+  }
+
+  it.each([
+    ["a calendar date", "2026-11-01"],
+    ["a zone-less date-time", "2026-11-01T08:00"],
+    ["a UTC date-time with a fraction", "2026-11-01T08:00:00.250Z"],
+    ["an offset zone", "2026-11-01T08:00-05:30"],
+    ["a leap day", "2024-02-29"],
+    ["the first instant a message can have", "1420070400000"],
+    ["epoch milliseconds", "1761955200000"],
+  ])("accepts %s", async (_label, bound) => {
+    expect(await boundAfter(bound)).not.toEqual({ error: "invalid_time_range" });
+  });
+
+  it.each([
+    ["a day that does not exist", "2026-02-30"],
+    ["a leap day in a common year", "2025-02-29"],
+    ["month 13", "2026-13-01"],
+    ["month 0", "2026-00-10"],
+    ["day 32", "2026-11-32"],
+    ["day 0", "2026-11-00"],
+    ["hour 24", "2026-11-01T24:00"],
+    ["minute 60", "2026-11-01T08:60"],
+    ["second 60", "2026-11-01T08:00:60"],
+    ["a zone without its colon", "2026-11-01T08:00+0800"],
+    ["a fraction too long", "2026-11-01T08:00:00.2500Z"],
+    ["a time without minutes", "2026-11-01T08"],
+    ["slashes", "2026/11/01"],
+    ["a basic-format date", "20261101"],
+    ["a trailing character", "2026-11-01Z"],
+    ["prose", "yesterday"],
+    ["a long-form date", "November 1, 2026"],
+    ["a leading space", " 2026-11-01"],
+    ["a negative epoch", "-1761955200000"],
+    ["a fractional epoch", "1761955200000.5"],
+    ["an epoch in seconds", "1761955200"],
+    ["an epoch too long to be a date", "9999999999999999"],
+    ["an epoch past the year 9999", "253402300800000"],
+    ["an epoch from before Discord existed", "1420070399999"],
+    ["a date from before Discord existed", "2014-12-31"],
+  ])("refuses %s", async (_label, bound) => {
+    expect(await boundAfter(bound)).toEqual({ error: "invalid_time_range" });
+  });
+
+  it("reads an offset zone, and a zone-less time, as the instant it names", async () => {
+    const context = guildContext();
+    // Two messages an hour either side of a whole-hour instant.
+    const instant = Math.floor((Date.now() - 10 * DAY) / 3_600_000) * 3_600_000;
+    await store(context.db, [
+      message(1, { content: "the meeting", createdAt: instant - 3_600_000 }),
+      message(2, { content: "the meeting", createdAt: instant + 3_600_000 }),
+    ]);
+    const tools = createHistoryTools(context);
+    const after = (bound: string) =>
+      run<HistoryToolOutput>(tools, "search_chat_history", { query: "meeting", after: bound });
+
+    // The same instant: as UTC, as a zone-less time, and eight hours later at +08:00.
+    const utc = new Date(instant).toISOString().slice(0, 16);
+    const eastEight = `${new Date(instant + 8 * 3_600_000).toISOString().slice(0, 16)}+08:00`;
+
+    expect(ids(await after(utc))).toEqual(["m2"]);
+    expect(ids(await after(`${utc}Z`))).toEqual(["m2"]);
+    expect(ids(await after(eastEight))).toEqual(["m2"]);
+    expect(ids(await after(String(instant)))).toEqual(["m2"]);
   });
 });
 

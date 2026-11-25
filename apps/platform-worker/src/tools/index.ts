@@ -21,9 +21,10 @@ export { connectMcpServers, closeMcpClients } from "./mcp-clients";
  * request: the soul tools read its scope and can only ever propose a soul for
  * it, the memory tools reach only its user's personal memory and its scope's
  * shared memory, and the history tools read only the stored history of its
- * guild and allowlisted channels.
+ * guild, its allowlisted public channels, and no further back in the current
+ * channel than `resetAt` — the triggering user's context watermark (ADR-014).
  */
-export function createFirstPartyTools(env: Env, req: GenerationRequest): ToolSet {
+export function createFirstPartyTools(env: Env, req: GenerationRequest, resetAt: number): ToolSet {
   return {
     ...createSearchTools(env),
     read_url: createReadUrlTool(env),
@@ -36,6 +37,8 @@ export function createFirstPartyTools(env: Env, req: GenerationRequest): ToolSet
       scopeId: req.scopeId,
       channelId: req.channelId,
       parentChannelId: req.parentChannelId ?? null,
+      ...(req.publicChannelIds === undefined ? {} : { publicChannelIds: req.publicChannelIds }),
+      resetAt,
     }),
   };
 }
