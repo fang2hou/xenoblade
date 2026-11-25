@@ -32,7 +32,7 @@ import { messages } from "../src/i18n";
 import { resetLanguageCache } from "../src/language";
 import { MAX_MESSAGE_LENGTH } from "../src/output";
 import type { EnvConfig } from "../src/env";
-import { parseControlCustomId } from "../src/reply-controls";
+import { parseAskCustomId } from "../src/ask-confirm";
 
 const env: EnvConfig = {
   discordBotToken: "test-token",
@@ -217,7 +217,7 @@ describe("soul confirmation customIds", () => {
   it("claims its whole family, so no soul button falls through to another handler", () => {
     expect(isSoulConfirmCustomId("xbl:soul:yes:p1")).toBe(true);
     expect(isSoulConfirmCustomId("xbl:soul:garbage")).toBe(true);
-    expect(isSoulConfirmCustomId("xbl:regen:r1")).toBe(false);
+    expect(isSoulConfirmCustomId("xbl:ask:p1:yes")).toBe(false);
     expect(isSoulConfirmCustomId("")).toBe(false);
   });
 
@@ -227,7 +227,7 @@ describe("soul confirmation customIds", () => {
       "xbl:soul:yes:",
       "xbl:soul:yes",
       "xbl:soul:yes:p1:extra",
-      "xbl:regen:yes:p1",
+      "xbl:ask:yes:p1",
       "other:soul:yes:p1",
       "",
     ]) {
@@ -235,10 +235,10 @@ describe("soul confirmation customIds", () => {
     }
   });
 
-  it("never collides with the reply-control family", () => {
-    expect(parseControlCustomId("xbl:soul:yes:p1")).toBeNull();
-    expect(parseSoulCustomId("xbl:regen:r1")).toBeNull();
-    expect(parseSoulCustomId("xbl:del:r1")).toBeNull();
+  it("never collides with the question-card family", () => {
+    expect(parseAskCustomId("xbl:soul:yes:p1")).toBeNull();
+    expect(parseSoulCustomId("xbl:ask:p1:yes")).toBeNull();
+    expect(parseSoulCustomId("xbl:ask:p1:no")).toBeNull();
   });
 });
 
@@ -538,8 +538,8 @@ describe("resolveSoulConfirmAction", () => {
   });
 
   it("ignores customIds of another button family", () => {
-    expect(resolveSoulConfirmAction(entry(), "xbl:regen:p-1", CARD, OWNER)).toBeNull();
-    expect(resolveSoulConfirmAction(undefined, "xbl:del:p-1", CARD, OWNER)).toBeNull();
+    expect(resolveSoulConfirmAction(entry(), "xbl:ask:p-1:yes", CARD, OWNER)).toBeNull();
+    expect(resolveSoulConfirmAction(undefined, "xbl:ask:p-1:no", CARD, OWNER)).toBeNull();
   });
 });
 

@@ -163,7 +163,8 @@ did tell the user to confirm); the 5-minute window is shorter than a review
 queue would be.
 
 **Neutral:** reaction handling grows a second registry mirroring
-`ReplyRegistry`; `/memory show|clear` remain the audit and reset paths.
+`ReplyRegistry` (since removed, with ADR-015's supersession);
+`/memory show|clear` remain the audit and reset paths.
 
 ## Review Triggers
 

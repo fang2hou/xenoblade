@@ -16,6 +16,7 @@ import { handleMessageIngest } from "./history-index";
 import { handleGuildMemoryApply, handleMemory } from "./memory";
 import { handleSettings } from "./settings";
 import { handleSoulApply } from "./soul";
+import { handleThreadState } from "./thread-sessions";
 
 const INTERNAL_PREFIX = "/internal/v1/";
 
@@ -187,6 +188,16 @@ export default {
         return json({ status: "error", code: "invalid_body" }, 400);
       }
       return json(await handleSettings(env.DB, req));
+    }
+
+    // POST /internal/v1/threads/state (thread subscriptions, ADR-003 amendment)
+    if (request.method === "POST" && path === "/internal/v1/threads/state") {
+      const req = await readJson<unknown>(request);
+      const result = await handleThreadState(env.DB, req);
+      return json(
+        result,
+        result.status === "ok" ? 200 : result.code === "invalid_body" ? 400 : 500,
+      );
     }
 
     // POST /internal/v1/messages/ingest (90-day guild history index)

@@ -1,6 +1,6 @@
 # ADR-015: Button Reply Controls and In-Place Regenerate
 
-- **Status**: Accepted
+- **Status**: Superseded (2026-11-25) — by the natural-language `retry_last_reply` tool; see [Supersession](#supersession-2026-11-25)
 - **Date**: 2026-08-17
 
 ## Context
@@ -53,6 +53,40 @@ The staged-status bounds are unchanged: ≤ 4 placeholder edits per generation (
 **Neutral:** `GatewayMessageReactions` and the reaction partials remain required for ADR-013 confirmations _(until the ADR-013 amendment of 2026-11-25 retired reaction confirmations and both were removed)_; the reply registry stays in-memory and bounded — eviction and restart share the same fail-closed expiry path.
 
 Merging to main auto-deploys both apps (CI deploy pipeline); the wire contract change (`regenerateOf` semantics) ships atomically with both sides.
+
+## Supersession (2026-11-25)
+
+The reply-control buttons are gone. A completed reply carries no components any more, and asking again is said in natural language: when the triggering user asks the bot to redo or adjust its last reply ("重新回答", "再说简单点"), the model calls the first-party tool `retry_last_reply`, which hands it the conversation's latest turn — the user's prompt and the bot's reply — and the model writes a new, improved answer as a normal new reply.
+
+### Why
+
+- **The controls were not how people asked.** A redo request is usually a sentence with a direction in it ("shorter", "without code"); a button could only re-run the same prompt, and the click-to-regenerate flow then needed its own way to say what to change.
+- **Cost on every reply.** In-place regenerate could not embed its own message id in its buttons at send time, so every completed reply paid one extra REST edit to attach them (see "Relation to ADR-003"), and every click paid another to disable them. Replies without components need neither.
+- **Machinery for a message identity nobody valued.** The lease, the restore-on-failure path, and the frozen request existed to keep _one_ message per answer. Posting the redone answer as a new message needs none of them, and leaves the earlier answer visible for comparison.
+
+### What replaces what
+
+| Then (this record)                                                | Now                                                                     |
+| ----------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| 🔁 / 🗑️ buttons on every completed reply                          | No components on replies                                                |
+| Regenerate re-runs the frozen request and edits in place          | `retry_last_reply` reads the latest turn; the model posts a new reply   |
+| `ReplyRegistry`, `reply-controls.ts`, `xbl:regen:*` / `xbl:del:*` | Removed; a click on an old button fails closed with an ephemeral notice |
+| Reply controls' i18n table                                        | Removed                                                                 |
+| `StagedStatus` placeholder / abort options for an edited reply    | Removed                                                                 |
+
+### What stays
+
+- **The Worker's regenerate lease is dormant, not withdrawn.** `regenerate_leases` (migration 0006), `claimRegenerate` / `releaseRegenerate`, and the optional `regenerateOf` field on `GenerationRequest` remain on the wire: no Runtime sends the field any more, but keeping it optional lets the two tiers deploy in either order. The table and the lease code are removed together once both tiers run this release.
+- **The other button families are unaffected.** The 是 / 不是 confirmation cards (soul, guild memory) and the `ask_user` question cards (ADR-003 amendment) have their own registries, handlers, and fail-closed behavior.
+- **Restart safety is kept where buttons remain**: any component customId this process cannot place answers with an ephemeral notice and no action.
+
+### Consequences of the supersession
+
+**Positive:** no REST edit per reply; a redo can carry a direction; the previous answer stays readable; the reply registry, the regenerate and restore paths, and their tests leave the Runtime.
+
+**Negative:** a redone answer is a second message rather than an edit — the thread grows by one message per redo, and the user cannot delete a reply through the bot any more (Discord's own moderation tools apply).
+
+**Neutral:** the retry reads the conversation's latest turn from `container_last_turns` in a guild and from the request's history in a DM (ADR-011: nothing of a DM is stored for it), bounded by the triggering user's context watermark (ADR-014).
 
 ## Review Triggers
 

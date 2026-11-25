@@ -30,14 +30,17 @@ mise run dev
 
 Once running, in Discord:
 
-| Action                                          | Effect                                                           |
-| ----------------------------------------------- | ---------------------------------------------------------------- |
-| `@bot <message>` / reply / watched-role mention | Conversation-aware reply in your language                        |
-| `@bot` (bare)                                   | Responds to your most recent prior message                       |
-| 🔁 / 🗑️ on a bot reply                          | Regenerate / delete — triggering user only                       |
-| `/status` `/clear-context` `/usage`             | Runtime status, context reset, 24h token summary (ephemeral)     |
-| DM: `/persona` `/preference` `/memory` `/learn` | Per-user configuration console, no AI generation                 |
-| DM: `/chat on` + text                           | Opt-in private chat in a DM-isolated scope; `/chat off` wipes it |
+| Action                                                    | Effect                                                                                                                      |
+| --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `@bot <message>` / watched-role mention in a text channel | Starts a public thread on your message and answers there; the bot keeps following the thread, so nobody has to `@` it again |
+| `@bot` (bare)                                             | Responds to your most recent prior message                                                                                  |
+| Chat in a followed thread                                 | Answered without an `@`; say "先到这" / "stop following" to pause it, `@bot` to resume                                      |
+| A question card with buttons                              | Click an option (or just reply) — the card is removed and the bot continues from your answer                                |
+| "重新回答" / "再说简单点" / "try again, shorter"          | Redoes the last reply as a new message                                                                                      |
+| Reply to a bot message                                    | Conversation-aware reply in place, in your language                                                                         |
+| `/status` `/clear-context` `/usage`                       | Runtime status, context reset, 24h token summary (ephemeral)                                                                |
+| DM: `/persona` `/preference` `/memory` `/learn`           | Per-user configuration console, no AI generation                                                                            |
+| DM: `/chat on` + text                                     | Opt-in private chat in a DM-isolated scope; `/chat off` wipes it                                                            |
 
 **With an AI coding agent** — paste this into the agent to hand it the repository:
 

@@ -46,6 +46,7 @@ function readMigrations(): string {
     "0007_bot_soul.sql",
     "0008_guild_memory.sql",
     "0009_guild_messages_fts.sql",
+    "0010_thread_sessions.sql",
   ];
   return names.map((name) => readFileSync(new URL(name, dir), "utf8")).join("\n");
 }

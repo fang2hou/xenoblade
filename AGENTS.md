@@ -38,7 +38,7 @@ Project-specific overrides:
 ## Layout
 
 - `apps/platform-worker/` — Cloudflare Worker: `/internal/v1/*` routes, generation pipeline, tools, D1 access
-- `apps/discord-runtime/` — self-hosted discord.js gateway: triggers, staged status, reply controls, DM control plane
+- `apps/discord-runtime/` — self-hosted discord.js gateway: triggers, auto-started threads, question cards, staged status, DM control plane
 - `packages/contracts/` — wire types for every Runtime↔Worker call, shared verbatim by both apps
 - `packages/ai/` — model chains per role (OpenRouter), system prompt composition, generation limits
 - `packages/db/` — legacy D1 helpers from the pre-split worker; unreferenced, do not add code here

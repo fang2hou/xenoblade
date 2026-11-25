@@ -33,7 +33,7 @@ import { messages } from "../src/i18n";
 import { resetLanguageCache } from "../src/language";
 import { MAX_MESSAGE_LENGTH } from "../src/output";
 import type { EnvConfig } from "../src/env";
-import { parseControlCustomId } from "../src/reply-controls";
+import { parseAskCustomId } from "../src/ask-confirm";
 import { parseSoulCustomId } from "../src/soul-confirm";
 
 const env: EnvConfig = {
@@ -350,7 +350,7 @@ describe("memory confirmation customIds", () => {
     expect(isMemoryConfirmCustomId("xbl:gmem:yes:c1")).toBe(true);
     expect(isMemoryConfirmCustomId("xbl:gmem:garbage")).toBe(true);
     expect(isMemoryConfirmCustomId("xbl:soul:yes:p1")).toBe(false);
-    expect(isMemoryConfirmCustomId("xbl:regen:r1")).toBe(false);
+    expect(isMemoryConfirmCustomId("xbl:ask:p1:yes")).toBe(false);
     expect(isMemoryConfirmCustomId("")).toBe(false);
   });
 
@@ -361,7 +361,7 @@ describe("memory confirmation customIds", () => {
       "xbl:gmem:yes",
       "xbl:gmem:yes:c1:extra",
       "xbl:soul:yes:c1",
-      "xbl:regen:yes:c1",
+      "xbl:ask:yes:c1",
       "other:gmem:yes:c1",
       "",
     ]) {
@@ -369,11 +369,11 @@ describe("memory confirmation customIds", () => {
     }
   });
 
-  it("never collides with the reply-control or soul families", () => {
-    expect(parseControlCustomId("xbl:gmem:yes:c1")).toBeNull();
+  it("never collides with the question-card or soul families", () => {
+    expect(parseAskCustomId("xbl:gmem:yes:c1")).toBeNull();
     expect(parseSoulCustomId("xbl:gmem:yes:c1")).toBeNull();
-    expect(parseMemoryCustomId("xbl:regen:r1")).toBeNull();
-    expect(parseMemoryCustomId("xbl:del:r1")).toBeNull();
+    expect(parseMemoryCustomId("xbl:ask:c1:yes")).toBeNull();
+    expect(parseMemoryCustomId("xbl:ask:c1:no")).toBeNull();
     expect(parseMemoryCustomId("xbl:soul:yes:p1")).toBeNull();
   });
 });
@@ -776,9 +776,9 @@ describe("resolveMemoryConfirmAction", () => {
   });
 
   it("ignores customIds of another button family", () => {
-    expect(resolveMemoryConfirmAction(trackedEntry(), "xbl:regen:c1", CARD, OWNER)).toBeNull();
+    expect(resolveMemoryConfirmAction(trackedEntry(), "xbl:ask:c1:yes", CARD, OWNER)).toBeNull();
     expect(resolveMemoryConfirmAction(trackedEntry(), "xbl:soul:yes:c1", CARD, OWNER)).toBeNull();
-    expect(resolveMemoryConfirmAction(undefined, "xbl:del:c1", CARD, OWNER)).toBeNull();
+    expect(resolveMemoryConfirmAction(undefined, "xbl:ask:c1:no", CARD, OWNER)).toBeNull();
   });
 });
 

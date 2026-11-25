@@ -17,11 +17,20 @@ const zh = {
     failure: "这次处理失败了，请稍后重试。",
     rateLimited: "请求过于频繁，请稍后再试。",
   },
-  replyControls: {
-    regenerate: "重新生成",
-    notOwner: "只有发起这条消息的用户可以操作。",
-    expired: "该操作已失效（机器人可能已重启）。",
-    busy: "正在重新生成，请稍候。",
+  askConfirm: {
+    contextNote: (note: string) => `补充：${note}`,
+    options: (labels: readonly string[]) => `[可选项] ${labels.join(" / ")}`,
+    footer: "点击选项继续，也可以直接回复。",
+    chosen: (label: string) => `[确认选择]: ${label}`,
+    notOwner: "只有被提问的用户可以选择。",
+    expiredNotice: "该提问已失效（机器人可能已重启或已超时），请直接回复。",
+    busy: "正在处理你的选择，请稍候。",
+  },
+  thread: {
+    defaultTitle: "与 Xenoblade 的讨论",
+  },
+  interaction: {
+    unknownControl: "该按钮已失效。",
   },
   stagedMilestones: [
     "还在处理中…",
@@ -149,12 +158,17 @@ const zh = {
 export type Messages = {
   status: { ok: string };
   generation: { failure: string; rateLimited: string };
-  replyControls: {
-    regenerate: string;
+  askConfirm: {
+    contextNote: (note: string) => string;
+    options: (labels: readonly string[]) => string;
+    footer: string;
+    chosen: (label: string) => string;
     notOwner: string;
-    expired: string;
+    expiredNotice: string;
     busy: string;
   };
+  thread: { defaultTitle: string };
+  interaction: { unknownControl: string };
   stagedMilestones: readonly string[];
   context: {
     truncateSuccess: string;
@@ -255,11 +269,21 @@ const en: Messages = {
     failure: "That request failed. Please try again later.",
     rateLimited: "You're sending requests too fast — please wait a moment.",
   },
-  replyControls: {
-    regenerate: "Regenerate",
-    notOwner: "Only the user who triggered this reply can control it.",
-    expired: "This control has expired (the bot may have restarted).",
-    busy: "A regeneration is already running — please wait.",
+  askConfirm: {
+    contextNote: (note: string) => `Note: ${note}`,
+    options: (labels: readonly string[]) => `[Options] ${labels.join(" / ")}`,
+    footer: "Click an option to continue, or just reply.",
+    chosen: (label: string) => `[Choice]: ${label}`,
+    notOwner: "Only the user who was asked can choose.",
+    expiredNotice:
+      "This question has expired (the bot may have restarted or timed out) — please just reply.",
+    busy: "Your choice is already being processed — please wait.",
+  },
+  thread: {
+    defaultTitle: "Discussion with Xenoblade",
+  },
+  interaction: {
+    unknownControl: "This button no longer works.",
   },
   stagedMilestones: [
     "Still working…",

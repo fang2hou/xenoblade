@@ -1,6 +1,14 @@
 import type { ToolSet } from "ai";
 import type { GenerationRequest } from "@xenoblade/contracts";
 
+import {
+  createInteractionTools,
+  extractAskPrompt,
+  hasRetry,
+  hasThreadPause,
+  pauseThread,
+  stoppedOnAskUser,
+} from "./interaction-tools";
 import { createHistoryTools } from "./history-tools";
 import { createMemoryTools } from "./memory-tools";
 import { createReadUrlTool } from "./read-url";
@@ -15,6 +23,7 @@ export { createSearchTools } from "./search";
 export { createModelInfoTools } from "./model-info";
 export { createVisionTool } from "./vision";
 export { connectMcpServers, closeMcpClients } from "./mcp-clients";
+export { extractAskPrompt, hasRetry, hasThreadPause, pauseThread, stoppedOnAskUser };
 
 /**
  * The Worker's own tools for one generation, acting on the generation's
@@ -40,5 +49,6 @@ export function createFirstPartyTools(env: Env, req: GenerationRequest, resetAt:
       ...(req.publicChannelIds === undefined ? {} : { publicChannelIds: req.publicChannelIds }),
       resetAt,
     }),
+    ...createInteractionTools({ db: env.DB, req, resetAt }),
   };
 }

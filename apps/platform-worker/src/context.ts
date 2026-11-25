@@ -26,6 +26,38 @@ export function isThreadContainer(containerId: string): boolean {
 }
 
 /**
+ * The thread a request runs in, when it does: its own id and its parent
+ * channel's. Null for a channel, and always for a DM — whose container keys
+ * cannot name a thread, and must never come to (ADR-011).
+ */
+export function threadOf(
+  req: GenerationRequest,
+): { threadId: string; parentChannelId: string } | null {
+  if (req.scopeId === DM_SCOPE || req.parentChannelId == null) return null;
+  if (!isThreadContainer(req.containerId)) return null;
+  return { threadId: req.channelId, parentChannelId: req.parentChannelId };
+}
+
+/**
+ * Whether a message may be shown to the model again as context of this
+ * request. The current message never is — it is the request. Neither is
+ * anything older than `resetAt`, the triggering user's context watermark
+ * (ADR-014): what they truncated away stays gone, whichever path reads the
+ * history. In a DM, only the bot's replies and the requesting user's own
+ * messages are (defense in depth, ADR-011 §3).
+ */
+export function isWithinContext(
+  req: GenerationRequest,
+  message: HistoryMessage,
+  resetAt: number,
+): boolean {
+  if (message.id === req.messageId) return false;
+  if (resetAt > 0 && message.createdAt < resetAt) return false;
+  if (req.scopeId !== DM_SCOPE) return true;
+  return message.isBot || message.authorId === req.userId;
+}
+
+/**
  * Scripts whose characters take roughly one token each. Every other
  * character counts as Latin-style text, about four to a token.
  */
@@ -75,36 +107,38 @@ function enforceLimits(messages: HistoryMessage[]): HistoryMessage[] {
 // ── Public API ────────────────────────────────────────────────────────────
 
 /**
+ * The discussion that led up to a started thread, then the thread's own
+ * history, each message once: a message present in both — the starter, for
+ * one — keeps its place among the anchors, where it was said.
+ */
+function withAnchors(req: GenerationRequest): HistoryMessage[] {
+  const anchors = req.anchorHistory ?? [];
+  if (anchors.length === 0) return req.history;
+  const seen = new Set(anchors.map((message) => message.id));
+  return [...anchors, ...req.history.filter((message) => !seen.has(message.id))];
+}
+
+/**
  * Build context from the history provided in the request.
  *
- * - Excludes the current message and anything older than `resetAt`.
+ * - Excludes the current message and anything older than `resetAt` — for
+ *   `anchorHistory` (the parent-channel discussion a thread was started from,
+ *   ADR-003 amendment) and `history` alike, anchors read first.
  * - **Thread**: every surviving message.
  * - **Channel**: every surviving message in a guild — when someone asks about
  *   what another member just said, the whole recent conversation is what makes
  *   the question answerable. A DM keeps only the requesting user's messages
  *   and the bot's replies (defense in depth, ADR-011 §3).
+ * - The budgets keep the most recent messages, so a long thread history
+ *   crowds out the oldest anchors first.
  * - An empty result degrades to `mode: "none"` so generation answers only the
  *   current message.
  */
 export function buildContext(req: GenerationRequest, resetAt: number): ContextDecision {
-  if (req.history.length === 0) {
-    return { mode: "none", messages: [] };
-  }
-
   const isThread = isThreadContainer(req.containerId);
-  const filtered = req.history.filter(
-    (m) => m.id !== req.messageId && (resetAt <= 0 || m.createdAt >= resetAt),
-  );
-  if (filtered.length === 0) {
-    return { mode: "none", messages: [] };
-  }
+  const visible = withAnchors(req).filter((message) => isWithinContext(req, message, resetAt));
 
-  const candidates =
-    req.scopeId === DM_SCOPE
-      ? filtered.filter((m) => m.isBot || m.authorId === req.userId)
-      : filtered;
-
-  const capped = enforceLimits(candidates);
+  const capped = enforceLimits(visible);
   if (capped.length === 0) {
     return { mode: "none", messages: [] };
   }

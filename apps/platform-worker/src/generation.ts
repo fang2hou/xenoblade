@@ -32,6 +32,7 @@ import { buildContext } from "./context";
 import { extractGuildMemoryProposals } from "./memory";
 import { extractSources } from "./sources";
 import { extractSoulProposal, formatSoulSegment, getBotSoul } from "./soul";
+import { recordLastReply, recordLastTurn } from "./thread-sessions";
 import {
   buildGenerationMessages,
   buildTextOnlyGenerationMessages,
@@ -39,7 +40,16 @@ import {
   SAFETY_SYSTEM,
   formatSourcesBlock,
 } from "./prompt";
-import { createFirstPartyTools, connectMcpServers, closeMcpClients } from "./tools";
+import {
+  closeMcpClients,
+  connectMcpServers,
+  createFirstPartyTools,
+  extractAskPrompt,
+  hasRetry,
+  hasThreadPause,
+  pauseThread,
+  stoppedOnAskUser,
+} from "./tools";
 
 function formatMemoryBlock(displayName: string, memories: readonly UserMemory[]): string {
   if (memories.length === 0) return "";
@@ -72,6 +82,29 @@ async function safeRecord(db: D1Database, row: InteractionRecord): Promise<void>
     await recordInteraction(db, row);
   } catch (error) {
     console.log(JSON.stringify({ event: "record_interaction_error", error: String(error) }));
+  }
+}
+
+/** Store what `retry_last_reply` reads next; a failed write only costs the next retry its stored turn. */
+async function safeRecordTurn(write: () => Promise<void>): Promise<void> {
+  try {
+    await write();
+  } catch (error) {
+    console.log(JSON.stringify({ event: "last_turn_record_error", error: String(error) }));
+  }
+}
+
+/**
+ * Store a run's `thread_pause` and report whether it took. A failed write
+ * leaves the thread followed, and the result then says nothing about a pause
+ * — the Runtime's view stays in step with the stored one.
+ */
+async function safePauseThread(env: Env, req: GenerationRequest): Promise<boolean> {
+  try {
+    return await pauseThread(env.DB, req, Date.now());
+  } catch (error) {
+    console.log(JSON.stringify({ event: "thread_pause_error", error: String(error) }));
+    return false;
   }
 }
 
@@ -167,10 +200,11 @@ export async function generate(
   const now = Date.now();
   const requestId = crypto.randomUUID();
 
-  // Dedup — a regenerate claims a short-lived lease on the original
-  // message instead of the message-id claim, so racing duplicate deliveries
-  // are rejected while sequential re-runs stay allowed (ADR-015); the
-  // rolling budget below remains the real bound on totals.
+  // Dedup by the message id. A request carrying `regenerateOf` — dormant
+  // since ADR-015 was superseded: no Runtime sends it — claims a short-lived
+  // lease on the original message instead, so racing duplicate deliveries are
+  // rejected while sequential re-runs stay allowed; the rolling budget below
+  // remains the real bound on totals.
   let isRegenerate = false;
   try {
     const claimed =
@@ -316,7 +350,9 @@ async function runGenerationPipeline(
             system,
             messages: isPrimary ? messagesWithImages : messagesTextOnly,
             tools: allTools,
-            stopWhen: isStepCount(MAX_STEPS),
+            // A question for the user ends the run: nothing in a later step
+            // of this one can build on an answer that has not been given.
+            stopWhen: [isStepCount(MAX_STEPS), stoppedOnAskUser],
             // Step 8, the last one, offers no tools to push the model into a
             // final synthesis instead of another tool call. A provider that
             // still answers with empty text is caught by the empty-reply check
@@ -334,7 +370,9 @@ async function runGenerationPipeline(
 
         usedModel = config.id;
 
-        if (!result.text || result.text.trim() === "") {
+        // A run that stopped on a question has no answer text to check: the
+        // question is its result, and the user's answer is the next turn.
+        if (extractAskPrompt(result.toolResults ?? []) === undefined && result.text.trim() === "") {
           console.log(
             JSON.stringify({
               event: "empty_generation",
@@ -464,12 +502,50 @@ async function runGenerationPipeline(
   const sources = extractSources(result.toolResults ?? []);
   const guildMemoryProposals = extractGuildMemoryProposals(result.toolResults ?? []);
   const soulProposal = extractSoulProposal(result.toolResults ?? []);
+  const askPrompt = extractAskPrompt(result.toolResults ?? []);
   await recordInteractionSources(env.DB, {
     interactionId: requestId,
     containerId: req.containerId,
     sources,
     now: Date.now(),
   });
+
+  // A question ends the turn without an answer, so the thread it was asked in
+  // is still mid-conversation: a pause asked beside one waits for the answer.
+  const threadDeactivated =
+    askPrompt === undefined && hasThreadPause(result.toolResults ?? [])
+      ? await safePauseThread(env, req)
+      : false;
+
+  // What `retry_last_reply` reads next. A turn that stopped on a question has
+  // not answered yet and leaves the stored turn alone; one that redid the
+  // last reply replaces that reply, so the prompt stays the user's own.
+  if (askPrompt === undefined) {
+    const retried = hasRetry(result.toolResults ?? []);
+    const assistantReply = result.text;
+    await safeRecordTurn(() =>
+      retried
+        ? recordLastReply(
+            env.DB,
+            { containerId: req.containerId, scopeId: req.scopeId, assistantReply },
+            Date.now(),
+          )
+        : recordLastTurn(
+            env.DB,
+            {
+              containerId: req.containerId,
+              scopeId: req.scopeId,
+              channelId: req.channelId,
+              userId: req.userId,
+              userDisplayName: req.userDisplayName,
+              triggerMessageId: req.messageId,
+              triggerContent: req.content,
+              assistantReply,
+            },
+            Date.now(),
+          ),
+    );
+  }
 
   console.log(
     JSON.stringify({
@@ -484,6 +560,8 @@ async function runGenerationPipeline(
       sources: sources.length,
       guildMemoryProposals: guildMemoryProposals.length,
       soulProposal: soulProposal !== undefined,
+      askPrompt: askPrompt !== undefined,
+      threadDeactivated,
     }),
   );
 
@@ -495,5 +573,7 @@ async function runGenerationPipeline(
     sources,
     ...(guildMemoryProposals.length > 0 ? { guildMemoryProposals } : {}),
     ...(soulProposal !== undefined ? { soulProposal } : {}),
+    ...(askPrompt !== undefined ? { askPrompt } : {}),
+    ...(threadDeactivated ? { threadDeactivated: true } : {}),
   };
 }
