@@ -1,6 +1,10 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
 import { generateText, isStepCount, jsonSchema, tool } from "ai";
 import {
+  ADMIN_GENERATION_LIMITS,
+  GENERATION_LIMITS,
+  getModelMaxOutputTokens,
+  resolveMaxOutputTokens,
   selectModel,
   composeSystemPrompt,
   getModelChain,
@@ -135,6 +139,57 @@ describe("getModelChain", () => {
     const blankHyper: AiEnv = { HYPER_API_KEY: "   ", OPENROUTER_API_KEY: "test-key" };
     expect(getModelChain(blankHyper, "generation")).toEqual(getModelChain(baseEnv, "generation"));
   });
+
+  it("allocates generous output token limits for thinking models on normal and admin turns", () => {
+    expect(GENERATION_LIMITS.maxOutputTokens).toBe(163_840);
+    expect(ADMIN_GENERATION_LIMITS.maxOutputTokens).toBe(327_680);
+  });
+
+  it("clamps requested maxOutputTokens to known per-model hard ceilings", () => {
+    // Charm Hyper fallback deepseek-v4.1-flash-1017 caps at 262,144 (< admin 327,680).
+    expect(getModelMaxOutputTokens({ id: "deepseek-v4.1-flash-1017", provider: "hyper" })).toBe(
+      262_144,
+    );
+    expect(
+      resolveMaxOutputTokens(
+        { id: "deepseek-v4.1-flash-1017", provider: "hyper" },
+        ADMIN_GENERATION_LIMITS.maxOutputTokens,
+      ),
+    ).toBe(262_144);
+    expect(
+      resolveMaxOutputTokens(
+        { id: "deepseek-v4.1-flash-1017", provider: "hyper" },
+        GENERATION_LIMITS.maxOutputTokens,
+      ),
+    ).toBe(163_840);
+    // Economy primary supports 384,000, so 327,680 passes unclamped.
+    expect(
+      resolveMaxOutputTokens(
+        { id: "deepseek-v4.1-flash-1017-economy", provider: "hyper" },
+        ADMIN_GENERATION_LIMITS.maxOutputTokens,
+      ),
+    ).toBe(327_680);
+    // OpenRouter primary supports 393,216, so 327,680 passes unclamped.
+    expect(
+      resolveMaxOutputTokens(
+        { id: "deepseek/deepseek-v4.1-flash-1017", provider: "openrouter" },
+        ADMIN_GENERATION_LIMITS.maxOutputTokens,
+      ),
+    ).toBe(327_680);
+    // Explicit per-model override is respected unless it exceeds the model ceiling.
+    expect(
+      resolveMaxOutputTokens(
+        { id: "deepseek-v4.1-flash-1017", provider: "hyper", maxOutputTokens: 4_096 },
+        ADMIN_GENERATION_LIMITS.maxOutputTokens,
+      ),
+    ).toBe(4_096);
+    expect(
+      resolveMaxOutputTokens(
+        { id: "deepseek-v4.1-flash-1017", provider: "hyper", maxOutputTokens: 500_000 },
+        ADMIN_GENERATION_LIMITS.maxOutputTokens,
+      ),
+    ).toBe(262_144);
+  });
 });
 
 describe("createModel", () => {
@@ -255,7 +310,7 @@ describe("createModel", () => {
         }),
       },
       stopWhen: isStepCount(4),
-      maxOutputTokens: 16_384,
+      maxOutputTokens: 163_840,
     });
 
     expect(result.text).toBe("Pong from Charm Hyper.");
@@ -263,7 +318,7 @@ describe("createModel", () => {
     expect(requests[0]?.url).toBe(`${HYPER_BASE_URL}/chat/completions`);
     expect(requests[0]?.auth).toBe("Bearer test-hyper-key");
     expect(requests[0]?.body.reasoning_effort).toBe("low");
-    expect(requests[0]?.body.max_tokens).toBe(16_384);
+    expect(requests[0]?.body.max_tokens).toBe(163_840);
 
     // Step 2 must carry the assistant's prior reasoning_content alongside tool_calls.
     const step2Messages = requests[1]?.body.messages as Array<Record<string, unknown>>;
@@ -279,6 +334,45 @@ describe("createModel", () => {
     expect(result.totalUsage.outputTokens).toBe(70);
     expect(result.totalUsage.inputTokenDetails.cacheReadTokens).toBe(200);
     expect(result.totalUsage.outputTokenDetails.reasoningTokens).toBe(40);
+  });
+
+  it("clamps max_tokens in the wire request body for Charm Hyper models with lower ceilings", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        bodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+        return Response.json({
+          id: "chatcmpl-clamped",
+          object: "chat.completion",
+          created: 1_795_610_002,
+          model: "deepseek-v4.1-flash-1017",
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: "OK" },
+              finish_reason: "stop",
+            },
+          ],
+          usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+        });
+      }),
+    );
+
+    const model = createModel(hyperOnlyEnv, {
+      id: "deepseek-v4.1-flash-1017",
+      provider: "hyper",
+      thinking: "low",
+    });
+
+    await generateText({
+      model,
+      prompt: "Hi",
+      maxOutputTokens: ADMIN_GENERATION_LIMITS.maxOutputTokens,
+    });
+
+    expect(bodies[0]?.max_tokens).toBe(262_144);
+    expect(bodies[0]?.reasoning_effort).toBe("low");
   });
 });
 

@@ -940,27 +940,31 @@ async function postReplyResult(result: CompletedResult, ctx: PostContext): Promi
     return;
   }
 
-  await ctx.staged.settle(content).then(
-    () => {
-      console.log(
-        JSON.stringify({
-          event: "reply_sent",
-          messageId,
-          length: replyLength,
-        }),
-      );
-    },
-    (error: unknown) => {
-      console.log(
-        JSON.stringify({
-          event: "post_reply_error",
-          messageId,
-          error: String(error),
-          replyLength,
-        }),
-      );
-    },
-  );
+  await ctx.staged
+    .settle(content, {
+      attachmentNotice: messages(ctx.language).generation.longReplyAttachment,
+    })
+    .then(
+      () => {
+        console.log(
+          JSON.stringify({
+            event: "reply_sent",
+            messageId,
+            length: replyLength,
+          }),
+        );
+      },
+      (error: unknown) => {
+        console.log(
+          JSON.stringify({
+            event: "post_reply_error",
+            messageId,
+            error: String(error),
+            replyLength,
+          }),
+        );
+      },
+    );
 }
 
 /**

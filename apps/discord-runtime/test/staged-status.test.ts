@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MessageFlags } from "discord.js";
-import type { SendableChannels } from "discord.js";
+import { MessageFlags, type AttachmentBuilder, type SendableChannels } from "discord.js";
 
+import { MAX_MESSAGE_LENGTH, REPLY_ATTACHMENT_NAME } from "../src/output";
 import { StagedStatus, type StatusMilestone } from "../src/staged-status";
 
 /** Rate-limit-shaped error as discord.js would surface it (DiscordAPIError extends Error). */
@@ -14,6 +14,7 @@ const RATE_LIMIT_ERROR = Object.assign(new Error("rate limited"), {
 interface ReplyOptions {
   content: string;
   flags?: number;
+  files?: AttachmentBuilder[];
 }
 
 interface FakeMessage {
@@ -28,6 +29,8 @@ interface Harness {
   /** Every message object `send` created, in send order. */
   sentMessages: FakeMessage[];
   edits: string[];
+  /** Files passed on every send or edit, in call order. */
+  files: Array<AttachmentBuilder[] | undefined>;
   /** Flags of every send and edit, in call order. */
   flags: Array<number | undefined>;
   deleted: number;
@@ -42,6 +45,7 @@ function harness(failEdits: Error[] = []): Harness {
   const sends: string[] = [];
   const sentMessages: FakeMessage[] = [];
   const edits: string[] = [];
+  const files: Array<AttachmentBuilder[] | undefined> = [];
   const flags: Array<number | undefined> = [];
   const state = { deleted: 0, nextFailure: 0, seq: 0 };
   const makeMessage = (): FakeMessage => {
@@ -51,6 +55,7 @@ function harness(failEdits: Error[] = []): Harness {
         const failure = failEdits[state.nextFailure++];
         if (failure !== undefined) throw failure;
         edits.push(options.content);
+        files.push(options.files);
         flags.push(options.flags);
         return message;
       },
@@ -65,6 +70,7 @@ function harness(failEdits: Error[] = []): Harness {
     id: "channel-test",
     send: async (options: ReplyOptions) => {
       sends.push(options.content);
+      files.push(options.files);
       flags.push(options.flags);
       const message = makeMessage();
       sentMessages.push(message);
@@ -76,6 +82,7 @@ function harness(failEdits: Error[] = []): Harness {
     sends,
     sentMessages,
     edits,
+    files,
     flags,
     get deleted() {
       return state.deleted;
@@ -275,10 +282,37 @@ describe("StagedStatus settle", () => {
     expect(posted).toEqual(h.sentMessages.slice(1));
   });
 
-  it("rejects empty content like postReply does", async () => {
+  it("rejects empty content like postReply does, with or without a placeholder", async () => {
+    const h1 = harness();
+    const fast = staged(h1);
+    await expect(fast.settle("   ")).rejects.toThrow(/empty after trim/);
+
+    const h2 = harness();
+    const slow = staged(h2);
+    await vi.advanceTimersByTimeAsync(1_500);
+    await expect(slow.settle("   ")).rejects.toThrow(/empty after trim/);
+    expect(h2.edits).toHaveLength(0);
+  });
+
+  it("edits the placeholder with a ≤2000-char preview and reply.md attachment when content exceeds 5 chunks", async () => {
     const h = harness();
     const instance = staged(h);
-    await expect(instance.settle("   ")).rejects.toThrow(/empty after trim/);
+    await vi.advanceTimersByTimeAsync(1_500);
+    const content = Array.from({ length: 7 }, (_, i) => `p${i}: ${"a".repeat(1_800)}`).join("\n");
+
+    const posted = await instance.settle(content, {
+      attachmentNotice: "（完整回复较长，已附在 reply.md 中。）",
+    });
+
+    expect(posted).toEqual([h.sentMessages[0]]);
+    expect(h.sends).toEqual(["s1"]);
+    expect(h.edits).toHaveLength(1);
+    expect(h.edits[0]!.length).toBeLessThanOrEqual(MAX_MESSAGE_LENGTH);
+    expect(h.edits[0]).toContain("reply.md");
+    const editFiles = h.files[1];
+    expect(editFiles).toHaveLength(1);
+    expect(editFiles?.[0]?.name).toBe(REPLY_ATTACHMENT_NAME);
+    expect(Buffer.from(editFiles?.[0]?.attachment as Buffer).toString("utf8")).toBe(content);
   });
 
   it("edits the head and posts continuations with SuppressEmbeds", async () => {

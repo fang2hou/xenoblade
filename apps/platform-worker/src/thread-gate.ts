@@ -1,6 +1,6 @@
 import { generateText } from "ai";
 
-import { createModel, getModelChain } from "@xenoblade/ai";
+import { createModel, getModelChain, resolveMaxOutputTokens } from "@xenoblade/ai";
 import type {
   ThreadGateMessage,
   ThreadShouldReplyRequest,
@@ -11,6 +11,9 @@ import { DM_SCOPE, getRuntimeConfig } from "./db";
 
 /** Total wall-clock budget for the lightweight semantic gate across its model chain. */
 const GATE_DEADLINE_MS = 5_000;
+
+/** Output token budget for the Layer-2 relevance classifier (includes thinking tokens). */
+const GATE_MAX_OUTPUT_TOKENS = 10_240;
 
 /** Maximum recent thread messages read by the gate. */
 const MAX_RECENT_MESSAGES = 10;
@@ -209,7 +212,7 @@ export async function handleThreadShouldReply(
         model,
         system: GATE_SYSTEM,
         prompt,
-        maxOutputTokens: 32,
+        maxOutputTokens: resolveMaxOutputTokens(config, GATE_MAX_OUTPUT_TOKENS),
         maxRetries: 0,
         timeout: remainingMs,
         ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),

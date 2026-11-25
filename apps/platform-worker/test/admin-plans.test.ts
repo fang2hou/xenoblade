@@ -499,6 +499,7 @@ describe("admin generation isolation, read-proxy continuation & budget accountin
     await generate(env, adminRequest({ messageId: "m-admin-limits" }));
     const adminCall = vi.mocked(generateText).mock.calls[0]?.[0];
     expect(adminCall?.maxOutputTokens).toBe(ADMIN_GENERATION_LIMITS.maxOutputTokens);
+    expect(ADMIN_GENERATION_LIMITS.maxOutputTokens).toBe(327_680);
     expect(typeof adminCall?.timeout).toBe("number");
     const adminTimeout = adminCall?.timeout as number;
     expect(adminTimeout).toBeLessThanOrEqual(ADMIN_GENERATION_LIMITS.timeout.totalMs);
@@ -517,6 +518,28 @@ describe("admin generation isolation, read-proxy continuation & budget accountin
     expect(normalCall?.maxOutputTokens).toBe(GENERATION_LIMITS.maxOutputTokens);
     expect(typeof normalCall?.timeout).toBe("number");
     expect(normalCall?.timeout as number).toBeLessThanOrEqual(GENERATION_LIMITS.timeout.totalMs);
+  });
+
+  it("clamps admin maxOutputTokens on Charm Hyper fallback model whose ceiling is 262,144", async () => {
+    const db = createTestD1();
+    const env = {
+      ...makeEnv(db),
+      HYPER_API_KEY: "test-hyper-key",
+      MODEL_CONFIG: undefined,
+    } as Env;
+    vi.mocked(generateText)
+      .mockRejectedValueOnce(new Error("economy unavailable"))
+      .mockResolvedValueOnce({
+        text: "Planned.",
+        usage: { inputTokens: 10, outputTokens: 10, inputTokenDetails: {} },
+        toolResults: [],
+        steps: [{}],
+      } as unknown as Ai.GenerateTextResult<Ai.ToolSet, never, never>);
+
+    const res = await generate(env, adminRequest({ messageId: "m-admin-hyper-clamp" }));
+    expect(res.status).toBe("completed");
+    expect(vi.mocked(generateText).mock.calls[0]?.[0]?.maxOutputTokens).toBe(327_680);
+    expect(vi.mocked(generateText).mock.calls[1]?.[0]?.maxOutputTokens).toBe(262_144);
   });
 
   it("allows a slow 65s single-step admin_plan_batch generation to succeed on primary without tripping a 45s step timeout", async () => {

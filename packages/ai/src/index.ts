@@ -52,7 +52,7 @@ const OPENROUTER_DEFAULT_CHAINS: Record<ModelRole, ModelConfig[]> = {
 };
 
 export const GENERATION_LIMITS = {
-  maxOutputTokens: 4096,
+  maxOutputTokens: 163_840,
   timeout: { totalMs: 60_000, firstChunkMs: 15_000, chunkMs: 5_000 },
 } as const;
 
@@ -63,9 +63,59 @@ export const GENERATION_LIMITS = {
  * routinely takes 50–90s on OpenRouter.
  */
 export const ADMIN_GENERATION_LIMITS = {
-  maxOutputTokens: 16_384,
+  maxOutputTokens: 327_680,
   timeout: { totalMs: 120_000 },
 } as const;
+
+/**
+ * Verified per-provider model output token ceilings (from Charm Hyper
+ * `/v1/models` and OpenRouter `/api/v1/models`). Used to clamp requested
+ * `maxOutputTokens` so fallback or `MODEL_CONFIG`-overridden models with a
+ * lower hard ceiling (e.g. Charm Hyper `deepseek-v4.1-flash-1017` at 262,144
+ * on an admin turn requesting 327,680) never receive a 400 Bad Request.
+ */
+export const MODEL_MAX_OUTPUT_TOKENS: Readonly<Record<string, number>> = {
+  "hyper:deepseek-v4.1-flash-1017-economy": 384_000,
+  "hyper:deepseek-v4.1-flash-1017": 262_144,
+  "hyper:deepseek-v4-pro-0813": 262_144,
+  "hyper:prism": 131_072,
+  "hyper:prism-core": 131_072,
+  "hyper:prism-flash": 131_072,
+  "hyper:kimi-k3.1-pro": 262_144,
+  "hyper:kimi-k3": 16_000,
+  "hyper:glm-5.3": 128_000,
+  "hyper:glm-5.3-flash": 131_072,
+  "hyper:qwen4-max": 128_000,
+  "hyper:qwen3.8-max": 65_536,
+  "hyper:qwen3.8-flash": 128_000,
+  "hyper:gpt-oss-120b": 13_107,
+  "hyper:gemma-4-26b-a4b-it": 25_600,
+  "openrouter:deepseek/deepseek-v4.1-flash-1017": 393_216,
+  "openrouter:deepseek/deepseek-v4-flash-0731": 943_718,
+  "openrouter:xiaomi/mimo-v2.6-flash-mopd": 32_768,
+};
+
+/** Known hard output token ceiling for a model/provider pair, or undefined when unknown. */
+export function getModelMaxOutputTokens(
+  config: Pick<ModelConfig, "id" | "provider">,
+): number | undefined {
+  const provider = config.provider ?? "openrouter";
+  return MODEL_MAX_OUTPUT_TOKENS[`${provider}:${config.id}`];
+}
+
+/**
+ * Resolve effective `maxOutputTokens` for a call: respect an explicit per-model
+ * override (`config.maxOutputTokens`) when set, otherwise `defaultMaxOutputTokens`,
+ * and always clamp to the model's known hard provider ceiling when one exists.
+ */
+export function resolveMaxOutputTokens(
+  config: ModelConfig | undefined,
+  defaultMaxOutputTokens: number,
+): number {
+  const desired = config?.maxOutputTokens ?? defaultMaxOutputTokens;
+  const ceiling = config !== undefined ? getModelMaxOutputTokens(config) : undefined;
+  return ceiling !== undefined ? Math.min(desired, ceiling) : desired;
+}
 
 export interface AiEnv {
   HYPER_API_KEY?: string;
@@ -153,17 +203,32 @@ export function createModel(env: AiEnv, config: ModelConfig, sessionId?: string)
       throw new Error("HYPER_API_KEY is not configured");
     }
     const reasoningEffort = typeof config.thinking === "string" ? config.thinking : undefined;
+    const ceiling = getModelMaxOutputTokens(config);
     return createOpenAICompatible({
       name: "hyper",
       baseURL: HYPER_BASE_URL,
       apiKey,
       includeUsage: true,
-      ...(reasoningEffort !== undefined
+      ...(reasoningEffort !== undefined || ceiling !== undefined
         ? {
-            transformRequestBody: (body) => ({
-              ...body,
-              reasoning_effort: reasoningEffort,
-            }),
+            transformRequestBody: (body) => {
+              const next: Record<string, unknown> = { ...body };
+              if (reasoningEffort !== undefined) {
+                next.reasoning_effort = reasoningEffort;
+              }
+              if (ceiling !== undefined) {
+                if (typeof next.max_tokens === "number" && next.max_tokens > ceiling) {
+                  next.max_tokens = ceiling;
+                }
+                if (
+                  typeof next.max_completion_tokens === "number" &&
+                  next.max_completion_tokens > ceiling
+                ) {
+                  next.max_completion_tokens = ceiling;
+                }
+              }
+              return next;
+            },
           }
         : {}),
     }).chatModel(config.id);

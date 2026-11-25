@@ -368,6 +368,17 @@ describe("buildAskCard", () => {
     expect(card.length).toBeLessThanOrEqual(MAX_MESSAGE_LENGTH);
     expect(card).toContain("lead-in");
   });
+
+  it("defensively clamps even an unclamped oversized question to 2000 chars", () => {
+    const oversized: AskUserPrompt = {
+      ...PROMPT,
+      question: "q".repeat(2500),
+      contextNote: "n".repeat(500),
+    };
+
+    const card = buildAskCard(texts, "lead-in", oversized);
+    expect(card.length).toBeLessThanOrEqual(MAX_MESSAGE_LENGTH);
+  });
 });
 
 describe("buildAskRow", () => {

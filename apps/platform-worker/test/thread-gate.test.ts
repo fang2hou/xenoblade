@@ -139,7 +139,9 @@ describe("handleThreadShouldReply", () => {
 
     expect(result).toEqual({ status: "ok", shouldReply: false });
     expect(generateText).toHaveBeenCalledTimes(1);
-    const prompt = String(vi.mocked(generateText).mock.calls[0]?.[0]?.prompt);
+    const callArgs = vi.mocked(generateText).mock.calls[0]?.[0];
+    expect(callArgs?.maxOutputTokens).toBe(10_240);
+    const prompt = String(callArgs?.prompt);
     expect(prompt).toContain("unanswered question card waiting on another user");
     expect(prompt).toContain("[Bob]: 哈哈确实，明天下午开会定吧");
 

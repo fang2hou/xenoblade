@@ -280,6 +280,18 @@ export interface ContainerLastTurn {
   assistantReply: string;
 }
 
+/** Longest prompt or reply text stored in `container_last_turns` (guards D1 row size & retry context). */
+export const MAX_LAST_TURN_CONTENT_CHARS = 16_000;
+
+const LAST_TURN_TRUNCATED_MARK = "…[truncated]";
+
+function clampLastTurnText(text: string): string {
+  const chars = Array.from(text);
+  if (chars.length <= MAX_LAST_TURN_CONTENT_CHARS) return text;
+  const keep = MAX_LAST_TURN_CONTENT_CHARS - Array.from(LAST_TURN_TRUNCATED_MARK).length;
+  return `${chars.slice(0, keep).join("")}${LAST_TURN_TRUNCATED_MARK}`;
+}
+
 /**
  * Store a guild conversation's latest turn, replacing the one before it.
  *
@@ -318,8 +330,8 @@ export async function recordLastTurn(
       turn.userDisplayName,
       turn.triggerMessageId,
       turn.triggerCreatedAt,
-      turn.triggerContent,
-      turn.assistantReply,
+      clampLastTurnText(turn.triggerContent),
+      clampLastTurnText(turn.assistantReply),
       now,
     )
     .run();
@@ -341,7 +353,7 @@ export async function recordLastReply(
     .prepare(
       "UPDATE container_last_turns SET assistant_reply = ?2, updated_at = ?3 WHERE container_id = ?1",
     )
-    .bind(entry.containerId, entry.assistantReply, now)
+    .bind(entry.containerId, clampLastTurnText(entry.assistantReply), now)
     .run();
 }
 

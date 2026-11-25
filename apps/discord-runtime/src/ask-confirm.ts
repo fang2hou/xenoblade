@@ -147,12 +147,14 @@ function clamp(text: string, max: number): string {
  */
 export function buildAskCard(texts: AskConfirmTexts, reply: string, prompt: AskUserPrompt): string {
   const note = prompt.contextNote?.trim();
-  const question = [
+  const rawQuestion = [
     prompt.question,
     ...(note === undefined || note === "" ? [] : ["", texts.contextNote(note)]),
     "",
     texts.footer,
   ].join("\n");
+  const question =
+    rawQuestion.length <= MAX_MESSAGE_LENGTH ? rawQuestion : clamp(rawQuestion, MAX_MESSAGE_LENGTH);
   const room = MAX_MESSAGE_LENGTH - question.length - 2;
   const leadIn = clamp(reply.trim(), Math.max(0, room));
   return leadIn === "" ? question : `${leadIn}\n\n${question}`;

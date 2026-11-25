@@ -164,7 +164,7 @@ describe("generate model options", () => {
 
     const options = vi.mocked(generateText).mock.calls[0]?.[0];
     expect(options?.maxOutputTokens).toBe(GENERATION_LIMITS.maxOutputTokens);
-    expect(GENERATION_LIMITS.maxOutputTokens).toBeGreaterThanOrEqual(4096);
+    expect(GENERATION_LIMITS.maxOutputTokens).toBe(163_840);
     // Absent, not undefined: reasoning models reject an explicit temperature.
     expect(options).not.toHaveProperty("temperature");
   });

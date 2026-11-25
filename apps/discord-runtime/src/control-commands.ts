@@ -1,10 +1,14 @@
-import type { ChatInputCommandInteraction } from "discord.js";
+import { AttachmentBuilder, type ChatInputCommandInteraction } from "discord.js";
 import type { MemoryCategory, MemoryResponse, UserMemory } from "@xenoblade/contracts";
 
 import { clearContext, memoryOp, settingsOp } from "./ai-client";
 import type { EnvConfig } from "./env";
 import { messages } from "./i18n";
 import { resolveUiLanguage } from "./language";
+import { MAX_MESSAGE_LENGTH } from "./output";
+
+/** Attachment filename when `/memory show`, `/persona show`, or `/preference list` exceeds 2,000 chars. */
+export const MEMORIES_ATTACHMENT_NAME = "memories.txt";
 
 /**
  * Native slash-command handlers for the per-user control plane (ADR-005):
@@ -64,7 +68,13 @@ async function handleCategoryCommand(
     if (sub === "show" || sub === "list") {
       const response = await memoryOp({ op: "get", userId }, env.workerUrl, env.internalApiToken);
       const memories = filterMemories(response, category);
-      await interaction.editReply({ content: formatMemories(label, memories, table) });
+      await interaction.editReply(
+        buildMemoryListReply(
+          table.categoryMemoriesHeader(label),
+          formatMemories(label, memories, table),
+          table,
+        ),
+      );
       return;
     }
 
@@ -128,7 +138,9 @@ async function handleMemoryCommand(
     if (sub === "show") {
       const response = await memoryOp({ op: "get", userId }, env.workerUrl, env.internalApiToken);
       const memories = response.status === "ok" ? response.memories : [];
-      await interaction.editReply({ content: formatAllMemories(memories, table) });
+      await interaction.editReply(
+        buildMemoryListReply(table.allMemoriesHeader, formatAllMemories(memories, table), table),
+      );
       return;
     }
 
@@ -294,6 +306,22 @@ function filterMemories(response: MemoryResponse, category: MemoryCategory): Use
   return response.status === "ok"
     ? response.memories.filter((memory) => memory.category === category)
     : [];
+}
+
+function buildMemoryListReply(
+  header: string,
+  formatted: string,
+  table: ReturnType<typeof messages>["dm"],
+): { content: string; files?: AttachmentBuilder[] } {
+  if (formatted.length <= MAX_MESSAGE_LENGTH) {
+    return { content: formatted };
+  }
+  return {
+    content: `${header}\n\n${table.memoriesAttachmentNote}`,
+    files: [
+      new AttachmentBuilder(Buffer.from(formatted, "utf8"), { name: MEMORIES_ATTACHMENT_NAME }),
+    ],
+  };
 }
 
 function formatMemories(
