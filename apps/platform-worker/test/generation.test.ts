@@ -873,39 +873,96 @@ describe("generate tool loop", () => {
     expect(result).toMatchObject({ status: "error" });
   });
 
-  it("stops with OutputTruncatedError instead of blindly retrying fallback when output hits token length limit", async () => {
-    const env = makeEnv([{ id: "test/primary" }, { id: "test/fallback" }]);
-    vi.mocked(generateText).mockResolvedValueOnce({
-      text: "",
-      finishReason: "length",
-      usage: { inputTokens: 100, outputTokens: 4096, inputTokenDetails: {} },
-      toolResults: [],
-      steps: [{}],
-    } as unknown as Ai.GenerateTextResult<Ai.ToolSet, never, never>);
+  it("rescues an empty length-truncated reply after prior tool steps without discarding tool results", async () => {
+    const env = makeEnv([{ id: "test/primary" }]);
+    let calls = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        calls += 1;
+        const usage = {
+          inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
+          outputTokens: { total: 50, text: 0, reasoning: 50 },
+        };
+        if (calls === 1) {
+          return {
+            content: [
+              {
+                type: "tool-call",
+                toolCallId: "call-1",
+                toolName: "memory_list",
+                input: "{}",
+              },
+            ],
+            finishReason: { unified: "tool-calls", raw: "tool-calls" },
+            usage,
+            warnings: [],
+          };
+        }
+        if (calls === 2) {
+          return {
+            content: [{ type: "text", text: "" }],
+            finishReason: { unified: "length", raw: "length" },
+            usage,
+            warnings: [],
+          };
+        }
+        return {
+          content: [{ type: "text", text: "Rescued after length truncation." }],
+          finishReason: { unified: "stop", raw: "stop" },
+          usage,
+          warnings: [],
+        };
+      },
+    });
+    await useRealLoop(model);
 
     const result = await generate(env, request());
 
-    expect(generateText).toHaveBeenCalledTimes(1);
+    expect(calls).toBe(3);
+    expect(result).toMatchObject({
+      status: "completed",
+      reply: "Rescued after length truncation.",
+    });
+    const { results } = await env.DB.prepare("SELECT tool_name FROM tool_invocations").all<{
+      tool_name: string;
+    }>();
+    expect(results).toEqual([{ tool_name: "memory_list" }]);
+  });
+
+  it("falls back when primary hits token length limit on step 0, and throws OutputTruncatedError if every model truncates", async () => {
+    const env = makeEnv([{ id: "test/primary" }, { id: "test/fallback" }]);
+    vi.mocked(generateText)
+      .mockResolvedValueOnce({
+        text: "",
+        finishReason: "length",
+        usage: { inputTokens: 100, outputTokens: 16_384, inputTokenDetails: {} },
+        toolResults: [],
+        steps: [{}],
+      } as unknown as Ai.GenerateTextResult<Ai.ToolSet, never, never>)
+      .mockResolvedValueOnce({
+        text: "",
+        finishReason: "length",
+        usage: { inputTokens: 100, outputTokens: 16_384, inputTokenDetails: {} },
+        toolResults: [],
+        steps: [{}],
+      } as unknown as Ai.GenerateTextResult<Ai.ToolSet, never, never>);
+
+    const result = await generate(env, request());
+
+    expect(generateText).toHaveBeenCalledTimes(2);
     expect(result).toMatchObject({
       status: "error",
       code: "OutputTruncatedError",
       retryable: false,
     });
     const events = loggedEvents();
-    expect(events.filter((e) => e.event === "empty_generation")).toEqual([
-      expect.objectContaining({
-        model: "test/primary",
-        finishReason: "length",
-        outputTokens: 4096,
-        steps: 1,
-      }),
-    ]);
+    expect(events.filter((e) => e.event === "empty_generation")).toHaveLength(2);
     expect(events.filter((e) => e.event === "attempt_failed")).toEqual([
       expect.objectContaining({
-        model: "test/primary",
+        model: "test/fallback",
         error: "OutputTruncatedError",
         finishReason: "length",
-        outputTokens: 4096,
+        outputTokens: 16_384,
         steps: 1,
       }),
     ]);

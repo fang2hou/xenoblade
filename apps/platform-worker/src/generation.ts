@@ -504,10 +504,12 @@ async function runGenerationPipeline(
           : [];
         const hopSuspended = askedUser || pendingReads.length > 0;
         const outputTokens = result.usage?.outputTokens ?? null;
-        if (!hopSuspended && containsLeakedToolMarkup(finalReply)) {
+        const leakedMarkup = !hopSuspended && containsLeakedToolMarkup(finalReply);
+        const emptyReply = !hopSuspended && !leakedMarkup && finalReply.trim() === "";
+        if (leakedMarkup || emptyReply) {
           console.log(
             JSON.stringify({
-              event: "tool_markup_leaked",
+              event: leakedMarkup ? "tool_markup_leaked" : "empty_generation",
               messageId: req.messageId,
               model: config.id,
               steps: result.steps.length,
@@ -563,7 +565,7 @@ async function runGenerationPipeline(
                 rescued = true;
                 console.log(
                   JSON.stringify({
-                    event: "tool_markup_rescued",
+                    event: leakedMarkup ? "tool_markup_rescued" : "empty_generation_rescued",
                     messageId: req.messageId,
                     model: config.id,
                   }),
@@ -573,7 +575,9 @@ async function runGenerationPipeline(
               if (rescueError instanceof GenerationDeadlineError) throw rescueError;
               console.log(
                 JSON.stringify({
-                  event: "tool_markup_rescue_failed",
+                  event: leakedMarkup
+                    ? "tool_markup_rescue_failed"
+                    : "empty_generation_rescue_failed",
                   messageId: req.messageId,
                   model: config.id,
                   error: rescueError instanceof Error ? rescueError.name : typeof rescueError,
@@ -582,30 +586,16 @@ async function runGenerationPipeline(
             }
           }
           if (!rescued) {
+            if (i < chain.length - 1) continue;
             if (result.finishReason === "length") {
               throw new OutputTruncatedError(config.id, outputTokens, result.steps.length);
             }
-            if (i < chain.length - 1) continue;
-            throw new Error(`${config.id} leaked raw tool markup`);
+            throw new Error(
+              leakedMarkup
+                ? `${config.id} leaked raw tool markup`
+                : `${config.id} returned empty text`,
+            );
           }
-        }
-
-        if (!hopSuspended && finalReply.trim() === "") {
-          console.log(
-            JSON.stringify({
-              event: "empty_generation",
-              messageId: req.messageId,
-              model: config.id,
-              steps: result.steps.length,
-              finishReason: result.finishReason,
-              outputTokens,
-            }),
-          );
-          if (result.finishReason === "length") {
-            throw new OutputTruncatedError(config.id, outputTokens, result.steps.length);
-          }
-          if (i < chain.length - 1) continue;
-          throw new Error(`${config.id} returned empty text`);
         }
         break GENERATION_LOOP;
       } catch (error) {
