@@ -22,7 +22,7 @@ Only read-only tools (search, fetch, query, list) are exposed. Side-effect tools
 
 ### Governance
 
-- **Server allowlist:** only explicitly configured servers connect (today: context7 always; GitHub MCP when `GITHUB_MCP_TOKEN` is set). No auto-discovery.
+- **Server allowlist:** only explicitly configured servers connect (today: context7 always; GitHub MCP when `GITHUB_MCP_TOKEN` is set; Artificial Analysis MCP when `ARTIFICIAL_ANALYSIS_API_KEY` is set). No auto-discovery.
 - **Tool allowlist:** within each server, only explicitly allowlisted tools are exposed; server-level allowlisting alone is insufficient.
 - **Namespace:** tools are namespaced by server (`server.tool`) to prevent collisions.
 - **Credentials:** MCP auth lives in Worker secrets only — never in D1, never transmitted to the Runtime, never in logs or model messages.

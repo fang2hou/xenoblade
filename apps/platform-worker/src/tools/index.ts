@@ -13,14 +13,12 @@ import { createHistoryTools } from "./history-tools";
 import { createMemoryTools } from "./memory-tools";
 import { createReadUrlTool } from "./read-url";
 import { createSearchTools } from "./search";
-import { createModelInfoTools } from "./model-info";
 import { createVisionTool } from "./vision";
 import { createSoulTools } from "./soul-tools";
 
 export { isUrlSafe } from "./ssrf";
 export { createReadUrlTool } from "./read-url";
 export { createSearchTools } from "./search";
-export { createModelInfoTools } from "./model-info";
 export { createVisionTool } from "./vision";
 export { connectMcpServers, closeMcpClients } from "./mcp-clients";
 export { extractAskPrompt, hasRetry, hasThreadPause, pauseThread, stoppedOnAskUser };
@@ -37,7 +35,6 @@ export function createFirstPartyTools(env: Env, req: GenerationRequest, resetAt:
   return {
     ...createSearchTools(env),
     read_url: createReadUrlTool(env),
-    ...createModelInfoTools(env),
     ...createVisionTool(env),
     ...createMemoryTools({ db: env.DB, userId: req.userId, scopeId: req.scopeId }),
     ...createSoulTools(env, req.scopeId),

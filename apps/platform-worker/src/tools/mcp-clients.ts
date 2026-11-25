@@ -49,6 +49,26 @@ export function getMcpServers(env: Env): McpServerConfig[] {
     });
   }
 
+  if (env.ARTIFICIAL_ANALYSIS_API_KEY) {
+    servers.push({
+      name: "artificial-analysis",
+      url: "https://mcp.artificialanalysis.ai/mcp",
+      headers: {
+        "x-api-key": env.ARTIFICIAL_ANALYSIS_API_KEY,
+      },
+      // Free-plan data tools and zero-quota schema docs only: Pro/Commercial
+      // tools return 403 and still consume quota on a Free API key.
+      allowedTools: [
+        "aa_language_models_free",
+        "aa_media_rankings_free",
+        "aa_api_context",
+        "aa_describe_endpoint",
+        "aa_describe_fields",
+        "aa_describe_schema",
+      ],
+    });
+  }
+
   return servers;
 }
 

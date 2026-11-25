@@ -61,7 +61,7 @@ Work in this repository. Read AGENTS.md at the repository root first and follow 
 
 - Runtime versions: managed by mise (see `mise.toml`) — node 24, pnpm, prek, cocogitto.
 - Required environment variables: Worker secrets `INTERNAL_API_TOKEN`, `OPENROUTER_API_KEY` (optional: Brave, MCP, Artificial Analysis keys); Runtime env `DISCORD_BOT_TOKEN`, `DISCORD_APPLICATION_ID`, `WORKER_URL`, `INTERNAL_API_TOKEN` — full lists in [DEVELOPMENT.md](./DEVELOPMENT.md#setup).
-- External services: Discord application, Cloudflare (Workers, D1), OpenRouter, a self-hosted Docker host with its own registry for the runtime; optional: Brave APIs, MCP servers (context7, GitHub), Artificial Analysis.
+- External services: Discord application, Cloudflare (Workers, D1), OpenRouter, a self-hosted Docker host with its own registry for the runtime; optional: Brave APIs, MCP servers (context7, GitHub, Artificial Analysis).
 
 ## License
 
