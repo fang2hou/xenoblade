@@ -14,6 +14,27 @@ const UNSAFE_PATH_CHARS = /[\s?#\\]|%2e|%2f|%5c/i;
 const VALID_SEGMENT = /^[A-Za-z0-9@._~-]+$/;
 const VALID_INVITE_CODE = /^[A-Za-z0-9-]{2,32}$/;
 
+const VIEW_CHANNEL_BIT = 1n << 10n;
+const LOCKOUT_DENY_MASK = (1n << 10n) | (1n << 11n) | (1n << 38n);
+
+function parsePermissionBitfield(raw: unknown): bigint {
+  if (typeof raw === "string" && /^\d+$/.test(raw.trim())) {
+    return BigInt(raw.trim());
+  }
+  if (typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0) {
+    return BigInt(raw);
+  }
+  return 0n;
+}
+
+function hasAnyPermissionBit(raw: unknown, mask: bigint): boolean {
+  return (parsePermissionBitfield(raw) & mask) !== 0n;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /** Maximum serialized size of one read-proxy response kept on the wire. */
 const MAX_READ_PAYLOAD_CHARS = 16_000;
 
@@ -57,9 +78,14 @@ function validateRoute(
   rawPath: string,
   admin: AdminRuntimeConfig,
   mode: "read" | "write",
-  options: { method?: AdminRestOperation["method"]; protectedChannelIds?: readonly string[] } = {},
+  options: {
+    method?: AdminRestOperation["method"];
+    protectedChannelIds?: readonly string[];
+    body?: AdminRestOperation["body"];
+    protectedActorIds?: readonly string[];
+  } = {},
 ): { ok: true; route: ValidatedRoute } | { ok: false; reason: string } {
-  const { method, protectedChannelIds = [] } = options;
+  const { method, protectedChannelIds = [], body, protectedActorIds = [] } = options;
   const trimmed = rawPath.trim();
   if (!trimmed.startsWith("/") || trimmed.length > 256 || UNSAFE_PATH_CHARS.test(trimmed)) {
     return { ok: false, reason: "invalid_path" };
@@ -98,8 +124,34 @@ function validateRoute(
       return { ok: false, reason: "invalid_channel_id" };
     }
     if (mode === "write" && protectedChannelIds.includes(targetId)) {
-      if (segments.length === 2 || sub1 === "permissions") {
-        return { ok: false, reason: "admin_channel_lockout_forbidden" };
+      const lockoutTargets = new Set<string>([admin.ownerUserId, ...protectedActorIds]);
+      const objBody = isPlainRecord(body) ? body : undefined;
+      if (segments.length === 2) {
+        if (method === "DELETE") {
+          return { ok: false, reason: "admin_channel_lockout_forbidden" };
+        }
+        if (
+          method === "PATCH" &&
+          objBody !== undefined &&
+          Array.isArray(objBody.permission_overwrites)
+        ) {
+          for (const item of objBody.permission_overwrites) {
+            if (!isPlainRecord(item) || typeof item.id !== "string") continue;
+            if (item.id === admin.guildId && hasAnyPermissionBit(item.allow, VIEW_CHANNEL_BIT)) {
+              return { ok: false, reason: "admin_channel_lockout_forbidden" };
+            }
+            if (lockoutTargets.has(item.id) && hasAnyPermissionBit(item.deny, LOCKOUT_DENY_MASK)) {
+              return { ok: false, reason: "admin_channel_lockout_forbidden" };
+            }
+          }
+        }
+      } else if (sub1 === "permissions" && method === "PUT" && sub2 !== undefined) {
+        if (sub2 === admin.guildId && hasAnyPermissionBit(objBody?.allow, VIEW_CHANNEL_BIT)) {
+          return { ok: false, reason: "admin_channel_lockout_forbidden" };
+        }
+        if (lockoutTargets.has(sub2) && hasAnyPermissionBit(objBody?.deny, LOCKOUT_DENY_MASK)) {
+          return { ok: false, reason: "admin_channel_lockout_forbidden" };
+        }
       }
     }
     return { ok: true, route: { normalizedPath, root, targetId, segments } };
@@ -382,6 +434,11 @@ export async function executeAdminPlan(
       ? (client.guilds.cache.get(admin.guildId)?.roles?.botRoleFor?.(botId)?.id ?? null)
       : null;
 
+  const protectedActorIds = [
+    ...(botId === undefined ? [] : [botId]),
+    ...(botManagedRoleId === null ? [] : [botManagedRoleId]),
+  ];
+
   const results: AdminStepResult[] = [];
   let aborted = false;
 
@@ -394,6 +451,8 @@ export async function executeAdminPlan(
     const validated = validateRoute(op.path, admin, "write", {
       method: op.method,
       protectedChannelIds,
+      body: op.body,
+      protectedActorIds,
     });
     if (!validated.ok) {
       results.push({ id: op.id, status: "failed", error: validated.reason });

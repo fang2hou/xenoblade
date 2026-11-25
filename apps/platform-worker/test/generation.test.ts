@@ -824,6 +824,44 @@ describe("generate tool loop", () => {
     expect(result).toMatchObject({ status: "error" });
   });
 
+  it("stops with OutputTruncatedError instead of blindly retrying fallback when output hits token length limit", async () => {
+    const env = makeEnv([{ id: "test/primary" }, { id: "test/fallback" }]);
+    vi.mocked(generateText).mockResolvedValueOnce({
+      text: "",
+      finishReason: "length",
+      usage: { inputTokens: 100, outputTokens: 4096, inputTokenDetails: {} },
+      toolResults: [],
+      steps: [{}],
+    } as unknown as Ai.GenerateTextResult<Ai.ToolSet, never, never>);
+
+    const result = await generate(env, request());
+
+    expect(generateText).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      status: "error",
+      code: "OutputTruncatedError",
+      retryable: false,
+    });
+    const events = loggedEvents();
+    expect(events.filter((e) => e.event === "empty_generation")).toEqual([
+      expect.objectContaining({
+        model: "test/primary",
+        finishReason: "length",
+        outputTokens: 4096,
+        steps: 1,
+      }),
+    ]);
+    expect(events.filter((e) => e.event === "attempt_failed")).toEqual([
+      expect.objectContaining({
+        model: "test/primary",
+        error: "OutputTruncatedError",
+        finishReason: "length",
+        outputTokens: 4096,
+        steps: 1,
+      }),
+    ]);
+  });
+
   it("carries a soul_update call back as a proposal and stores nothing", async () => {
     const env = makeEnv([{ id: "test/primary" }]);
     const { model } = scriptedModel([SOUL_UPDATE]);
@@ -1074,6 +1112,9 @@ describe("generate chain deadline", () => {
     expect(result).toMatchObject({ status: "error", code: "TimeoutError", retryable: true });
     // The Worker answers at its deadline, 15s before the Runtime would give up.
     expect(await recordedRun(env.DB)).toEqual({ status: "timeout", total_duration_ms: 135_000 });
+    // Model attribution must reflect the fallback model that actually timed out, not the primary.
+    const row = await env.DB.prepare("SELECT model FROM interactions").first<{ model: string }>();
+    expect(row?.model).toBe("test/c");
   });
 
   it("cuts off an attempt that outlives the chain's deadline", async () => {

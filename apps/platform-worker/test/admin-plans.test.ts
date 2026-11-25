@@ -4,6 +4,7 @@ import type * as Ai from "ai";
 import type { AdminActionPlan, GenerationRequest } from "@xenoblade/contracts";
 import type * as Tools from "../src/tools";
 
+import { ADMIN_GENERATION_LIMITS, GENERATION_LIMITS } from "@xenoblade/ai";
 import {
   ADMIN_PLAN_TTL_MS,
   classifyOperationRisk,
@@ -16,6 +17,7 @@ import {
   handleAdminPlanGet,
   hashAdminPlanPayload,
   isAdminSession,
+  MAX_ADMIN_OPERATIONS,
   validateAdminRestPath,
   type AdminConfig,
 } from "../src/admin-plans";
@@ -23,7 +25,7 @@ import { setGuildMemory, setUserMemory } from "../src/db";
 import { generate } from "../src/generation";
 import worker from "../src/index";
 import { setBotSoul } from "../src/soul";
-import { createAdminTools, createFirstPartyTools } from "../src/tools";
+import { createAdminTools, createFirstPartyTools, extractAdminOperations } from "../src/tools";
 import { createTestD1 } from "./helpers/d1";
 
 vi.mock("ai", async (importOriginal) => {
@@ -184,7 +186,9 @@ describe("Discord permissions, path validation & risk classification", () => {
       ).ok,
     ).toBe(true);
 
-    // Anti-lockout protects the active admin thread, parent private channel, and parent category.
+    // Refined anti-lockout on active admin thread, parent private channel, and parent category:
+    // forbids DELETE, granting @everyone ViewChannel, and denying owner/bot access,
+    // while allowing safe role overwrite adjustments (flagged high-risk).
     for (const protectedId of protectedChannelIds) {
       expect(
         validateAdminRestPath(`/channels/${protectedId}`, CFG, "write", {
@@ -196,16 +200,69 @@ describe("Discord permissions, path validation & risk classification", () => {
         validateAdminRestPath(`/channels/${protectedId}/permissions/${GUILD_ID}`, CFG, "write", {
           method: "PUT",
           protectedChannelIds,
+          body: { type: 0, allow: String(1n << 10n), deny: "0" },
         }),
       ).toEqual({ ok: false, reason: "admin_channel_lockout_forbidden" });
+      expect(
+        validateAdminRestPath(`/channels/${protectedId}/permissions/${OWNER_ID}`, CFG, "write", {
+          method: "PUT",
+          protectedChannelIds,
+          body: { type: 1, allow: "0", deny: String(1n << 11n) },
+        }),
+      ).toEqual({ ok: false, reason: "admin_channel_lockout_forbidden" });
+      expect(
+        validateAdminRestPath(`/channels/${protectedId}`, CFG, "write", {
+          method: "PATCH",
+          protectedChannelIds,
+          body: {
+            permission_overwrites: [{ id: GUILD_ID, type: 0, allow: String(1n << 10n), deny: "0" }],
+          },
+        }),
+      ).toEqual({ ok: false, reason: "admin_channel_lockout_forbidden" });
+      // Safe role overwrite edits on protected channels are allowed.
+      expect(
+        validateAdminRestPath(`/channels/${protectedId}/permissions/${ROLE_ID}`, CFG, "write", {
+          method: "PUT",
+          protectedChannelIds,
+          body: { type: 0, allow: String(1n << 10n), deny: "0" },
+        }).ok,
+      ).toBe(true);
+      expect(
+        validateAdminRestPath(`/channels/${protectedId}/permissions/${ROLE_ID}`, CFG, "write", {
+          method: "DELETE",
+          protectedChannelIds,
+        }).ok,
+      ).toBe(true);
+      expect(
+        validateAdminRestPath(`/channels/${protectedId}`, CFG, "write", {
+          method: "PATCH",
+          protectedChannelIds,
+          body: {
+            permission_overwrites: [
+              { id: GUILD_ID, type: 0, allow: "0", deny: String(1n << 10n) },
+              { id: ROLE_ID, type: 0, allow: String(1n << 10n), deny: "0" },
+            ],
+          },
+        }).ok,
+      ).toBe(true);
     }
     expect(validateAdminRestPath(`/channels/${PRIVATE_CHANNEL_ID}`, CFG, "read").ok).toBe(true);
   });
 
-  it("classifies destructive, @everyone, and sensitive-permission writes as high risk", () => {
+  it("classifies destructive, @everyone, protected-channel, and sensitive-permission writes as high risk", () => {
     expect(
       classifyOperationRisk("PATCH", `/channels/${PUBLIC_CHANNEL_ID}`, { name: "renamed" }, CFG),
     ).toEqual({ risk: "standard", riskReasons: [] });
+
+    const protectedEdit = classifyOperationRisk(
+      "PUT",
+      `/channels/${PRIVATE_CHANNEL_ID}/permissions/${ROLE_ID}`,
+      { type: 0, allow: "1024", deny: "0" },
+      CFG,
+      [THREAD_ID, PRIVATE_CHANNEL_ID, CATEGORY_ID],
+    );
+    expect(protectedEdit.risk).toBe("high");
+    expect(protectedEdit.riskReasons).toContain("protected_channel_change");
 
     const del = classifyOperationRisk("DELETE", `/channels/${PUBLIC_CHANNEL_ID}`, undefined, CFG);
     expect(del.risk).toBe("high");
@@ -406,6 +463,7 @@ describe("admin generation isolation, read-proxy continuation & budget accountin
     expect(Object.keys(tools)).toEqual(
       expect.arrayContaining([
         "discord_api_read",
+        "admin_plan_batch",
         "admin_plan_channel",
         "admin_plan_role",
         "admin_plan_member",
@@ -415,6 +473,8 @@ describe("admin generation isolation, read-proxy continuation & budget accountin
         "search_chat_history",
       ]),
     );
+    expect(system).toContain("admin_plan_batch");
+    expect(system).toContain("permission_overwrites");
 
     const nonAdminTools = createFirstPartyTools(
       env,
@@ -422,7 +482,163 @@ describe("admin generation isolation, read-proxy continuation & budget accountin
       0,
     );
     expect(Object.keys(nonAdminTools)).not.toContain("discord_api_read");
+    expect(Object.keys(nonAdminTools)).not.toContain("admin_plan_batch");
     expect(Object.keys(nonAdminTools)).not.toContain("admin_plan_rest");
+  });
+
+  it("passes elevated maxOutputTokens and step/total timeouts for admin sessions only", async () => {
+    const db = createTestD1();
+    const env = makeEnv(db);
+    vi.mocked(generateText).mockResolvedValue({
+      text: "Done.",
+      usage: { inputTokens: 10, outputTokens: 10, inputTokenDetails: {} },
+      toolResults: [],
+      steps: [{}],
+    } as unknown as Ai.GenerateTextResult<Ai.ToolSet, never, never>);
+
+    await generate(env, adminRequest({ messageId: "m-admin-limits" }));
+    const adminCall = vi.mocked(generateText).mock.calls[0]?.[0];
+    expect(adminCall?.maxOutputTokens).toBe(ADMIN_GENERATION_LIMITS.maxOutputTokens);
+    expect(adminCall?.timeout).toEqual(
+      expect.objectContaining({
+        totalMs: expect.any(Number),
+        stepMs: expect.any(Number),
+      }),
+    );
+    const adminTimeout = adminCall?.timeout as { totalMs: number; stepMs: number };
+    expect(adminTimeout.totalMs).toBeLessThanOrEqual(ADMIN_GENERATION_LIMITS.timeout.totalMs);
+    expect(adminTimeout.totalMs).toBeGreaterThan(GENERATION_LIMITS.timeout.totalMs);
+    expect(adminTimeout.stepMs).toBeLessThanOrEqual(ADMIN_GENERATION_LIMITS.timeout.stepMs);
+
+    await generate(
+      env,
+      adminRequest({
+        messageId: "m-normal-limits",
+        userId: OTHER_USER_ID,
+        adminMode: false,
+      }),
+    );
+    const normalCall = vi.mocked(generateText).mock.calls[1]?.[0];
+    expect(normalCall?.maxOutputTokens).toBe(GENERATION_LIMITS.maxOutputTokens);
+    expect(typeof normalCall?.timeout).toBe("number");
+  });
+
+  it("supports whole-channel permission_overwrites on admin_plan_channel(update) and admin_plan_batch with explicit operation limit", async () => {
+    const tools = createAdminTools({
+      config: CFG,
+      protectedChannelIds: [THREAD_ID, PRIVATE_CHANNEL_ID, CATEGORY_ID],
+      readResults: [],
+    });
+    const channelTool = tools.admin_plan_channel as unknown as {
+      execute: (args: unknown) => Promise<Record<string, unknown>>;
+    };
+    const batchTool = tools.admin_plan_batch as unknown as {
+      execute: (args: unknown) => Promise<Record<string, unknown>>;
+    };
+
+    // Whole-channel permission_overwrites update encodes human-readable permissions & flags high risk.
+    const wholeChannelRes = await channelTool.execute({
+      op: "update",
+      channel_id: PUBLIC_CHANNEL_ID,
+      permission_overwrites: [
+        { target_id: GUILD_ID, target_type: "role", deny_permissions: ["ViewChannel"] },
+        {
+          target_id: ROLE_ID,
+          target_type: "role",
+          allow_permissions: ["ViewChannel", "ManageMessages"],
+        },
+      ],
+    });
+    expect(wholeChannelRes.status).toBe("proposed");
+    const wholeOp = wholeChannelRes.operation as {
+      method: string;
+      path: string;
+      risk: string;
+      riskReasons: string[];
+      body: {
+        permission_overwrites: Array<{ id: string; type: number; allow: string; deny: string }>;
+      };
+    };
+    expect(wholeOp.method).toBe("PATCH");
+    expect(wholeOp.path).toBe(`/channels/${PUBLIC_CHANNEL_ID}`);
+    expect(wholeOp.risk).toBe("high");
+    expect(wholeOp.riskReasons).toEqual(
+      expect.arrayContaining(["everyone_overwrite_change", "sensitive_permission:ManageMessages"]),
+    );
+    expect(wholeOp.body.permission_overwrites).toEqual([
+      { id: GUILD_ID, type: 0, allow: "0", deny: "1024" },
+      { id: ROLE_ID, type: 0, allow: "9216", deny: "0" },
+    ]);
+
+    // Safe overwrite on protected channel is allowed and marked high-risk; exposing @everyone ViewChannel is rejected.
+    const protectedAllowed = await channelTool.execute({
+      op: "update",
+      channel_id: PRIVATE_CHANNEL_ID,
+      permission_overwrites: [
+        { target_id: GUILD_ID, target_type: "role", deny_permissions: ["ViewChannel"] },
+        { target_id: ROLE_ID, target_type: "role", allow_permissions: ["ViewChannel"] },
+      ],
+    });
+    expect(protectedAllowed.status).toBe("proposed");
+    expect((protectedAllowed.operation as { risk: string; riskReasons: string[] }).risk).toBe(
+      "high",
+    );
+    expect((protectedAllowed.operation as { riskReasons: string[] }).riskReasons).toContain(
+      "protected_channel_change",
+    );
+
+    const protectedExpose = await channelTool.execute({
+      op: "update",
+      channel_id: PRIVATE_CHANNEL_ID,
+      permission_overwrites: [
+        { target_id: GUILD_ID, target_type: "role", allow_permissions: ["ViewChannel"] },
+      ],
+    });
+    expect(protectedExpose).toEqual({
+      status: "rejected",
+      reason: "admin_channel_lockout_forbidden",
+    });
+
+    // Batch planning bundles multiple role + channel ops in one call and explicitly rejects overflow at MAX_ADMIN_OPERATIONS (30).
+    expect(MAX_ADMIN_OPERATIONS).toBe(30);
+    const batchEntries = Array.from({ length: MAX_ADMIN_OPERATIONS }, (_, idx) => ({
+      tool: idx % 2 === 0 ? "role" : "channel",
+      params:
+        idx % 2 === 0
+          ? { op: "update", role_id: ROLE_ID, permissions: ["SendMessages", "AttachFiles"] }
+          : { op: "update", channel_id: PUBLIC_CHANNEL_ID, name: `ch-${idx}` },
+    }));
+    // 2 slots were already consumed above, so 28 should succeed and 2 should be explicitly rejected.
+    const batchRes = await batchTool.execute({ operations: batchEntries });
+    expect(batchRes.status).toBe("proposed_batch");
+    expect(batchRes.proposedCount).toBe(MAX_ADMIN_OPERATIONS - 2);
+    expect(batchRes.rejectedCount).toBe(2);
+    expect(batchRes.remainingSlots).toBe(0);
+    const batchResults = batchRes.results as Array<Record<string, unknown>>;
+    expect(batchResults.at(-1)).toMatchObject({
+      status: "rejected",
+      reason: "plan_operation_limit_reached",
+      limit: MAX_ADMIN_OPERATIONS,
+    });
+
+    // Any further single-op or batch call explicitly rejects with plan_operation_limit_reached.
+    const extraSingle = await channelTool.execute({
+      op: "update",
+      channel_id: PUBLIC_CHANNEL_ID,
+      name: "overflow",
+    });
+    expect(extraSingle).toEqual({
+      status: "rejected",
+      reason: "plan_operation_limit_reached",
+      limit: MAX_ADMIN_OPERATIONS,
+    });
+
+    const extracted = extractAdminOperations([
+      { toolName: "admin_plan_channel", output: wholeChannelRes },
+      { toolName: "admin_plan_channel", output: protectedAllowed },
+      { toolName: "admin_plan_batch", output: batchRes },
+    ]);
+    expect(extracted).toHaveLength(MAX_ADMIN_OPERATIONS);
   });
 
   it("suspends on discord_api_read, skips duplicate budget reservation on continuation, and persists adminActionPlan", async () => {

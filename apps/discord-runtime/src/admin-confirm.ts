@@ -113,6 +113,26 @@ function listCodeBlock(lines: readonly string[]): string {
   return `${fence}\n${lines.join("\n")}\n${fence}`;
 }
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function summarizePermissionOverwrites(body: unknown): string | null {
+  if (!isPlainRecord(body)) return null;
+  const raw = body.permission_overwrites;
+  if (!Array.isArray(raw)) return null;
+  const parts: string[] = [];
+  for (const item of raw) {
+    if (!isPlainRecord(item)) continue;
+    const kind = item.type === 1 ? "member" : "role";
+    const id = typeof item.id === "string" ? item.id : "?";
+    const allow = typeof item.allow === "string" ? item.allow : "0";
+    const deny = typeof item.deny === "string" ? item.deny : "0";
+    parts.push(`${kind}:${id}(+${allow}/-${deny})`);
+  }
+  return `${raw.length} entries${parts.length > 0 ? `: ${parts.join(", ")}` : ""}`;
+}
+
 function planLines(plan: AdminActionPlan): { lines: string[]; escaped: boolean } {
   const lines: string[] = [];
   let escaped = false;
@@ -125,6 +145,12 @@ function planLines(plan: AdminActionPlan): { lines: string[]; escaped: boolean }
     lines.push(`[${index}] ${desc}`);
     if (op.riskReasons && op.riskReasons.length > 0) {
       lines.push(`[${index}] risk: ${op.riskReasons.join(", ")}`);
+    }
+    const overwritesSummary = summarizePermissionOverwrites(op.body);
+    if (overwritesSummary !== null) {
+      const safeSummary = escapeField(overwritesSummary);
+      escaped ||= safeSummary !== overwritesSummary;
+      lines.push(`[${index}] permission_overwrites: ${safeSummary}`);
     }
     if (op.body !== undefined) {
       const rawBody = JSON.stringify(op.body);
@@ -224,7 +250,32 @@ export function renderExecutionOutcome(
     return `[${index + 1}] ${status.toUpperCase()} · ${op.method} ${op.path}${suffix}`;
   });
   const body = [headline, "", listCodeBlock(detailLines)].join("\n");
-  return body.length <= MAX_MESSAGE_LENGTH ? body : headline;
+  if (body.length <= MAX_MESSAGE_LENGTH) return body;
+
+  // Keep as many detail lines as fit (always prioritizing any failed line).
+  const failedIndex = detailLines.findIndex((line) => line.includes(" FAILED · "));
+  const kept: string[] = [];
+  for (const [idx, line] of detailLines.entries()) {
+    const omitted = detailLines.length - (kept.length + 1);
+    const tail =
+      omitted > 0
+        ? [...(failedIndex > idx ? [detailLines[failedIndex]!] : []), `... (+${omitted} more)`]
+        : [];
+    const candidate = [headline, "", listCodeBlock([...kept, line, ...tail])].join("\n");
+    if (candidate.length > MAX_MESSAGE_LENGTH) break;
+    kept.push(line);
+  }
+  if (kept.length === 0) return headline;
+  const remaining = detailLines.length - kept.length;
+  const extra: string[] = [];
+  if (failedIndex >= kept.length && detailLines[failedIndex] !== undefined) {
+    extra.push(detailLines[failedIndex]);
+  }
+  if (remaining > 0) {
+    extra.push(`... (+${remaining} more)`);
+  }
+  const truncated = [headline, "", listCodeBlock([...kept, ...extra])].join("\n");
+  return truncated.length <= MAX_MESSAGE_LENGTH ? truncated : headline;
 }
 
 function settle(registry: AdminConfirmRegistry, planId: string, entry?: AdminConfirmEntry): void {
