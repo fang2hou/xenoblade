@@ -1,5 +1,7 @@
 import type { ToolSet } from "ai";
+import type { GenerationRequest } from "@xenoblade/contracts";
 
+import { createHistoryTools } from "./history-tools";
 import { createMemoryTools } from "./memory-tools";
 import { createReadUrlTool } from "./read-url";
 import { createSearchTools } from "./search";
@@ -16,17 +18,24 @@ export { connectMcpServers, closeMcpClients } from "./mcp-clients";
 
 /**
  * The Worker's own tools for one generation, acting on the generation's
- * scope: the soul tools read it and can only ever propose a soul for it, and
- * the memory tools reach only this user's personal memory and this scope's
- * shared memory.
+ * request: the soul tools read its scope and can only ever propose a soul for
+ * it, the memory tools reach only its user's personal memory and its scope's
+ * shared memory, and the history tools read only the stored history of its
+ * guild and allowlisted channels.
  */
-export function createFirstPartyTools(env: Env, scopeId: string, userId: string): ToolSet {
+export function createFirstPartyTools(env: Env, req: GenerationRequest): ToolSet {
   return {
     ...createSearchTools(env),
     read_url: createReadUrlTool(env),
     ...createModelInfoTools(env),
     ...createVisionTool(env),
-    ...createMemoryTools({ db: env.DB, userId, scopeId }),
-    ...createSoulTools(env, scopeId),
+    ...createMemoryTools({ db: env.DB, userId: req.userId, scopeId: req.scopeId }),
+    ...createSoulTools(env, req.scopeId),
+    ...createHistoryTools({
+      db: env.DB,
+      scopeId: req.scopeId,
+      channelId: req.channelId,
+      parentChannelId: req.parentChannelId ?? null,
+    }),
   };
 }

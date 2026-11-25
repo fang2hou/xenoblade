@@ -280,9 +280,9 @@ async function runGenerationPipeline(
     await getRecentSources(env.DB, { containerId: req.containerId, now }),
   );
 
-  // Tools — ALL models get ALL tools (MCP + first-party + vision); the soul
-  // and memory tools act on this request's user and scope
-  const firstPartyTools = createFirstPartyTools(env, req.scopeId, req.userId);
+  // Tools — ALL models get ALL tools (MCP + first-party + vision); the soul,
+  // memory, and history tools act on this request's user, scope, and channel
+  const firstPartyTools = createFirstPartyTools(env, req);
   // The route tests pass a bare object as the context, so waitUntil is not assumed here.
   const mcpResult = await connectMcpServers(env, { waitUntil: ctx?.waitUntil?.bind(ctx) });
   const allTools = { ...firstPartyTools, ...mcpResult.tools };

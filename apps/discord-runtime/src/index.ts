@@ -45,6 +45,7 @@ import { sendTyping } from "./output";
 import { StagedStatus } from "./staged-status";
 import { generate } from "./ai-client";
 import { handleDmMessage } from "./dm-commands";
+import { HistoryIngestBuffer } from "./history-ingest";
 import { ConversationQueue } from "./conversation-queue";
 import { registerSlashCommands } from "./slash-commands";
 import { handleLanguageCommand, resolveUiLanguageBounded } from "./language";
@@ -81,6 +82,14 @@ async function main(): Promise<void> {
     // interaction, so no reaction intent or partial is needed.
     partials: [Partials.Channel, Partials.Message, Partials.User],
   });
+  // Every public channel message enters the 90-day history index, triggered
+  // or not. The bot's own id is read per event: `client.user` exists only
+  // once the gateway is up.
+  const historyIngest = new HistoryIngestBuffer({
+    workerUrl: env.workerUrl,
+    token: env.internalApiToken,
+    botId: () => client.user?.id ?? env.discordApplicationId,
+  });
 
   client.once("ready", () => {
     console.log(
@@ -96,9 +105,24 @@ async function main(): Promise<void> {
   });
 
   client.on("messageCreate", (message) => {
+    // Before any trigger check, so chat the bot was not summoned for is
+    // indexed too. Never throws: indexing is best-effort.
+    historyIngest.add(message);
     // Fire-and-forget: the handler catches and logs internally; awaiting
     // would block the gateway's event dispatch.
     void handleMessageCreate(message, env, queue, client, registry, memoryConfirms, soulConfirms);
+  });
+
+  // Edits and deletions keep the history index in step with Discord. A
+  // deleted message is often partial; its ids are all the buffer needs.
+  client.on("messageUpdate", (oldMessage, newMessage) => {
+    historyIngest.edit(oldMessage, newMessage);
+  });
+  client.on("messageDelete", (message) => {
+    historyIngest.remove(message);
+  });
+  client.on("messageDeleteBulk", (deleted) => {
+    for (const message of deleted.values()) historyIngest.remove(message);
   });
 
   client.on("interactionCreate", (interaction) => {
@@ -134,7 +158,7 @@ async function main(): Promise<void> {
   });
 
   const healthServer = startHealthServer(env.healthPort);
-  registerShutdown(client, healthServer);
+  registerShutdown(client, healthServer, historyIngest);
 
   await client.login(env.discordBotToken);
   console.log(JSON.stringify({ event: "login" }));
@@ -996,20 +1020,42 @@ function startHealthServer(port: number): Server {
   return server;
 }
 
-/** Tear down the client and health server on SIGTERM / SIGINT. */
-function registerShutdown(client: Client, server: Server): void {
+/**
+ * Tear down the client and health server on SIGTERM / SIGINT: stop the
+ * gateway, deliver the history index changes still buffered, then exit once
+ * the health server is closed.
+ */
+function registerShutdown(
+  client: Client,
+  server: Server,
+  historyIngest: HistoryIngestBuffer,
+): void {
   let shuttingDown = false;
   const shutdown = (signal: string): void => {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(JSON.stringify({ event: "shutdown", signal }));
     // Fire-and-forget: process exit below is driven by server.close (with a
-    // 5s failsafe), not by awaiting the gateway teardown.
+    // 5s failsafe), not by awaiting the gateway teardown. The gateway goes
+    // first so no message arrives behind the final history flush, which is
+    // best-effort: the failsafe below still bounds the exit.
     void client.destroy();
-    server.close(() => {
-      console.log(JSON.stringify({ event: "health_closed" }));
-      process.exit(0);
-    });
+    void historyIngest
+      .stop()
+      .catch((error) => {
+        console.log(
+          JSON.stringify({
+            event: "history_ingest_stop_error",
+            error: error instanceof Error ? error.name : typeof error,
+          }),
+        );
+      })
+      .finally(() => {
+        server.close(() => {
+          console.log(JSON.stringify({ event: "health_closed" }));
+          process.exit(0);
+        });
+      });
     // Don't hang forever if the server won't close promptly.
     setTimeout(() => process.exit(0), 5_000).unref();
   };

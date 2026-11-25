@@ -58,6 +58,34 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((v) => typeof v === "string");
 }
 
+/**
+ * A guild's config: whether it is enabled, and its channel allowlist — the
+ * listed channel ids, or null when every channel is allowed. A stored
+ * allowlist that does not parse allows nothing. Null when the guild has no row.
+ */
+async function readGuildConfig(
+  db: D1Database,
+  scopeId: string,
+): Promise<{ enabled: boolean; allow: string[] | null } | null> {
+  const row = await db
+    .prepare("SELECT enabled, allow_channels_json FROM guild_config WHERE guild_id = ?1")
+    .bind(scopeId)
+    .first<GuildConfigRow>();
+  if (row === null) return null;
+
+  let allow: string[] | null = null;
+  if (row.allow_channels_json !== null) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(row.allow_channels_json);
+    } catch {
+      parsed = null;
+    }
+    allow = isStringArray(parsed) ? parsed : [];
+  }
+  return { enabled: row.enabled !== 0, allow };
+}
+
 /** Map an optional boolean opt-in flag to a 0/1 SQL value (NULL = unchanged). */
 function toFlag(value: boolean | undefined): number | null {
   return value === undefined ? null : value ? 1 : 0;
@@ -90,32 +118,37 @@ export async function getRuntimeConfig(
       return { ...open, enabled };
     }
 
-    const guild = await db
-      .prepare("SELECT enabled, allow_channels_json FROM guild_config WHERE guild_id = ?1")
-      .bind(scopeId)
-      .first<GuildConfigRow>();
-    if (!guild) {
+    const guild = await readGuildConfig(db, scopeId);
+    if (guild === null) {
       return open;
     }
 
-    const enabled = guild.enabled !== 0;
-    let channelAllowed = true;
-    if (guild.allow_channels_json !== null) {
-      let parsed: unknown = null;
-      try {
-        parsed = JSON.parse(guild.allow_channels_json);
-      } catch {
-        parsed = null;
-      }
-      channelAllowed =
-        isStringArray(parsed) &&
-        (parsed.includes(channelId) ||
-          (parentChannelId != null && parsed.includes(parentChannelId)));
-    }
-    return { enabled, channelAllowed };
+    const channelAllowed =
+      guild.allow === null ||
+      guild.allow.includes(channelId) ||
+      (parentChannelId != null && guild.allow.includes(parentChannelId));
+    return { enabled: guild.enabled, channelAllowed };
   } catch {
     return { enabled: false, channelAllowed: false };
   }
+}
+
+/**
+ * The channels of a guild whose stored history may be read: its channel
+ * allowlist (a thread is admitted through a listed parent), or null when
+ * every channel is allowed.
+ *
+ * An empty list means the guild allows nothing — it is disabled, the scope is
+ * a DM, or the stored allowlist does not parse. A config that cannot be read
+ * rejects instead: callers then answer a failed lookup rather than report
+ * "no history" for an outage.
+ */
+export async function getGuildAllowlist(db: D1Database, scopeId: string): Promise<string[] | null> {
+  if (scopeId === DM_SCOPE) return [];
+  const guild = await readGuildConfig(db, scopeId);
+  if (guild === null) return null;
+  if (!guild.enabled) return [];
+  return guild.allow;
 }
 
 // ── De-duplication ────────────────────────────────────────────────────────

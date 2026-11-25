@@ -31,13 +31,20 @@ export async function fetchHistory(
   return recent.map(toHistoryMessage);
 }
 
+/** Name the conversation shows for an author: server nickname, display name, then username. */
+export function authorDisplayName(message: {
+  member?: { displayName: string } | null;
+  author: { displayName: string | null; username: string };
+}): string {
+  return message.member?.displayName || message.author.displayName || message.author.username;
+}
+
 function toHistoryMessage(message: Message): HistoryMessage {
   return {
     id: message.id,
     text: message.content,
     authorId: message.author.id,
-    authorName:
-      message.member?.displayName || message.author.displayName || message.author.username,
+    authorName: authorDisplayName(message),
     isBot: message.author.bot,
     createdAt: message.createdTimestamp,
   };

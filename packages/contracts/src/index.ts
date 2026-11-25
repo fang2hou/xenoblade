@@ -361,6 +361,53 @@ export type ContextRestoreResult =
   | { status: "ok"; restored: boolean; remainingUndos: number }
   | { status: "error"; code: string };
 
+// ── Guild Message History Index (90-day, FTS5) ────────────────────────────
+
+/**
+ * One message of an allowed public guild channel as the Runtime indexes it.
+ * DMs are never indexed, and a message carries text.
+ */
+export interface IndexedMessageUpsert {
+  messageId: string;
+  channelId: string;
+  /** Parent channel id when `channelId` is a thread, else null. */
+  parentChannelId: string | null;
+  authorId: string;
+  authorName: string;
+  isBot: boolean;
+  content: string;
+  /** Id of the message this one replies to, else null. */
+  replyToId: string | null;
+  /** Epoch ms the message was sent on Discord. */
+  createdAt: number;
+  /** Epoch ms of the last edit the Runtime saw. */
+  updatedAt: number;
+}
+
+/**
+ * Batched message changes of one guild: messages to add or re-index, and ids
+ * of deleted messages. At most 50 `upserts` and 100 `deletes` per request.
+ */
+export interface MessageIngestRequest {
+  guildId: string;
+  upserts: IndexedMessageUpsert[];
+  deletes: string[];
+}
+
+export type MessageIngestResponse =
+  | {
+      status: "ok";
+      upserted: number;
+      deleted: number;
+      /** Upserts left unstored: their channel is not allowed, or the guild is disabled. */
+      skipped: number;
+      /** Upserts left unstored: malformed, or already older than the retention window. */
+      rejected: number;
+      /** Expired messages removed from the index by this request. */
+      pruned: number;
+    }
+  | { status: "error"; code: "invalid_body" | "ingest_failed" };
+
 // ── Health ────────────────────────────────────────────────────────────────
 
 export interface HealthResponse {

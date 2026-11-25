@@ -9,6 +9,8 @@ import type {
   GenerationResult,
   GuildMemoryApplyRequest,
   GuildMemoryApplyResponse,
+  MessageIngestRequest,
+  MessageIngestResponse,
   MemoryRequest,
   MemoryResponse,
   SoulApplyRequest,
@@ -28,6 +30,8 @@ import type {
 export const GENERATION_TIMEOUT_MS = 150_000;
 /** Timeout for short Worker control-plane calls. */
 const CONTROL_TIMEOUT_MS = 15_000;
+/** Timeout for one history ingest request; a slow Worker must not hold back the buffer for long. */
+const INGEST_TIMEOUT_MS = 10_000;
 
 /**
  * Send a generation request to the Platform Worker and return the result.
@@ -143,6 +147,24 @@ export function fetchUsage(
     `${workerUrl}/internal/v1/usage?${query}`,
     { method: "GET", headers: { Authorization: `Bearer ${token}` } },
     CONTROL_TIMEOUT_MS,
+  );
+}
+
+/**
+ * Send one batch of guild message changes to the Worker's history index.
+ * Best-effort by design: the caller decides what happens to a batch this
+ * call could not deliver.
+ */
+export function ingestMessages(
+  req: MessageIngestRequest,
+  workerUrl: string,
+  token: string,
+): Promise<MessageIngestResponse> {
+  return postJson<MessageIngestResponse>(
+    `${workerUrl}/internal/v1/messages/ingest`,
+    req,
+    token,
+    INGEST_TIMEOUT_MS,
   );
 }
 
