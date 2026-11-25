@@ -106,6 +106,7 @@ const zh = {
     approveHighRisk: "确认高危批准",
     cancel: "取消",
     notOwner: "只有群主可以审批服务器管理操作。",
+    executing: (count: number) => `⏳ 正在执行服务器管理操作（共 ${count} 步），请稍候…`,
     busy: "该管理计划正在执行中，请稍候。",
     expired: "⏱️ 未在有效期内审批，未执行任何服务器变更。",
     expiredNotice: "该管理计划已失效或已处理。",
@@ -251,6 +252,7 @@ export type Messages = {
     approveHighRisk: string;
     cancel: string;
     notOwner: string;
+    executing: (count: number) => string;
     busy: string;
     expired: string;
     expiredNotice: string;
@@ -412,6 +414,10 @@ const en: Messages = {
     approveHighRisk: "Approve High-Risk",
     cancel: "Cancel",
     notOwner: "Only the server owner can approve server administration actions.",
+    executing: (count: number) =>
+      count === 1
+        ? "⏳ Executing server administration action (1 step)…"
+        : `⏳ Executing server administration actions (${count} steps)…`,
     busy: "This administration plan is already executing — please wait.",
     expired: "⏱️ Not approved in time — no server changes were made.",
     expiredNotice: "This administration plan has expired or is already settled.",

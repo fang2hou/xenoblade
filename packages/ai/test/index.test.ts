@@ -80,11 +80,13 @@ describe("getModelChain", () => {
         id: "deepseek-v4.1-flash-1017-economy",
         provider: "hyper",
         temperature: 0.7,
+        thinking: "low",
         vision: true,
       },
       {
         id: "deepseek-v4.1-flash-1017",
         provider: "hyper",
+        thinking: "low",
         vision: true,
       },
     ]);
@@ -103,11 +105,13 @@ describe("getModelChain", () => {
         id: "deepseek-v4.1-flash-1017-economy",
         provider: "hyper",
         temperature: 0.7,
+        thinking: "low",
         vision: true,
       },
       {
         id: "deepseek-v4.1-flash-1017",
         provider: "hyper",
+        thinking: "low",
         vision: true,
       },
       {

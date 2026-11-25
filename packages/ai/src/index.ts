@@ -87,8 +87,14 @@ function defaultChainsForEnv(env: AiEnv): Record<ModelRole, ModelConfig[]> {
   const hasOpenRouter = hasKey(env.OPENROUTER_API_KEY);
   return {
     generation: [
-      { id: HYPER_PRIMARY_MODEL, provider: "hyper", temperature: 0.7, vision: true },
-      { id: HYPER_FALLBACK_MODEL, provider: "hyper", vision: true },
+      {
+        id: HYPER_PRIMARY_MODEL,
+        provider: "hyper",
+        temperature: 0.7,
+        thinking: "low",
+        vision: true,
+      },
+      { id: HYPER_FALLBACK_MODEL, provider: "hyper", thinking: "low", vision: true },
       ...(hasOpenRouter
         ? [
             {
