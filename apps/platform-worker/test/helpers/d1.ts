@@ -5,8 +5,9 @@ import { DatabaseSync, type SQLInputValue } from "node:sqlite";
  * Minimal D1-compatible facade over node:sqlite for unit tests.
  *
  * Implements the surface the worker actually uses — `prepare().bind()
- * .first() / .all() / .run()` — with real SQL semantics, so aggregation and
- * claim queries are evaluated by SQLite itself rather than a hand-rolled mock.
+ * .first() / .all() / .run()` and `batch()` — with real SQL semantics, so
+ * aggregation and claim queries are evaluated by SQLite itself rather than a
+ * hand-rolled mock.
  */
 export function createTestD1(): D1Database {
   const sqlite = new DatabaseSync(":memory:");
@@ -36,6 +37,22 @@ class D1Facade {
 
   prepare(query: string): D1Statement {
     return new D1Statement(this.sqlite, query, []);
+  }
+
+  /** Run the statements as one transaction, as a D1 batch does. */
+  async batch(statements: D1PreparedStatement[]): Promise<D1Result[]> {
+    this.sqlite.exec("BEGIN");
+    try {
+      const results: D1Result[] = [];
+      for (const statement of statements) {
+        results.push(await statement.run());
+      }
+      this.sqlite.exec("COMMIT");
+      return results;
+    } catch (error) {
+      this.sqlite.exec("ROLLBACK");
+      throw error;
+    }
   }
 }
 

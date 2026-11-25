@@ -44,33 +44,86 @@ describe("renderReply", () => {
 
   it("strips a model-rendered footer and zh 来源 footers", () => {
     expect(renderReply("Answer [来源](https://a).\n**Sources:**\n[1] A — https://a")).toBe(
-      "Answer [来源](https://a).",
+      "Answer [来源](<https://a>).",
     );
     expect(renderReply("回答。\n来源：https://a")).toBe("回答。");
   });
 
   it("masks bare URLs so Discord renders no preview cards", () => {
     expect(renderReply("Read https://example.com/page for details.")).toBe(
-      "Read [https://example.com/page](https://example.com/page) for details.",
+      "Read [https://example.com/page](<https://example.com/page>) for details.",
     );
   });
 
   it("keeps sentence punctuation outside the masked URL", () => {
     expect(renderReply("See https://example.com/a, then https://example.com/b!")).toBe(
-      "See [https://example.com/a](https://example.com/a), then [https://example.com/b](https://example.com/b)!",
+      "See [https://example.com/a](<https://example.com/a>), then [https://example.com/b](<https://example.com/b>)!",
     );
   });
 
-  it("leaves masked links and angle-bracket URLs untouched", () => {
-    const text = "See [来源](https://a/x?y=1) and <https://b/z>.";
+  it("keeps a balanced closing parenthesis that belongs to the URL", () => {
+    const url = "https://en.wikipedia.org/wiki/Xenoblade_Chronicles_(series)";
+    expect(renderReply(`See ${url}.`)).toBe(`See [${url}](<${url}>).`);
+  });
+
+  it("still strips an unbalanced closing parenthesis after a bare URL", () => {
+    expect(renderReply("(see https://example.com/a)")).toBe(
+      "(see [https://example.com/a](<https://example.com/a>))",
+    );
+  });
+
+  it("wraps a model-written masked link target in angle brackets", () => {
+    expect(renderReply("See [来源](https://a/x?y=1).")).toBe("See [来源](<https://a/x?y=1>).");
+    expect(renderReply("[Foo](https://en.wikipedia.org/wiki/Foo_(bar))")).toBe(
+      "[Foo](<https://en.wikipedia.org/wiki/Foo_(bar)>)",
+    );
+  });
+
+  it("does not mask a URL that is its own link label a second time", () => {
+    expect(renderReply("[https://a.com](https://a.com)")).toBe("[https://a.com](<https://a.com>)");
+  });
+
+  it("leaves angle-bracketed masked links and URLs untouched", () => {
+    const text = "See [来源](<https://a/x?y=1>) and <https://b/z>.";
     expect(renderReply(text)).toBe(text);
   });
 
-  it("leaves URLs inside code fences and inline code verbatim", () => {
-    const fenced = "Example:\n```\ncurl https://example.com/api\n```\ndone";
+  it("leaves links inside code fences and inline code verbatim", () => {
+    const fenced = "Example:\n```\ncurl https://example.com/api\n[a](https://a.com)\n```\ndone";
     expect(renderReply(fenced)).toBe(fenced);
-    expect(renderReply("run `npm view https://example.com` now")).toBe(
-      "run `npm view https://example.com` now",
+    expect(renderReply("run `npm view https://example.com [a](https://a.com)` now")).toBe(
+      "run `npm view https://example.com [a](https://a.com)` now",
+    );
+  });
+
+  it("leaves links inside tilde and longer backtick fences verbatim, terminated or not", () => {
+    const blocks = [
+      "~~~sh\ncurl https://example.com/api\n[a](https://a.com)\n~~~",
+      "````md\n```ts\nopen https://example.com\n```\n````",
+      "```ts\nopen https://example.com",
+    ];
+    for (const block of blocks) {
+      expect(renderReply(block)).toBe(block);
+    }
+  });
+
+  it("still masks the links in the prose around such fences", () => {
+    expect(renderReply("see https://a.com\n~~~\nkeep https://b.com\n~~~\nand https://c.com")).toBe(
+      "see [https://a.com](<https://a.com>)\n~~~\nkeep https://b.com\n~~~\nand [https://c.com](<https://c.com>)",
+    );
+  });
+
+  it("reads CRLF fences as code and still masks the prose around them", () => {
+    expect(
+      renderReply("see https://a.com\r\n```\r\ncurl https://b.com\r\n```\r\nand https://c.com"),
+    ).toBe(
+      "see [https://a.com](<https://a.com>)\r\n```\r\ncurl https://b.com\r\n```\r\nand [https://c.com](<https://c.com>)",
+    );
+  });
+
+  it("does not read a backtick fence with a backtick in its info string as code", () => {
+    expect(renderReply("```foo`bar\nsee https://a.com")).toBe(
+      "```foo`bar\nsee [https://a.com](<https://a.com>)",
     );
   });
 });

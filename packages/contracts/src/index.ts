@@ -67,6 +67,11 @@ export interface GenerationRequest {
   containerId: string;
   scopeId: string;
   channelId: string;
+  /**
+   * Parent channel id when `channelId` is a thread, else null. The channel
+   * allowlist admits a thread whose parent channel is listed.
+   */
+  parentChannelId?: string | null;
   userId: string;
   userDisplayName: string;
   summonKind: SummonKind;

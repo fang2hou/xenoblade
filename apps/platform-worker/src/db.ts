@@ -67,12 +67,15 @@ function toFlag(value: boolean | undefined): number | null {
  *
  * - DM scope ({@link DM_SCOPE}): reads `bot_config.dm_enabled` (missing ⇒ enabled).
  * - Guild scope: no `guild_config` row ⇒ enabled + all channels allowed.
- *   A non-null `allow_channels_json` restricts to the listed channel ids.
+ *   A non-null `allow_channels_json` restricts to the listed channel ids; a
+ *   thread (`parentChannelId` set) is allowed when the thread or its parent
+ *   channel is listed.
  */
 export async function getRuntimeConfig(
   db: D1Database,
   scopeId: string,
   channelId: string,
+  parentChannelId?: string | null,
 ): Promise<RuntimeConfig> {
   const open: RuntimeConfig = { enabled: true, channelAllowed: true };
 
@@ -102,7 +105,10 @@ export async function getRuntimeConfig(
       } catch {
         parsed = null;
       }
-      channelAllowed = isStringArray(parsed) && parsed.includes(channelId);
+      channelAllowed =
+        isStringArray(parsed) &&
+        (parsed.includes(channelId) ||
+          (parentChannelId != null && parsed.includes(parentChannelId)));
     }
     return { enabled, channelAllowed };
   } catch {

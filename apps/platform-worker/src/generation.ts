@@ -1,4 +1,4 @@
-import { generateText, isStepCount } from "ai";
+import { generateText, isStepCount, type ToolSet } from "ai";
 
 import { composeSystemPrompt, createModel, GENERATION_LIMITS, getModelChain } from "@xenoblade/ai";
 import type {
@@ -68,10 +68,76 @@ function isRetryable(error: unknown): boolean {
   return msg.includes("rate-limited") || msg.includes("rate_limit") || msg.includes("429");
 }
 
+/**
+ * Wall-clock budget for the whole model chain, from the request's arrival.
+ * It sits under the Runtime's 150s request timeout (`GENERATION_TIMEOUT_MS`
+ * in discord-runtime), so the Worker answers with a structured result — even
+ * when every model of the chain hangs — before the Runtime gives up on the
+ * call.
+ */
+const CHAIN_DEADLINE_MS = 135_000;
+
+/**
+ * Smallest budget still worth handing to a model attempt. With less of the
+ * chain's budget left, the chain gives up instead of starting a call that
+ * cannot finish in time.
+ */
+const MIN_ATTEMPT_MS = 5_000;
+
+/**
+ * Thrown when the model chain runs out of {@link CHAIN_DEADLINE_MS} before a
+ * result arrives. Carries a stable code for telemetry.
+ */
+class GenerationDeadlineError extends Error {
+  readonly code = "AI_GENERATION_DEADLINE";
+  constructor() {
+    super("Model chain exceeded its time budget");
+    this.name = "GenerationDeadlineError";
+  }
+}
+
+/**
+ * Settle with `attempt`, or reject with {@link GenerationDeadlineError} once
+ * `ms` has passed — whatever the attempt is still waiting on. An attempt's
+ * own timeout does not bound a tool that ignores its abort signal.
+ */
+async function withDeadline<T>(attempt: Promise<T>, ms: number): Promise<T> {
+  const { promise, reject } = Promise.withResolvers<T>();
+  const timer = setTimeout(() => reject(new GenerationDeadlineError()), ms);
+  try {
+    return await Promise.race([attempt, promise]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Did the run stop because it ran out of time — the chain's deadline, or the
+ * attempt's own timeout (the SDK aborts with an error named `TimeoutError`)?
+ */
+function isTimeout(error: unknown): boolean {
+  if (error instanceof GenerationDeadlineError) return true;
+  return (
+    (error instanceof Error || error instanceof DOMException) &&
+    (error.name === "TimeoutError" || error.name === "AbortError")
+  );
+}
+
 function sleep(ms: number): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>();
   setTimeout(resolve, ms);
   return promise;
+}
+
+/**
+ * Attribute a tool call to its MCP server, or `"builtin"` for a first-party
+ * tool. MCP tools are registered as `<server>_<tool>` (see
+ * `connectMcpServers`), and a first-party name such as `web_search` must not
+ * be read as a call to a server named `web`.
+ */
+function toolServer(toolName: string, firstPartyTools: ToolSet): string {
+  if (Object.hasOwn(firstPartyTools, toolName)) return "builtin";
+  return toolName.split("_")[0] ?? "builtin";
 }
 
 export async function generate(
@@ -137,7 +203,7 @@ async function runGenerationPipeline(
   ctx: ExecutionContext | undefined,
 ): Promise<GenerationResult> {
   // Runtime gate
-  const runtime = await getRuntimeConfig(env.DB, req.scopeId, req.channelId);
+  const runtime = await getRuntimeConfig(env.DB, req.scopeId, req.channelId, req.parentChannelId);
   if (!runtime.enabled || !runtime.channelAllowed) {
     return { status: "rejected", requestId, code: "disabled" };
   }
@@ -198,9 +264,11 @@ async function runGenerationPipeline(
   const messagesWithImages = buildGenerationMessages(req, contextDecision, sourcesBlock);
   const messagesTextOnly = buildTextOnlyGenerationMessages(req, contextDecision, sourcesBlock);
 
-  // Model chain — try each model until one produces a response
+  // Model chain — try each model until one produces a response, within one
+  // wall-clock budget for the whole chain.
   const chain = getModelChain(env, "generation");
   const sessionId = `xenoblade:${req.containerId}`;
+  const chainDeadline = now + CHAIN_DEADLINE_MS;
 
   let result: Awaited<ReturnType<typeof generateText>> | undefined;
   let usedModel = chain[0]?.id ?? "unknown";
@@ -208,18 +276,28 @@ async function runGenerationPipeline(
   GENERATION_LOOP: try {
     for (const [i, config] of chain.entries()) {
       const isPrimary = i === 0;
+      const remainingMs = chainDeadline - Date.now();
+      if (remainingMs < MIN_ATTEMPT_MS) {
+        throw new GenerationDeadlineError();
+      }
       try {
         const model = createModel(env, config, sessionId);
 
-        result = await generateText({
-          model,
-          system,
-          messages: isPrimary ? messagesWithImages : messagesTextOnly,
-          tools: allTools,
-          stopWhen: isStepCount(5),
-          maxRetries: 1,
-          timeout: GENERATION_LIMITS.timeout.totalMs,
-        });
+        result = await withDeadline(
+          generateText({
+            model,
+            system,
+            messages: isPrimary ? messagesWithImages : messagesTextOnly,
+            tools: allTools,
+            stopWhen: isStepCount(5),
+            maxRetries: 1,
+            timeout: Math.min(GENERATION_LIMITS.timeout.totalMs, remainingMs),
+            maxOutputTokens: config.maxOutputTokens ?? GENERATION_LIMITS.maxOutputTokens,
+            // Omitted, not defaulted: reasoning models reject any temperature but their own.
+            ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
+          }),
+          remainingMs,
+        );
 
         usedModel = config.id;
 
@@ -245,6 +323,8 @@ async function runGenerationPipeline(
             error: error instanceof Error ? error.message : String(error),
           }),
         );
+        // The chain's time is gone: nothing is left to try another model with.
+        if (error instanceof GenerationDeadlineError) throw error;
         // Rethrow as-is: everything in this try (createModel, generateText,
         // the empty-text check) throws Error instances, so the terminal
         // failure keeps its original Error shape for the caller.
@@ -254,8 +334,11 @@ async function runGenerationPipeline(
     }
   } catch (error) {
     await closeMcpClients(mcpResult.clients);
-    const code = error instanceof Error ? error.name : "GENERATION_FAILED";
-    const errorMsg = error instanceof Error ? error.message : String(error);
+    const outOfTime = isTimeout(error);
+    // A DOMException — how the SDK's timeout arrives — is read like an Error.
+    const named = error instanceof Error || error instanceof DOMException ? error : null;
+    const code = named === null ? "GENERATION_FAILED" : named.name;
+    const errorMsg = named === null ? String(error) : named.message;
     await safeFinish(env.DB, reservationId);
     await safeRecord(env.DB, {
       id: requestId,
@@ -264,11 +347,18 @@ async function runGenerationPipeline(
       userId: req.userId,
       summonKind: req.summonKind,
       model: usedModel,
-      status: "failed",
+      status: outOfTime ? "timeout" : "failed",
       totalDurationMs: Date.now() - now,
       createdAt: Date.now(),
     });
-    return { status: "error", requestId, code, message: errorMsg, retryable: isRetryable(error) };
+    // A run that merely ran out of time is worth asking again.
+    return {
+      status: "error",
+      requestId,
+      code,
+      message: errorMsg,
+      retryable: outOfTime || isRetryable(error),
+    };
   }
 
   if (!result) throw new Error("unreachable: no generation result");
@@ -320,7 +410,7 @@ async function runGenerationPipeline(
         id: crypto.randomUUID(),
         interactionId: requestId,
         toolName: tr.toolName,
-        server: tr.toolName.includes("_") ? (tr.toolName.split("_")[0] ?? "builtin") : "builtin",
+        server: toolServer(tr.toolName, firstPartyTools),
         status: isError ? "error" : "ok",
         inputSize: JSON.stringify(tr.input).length,
         outputSize: JSON.stringify(tr.output).length,
