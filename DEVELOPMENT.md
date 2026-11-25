@@ -66,7 +66,7 @@ mise run test -- {{filter}} # run a single test file or case, e.g. mise run test
 ## Layout
 
 - `apps/platform-worker/` — Cloudflare Worker: routes, generation pipeline, tools, D1 access
-- `apps/discord-runtime/` — self-hosted discord.js gateway: triggers, staged status, reply controls, DM control plane
+- `apps/discord-runtime/` — self-hosted discord.js gateway: triggers, auto-started threads, question cards, staged status, DM control plane
 - `packages/contracts/` — wire types shared by both apps
 - `packages/ai/` — model chains, OpenRouter provider, system prompt composition
 - `packages/db/` — legacy D1 helpers; unreferenced, do not add code here

@@ -71,6 +71,46 @@ export async function evaluateTrigger(
 }
 
 /**
+ * A message sent inside a thread resolves to one of three outcomes: nothing
+ * to do, an explicit summon, or ordinary chat in a thread the bot follows.
+ */
+export type ThreadTrigger =
+  | { kind: "none" }
+  | {
+      kind: "summon";
+      decision: TriggerDecision;
+      /** True when the bot was not following the thread: the summon resumes it. */
+      resume: boolean;
+    }
+  | { kind: "thread-chat" };
+
+/**
+ * Evaluate a message sent inside a thread.
+ *
+ * The summon matrix of {@link evaluateTrigger} comes first, so an explicit
+ * summon is answered whether or not the bot follows the thread — and tells
+ * the caller to resume following when it had stopped. A message that summons
+ * nobody is answered only in a thread the bot follows (`isFollowed`), as
+ * `thread-chat`. A bot's or a webhook's message never triggers.
+ */
+export async function evaluateThreadTrigger(
+  message: Message,
+  botId: string,
+  roleIds: readonly string[],
+  isFollowed: (threadId: string) => Promise<boolean>,
+): Promise<ThreadTrigger> {
+  // The follow covers what members say, not what posts itself: a bot's or a
+  // webhook's message would otherwise answer itself in a followed thread.
+  if (message.author.bot || message.webhookId) return { kind: "none" };
+
+  const decision = await evaluateTrigger(message, botId, roleIds);
+  if (decision !== null) {
+    return { kind: "summon", decision, resume: !(await isFollowed(message.channel.id)) };
+  }
+  return (await isFollowed(message.channel.id)) ? { kind: "thread-chat" } : { kind: "none" };
+}
+
+/**
  * A bare mention is a message whose text is only mention tokens
  * (`<@123>`, `<@&role>`, `<#channel>`) with nothing else. The bot then reads
  * the user's most recent prior message instead. Ported from the bot-worker

@@ -8,8 +8,7 @@ export const MAX_MESSAGE_LENGTH = 2000;
 /**
  * Message payload for bot reply text. `SuppressEmbeds` is what stops Discord
  * from rendering link preview cards — masked links alone do not — so reply
- * text is never sent or edited without it: here, or in `replyControlsEdit`
- * when the edit also carries the control row.
+ * text is never sent without it.
  */
 export function replyPayload(content: string): {
   content: string;
@@ -38,8 +37,7 @@ export async function sendTyping(channel: SendableChannels): Promise<void> {
  * needed. Chunks are split on newline boundaries first, then hard-wrapped,
  * and a code fence spanning two chunks is closed and reopened across the
  * boundary (see {@link sliceIntoChunks}). Returns the posted messages, head
- * chunk first — callers use them to attach reply controls and to delete the
- * whole reply later.
+ * chunk first.
  *
  * No streaming, no edit loop — one typing indicator earlier, then a single
  * complete post here.

@@ -1,4 +1,6 @@
 import type {
+  ChannelAllowedRequest,
+  ChannelAllowedResponse,
   ContextClearRequest,
   ContextClearResult,
   ContextRestoreRequest,
@@ -15,6 +17,8 @@ import type {
   MemoryResponse,
   SoulApplyRequest,
   SoulApplyResponse,
+  ThreadSessionRequest,
+  ThreadSessionResponse,
   UsageSummaryResponse,
   SettingsRequest,
   SettingsResponse,
@@ -130,6 +134,34 @@ export function applySoulProposal(
 ): Promise<SoulApplyResponse> {
   return postJson<SoulApplyResponse>(
     `${workerUrl}/internal/v1/soul/apply`,
+    req,
+    token,
+    CONTROL_TIMEOUT_MS,
+  );
+}
+
+/** Read or change a thread's session on the Worker (ADR-003 amendment). */
+export function threadSessionOp(
+  req: ThreadSessionRequest,
+  workerUrl: string,
+  token: string,
+): Promise<ThreadSessionResponse> {
+  return postJson<ThreadSessionResponse>(
+    `${workerUrl}/internal/v1/threads/state`,
+    req,
+    token,
+    CONTROL_TIMEOUT_MS,
+  );
+}
+
+/** Ask the Worker's generation gate whether the bot answers in a channel at all. */
+export function checkChannelAllowed(
+  req: ChannelAllowedRequest,
+  workerUrl: string,
+  token: string,
+): Promise<ChannelAllowedResponse> {
+  return postJson<ChannelAllowedResponse>(
+    `${workerUrl}/internal/v1/threads/allowed`,
     req,
     token,
     CONTROL_TIMEOUT_MS,

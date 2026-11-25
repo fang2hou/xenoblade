@@ -47,7 +47,9 @@ export type SummonKind =
   | "slash-command"
   | "component"
   /** Non-command DM text from a chat-opted-in user (ADR-011). */
-  | "dm-chat";
+  | "dm-chat"
+  /** A message that summons nobody, sent in a thread the bot follows (ADR-003 amendment). */
+  | "thread-chat";
 
 // ── History (context) ─────────────────────────────────────────────────────
 
@@ -58,12 +60,29 @@ export interface HistoryMessage {
   authorName: string;
   isBot: boolean;
   createdAt: number;
+  /**
+   * True for a message through which the triggering user only asked for the
+   * bot's previous reply to be redone (`retry_last_reply`). The question
+   * being answered lies further back, so nothing reads such a message as a
+   * prompt of its own.
+   */
+  retryRequest?: boolean;
 }
 
 // ── Generation ────────────────────────────────────────────────────────────
 
 export interface GenerationRequest {
+  /**
+   * Discord message id: the Worker's dedup key. A continuation of a question
+   * card carries an id derived from the question's.
+   */
   messageId: string;
+  /**
+   * When the triggering message was sent, in epoch ms — for a continuation,
+   * when the user answered. The stored turn of a guild conversation keeps it
+   * as the prompt's own time, which later retries never move.
+   */
+  messageCreatedAt?: number;
   containerId: string;
   scopeId: string;
   channelId: string;
@@ -95,8 +114,20 @@ export interface GenerationRequest {
    * instead of the message-id dedup claim, so racing duplicate deliveries
    * are rejected while sequential re-runs stay allowed; the rolling
    * generation budget (reserve/finalize) remains the real bound on totals.
+   *
+   * Dormant since ADR-015 was superseded (2026-11-25): the Runtime sends it
+   * no more — asking again in natural language (`retry_last_reply`) posts a
+   * new reply instead — and the field stays optional so the two tiers can be
+   * deployed in either order.
    */
   regenerateOf?: string;
+  /**
+   * Messages of a thread's parent channel that led up to the triggering one,
+   * oldest first. The Worker reads them as the discussion the thread was
+   * started from, ahead of `history` (ADR-003 amendment). Only the first turn
+   * of a started thread sends any.
+   */
+  anchorHistory?: HistoryMessage[];
 }
 
 export interface GenerationUsage {
@@ -126,6 +157,23 @@ export type GenerationResult =
        * awaiting the user's button confirmation. The Runtime posts one
        * confirmation card and executes nothing until confirmed. */
       soulProposal?: SoulProposal;
+      /**
+       * The question the run stopped on (`ask_user`): the Runtime posts it as
+       * a card with one button per option, and the turn ends there. `reply`
+       * is whatever the model said before asking — possibly nothing.
+       */
+      askPrompt?: AskUserPrompt;
+      /**
+       * The run paused the thread it answered in (`thread_pause`): un-summoned
+       * messages there no longer reach the bot until someone summons it again.
+       */
+      threadDeactivated?: boolean;
+      /**
+       * The run redid the conversation's last reply (`retry_last_reply`). The
+       * Runtime marks the message that asked for it as a `retryRequest` in
+       * later history, so the next retry can walk back to the question.
+       */
+      retriedLastReply?: boolean;
     }
   | {
       status: "rejected";
@@ -146,6 +194,98 @@ export interface GenerationSource {
   title: string;
   url: string;
 }
+
+// ── Ask User (staged confirmation, ADR-003 amendment) ─────────────────────
+
+/** One answer a question card offers as a native Discord button. */
+export interface AskUserOption {
+  /** Tells the chosen option apart inside its prompt: ASCII letters, digits, and hyphens, at most 24 characters. */
+  id: string;
+  /** The button's text, at most 80 characters (Discord's button label limit). */
+  label: string;
+}
+
+/**
+ * A question the model stopped on instead of answering, for the triggering
+ * user to settle before the next turn. Nothing is stored while it waits: the
+ * user's choice returns as the next generation's message.
+ */
+export interface AskUserPrompt {
+  /** Id the card's buttons carry and the continuation is keyed by. */
+  id: string;
+  /** At most 500 characters. */
+  question: string;
+  /** Two to four answers, the first rendered as the primary button. */
+  options: AskUserOption[];
+  /** Extra detail shown under the question, at most 500 characters. */
+  contextNote?: string;
+}
+
+// ── Thread Sessions (ADR-003 amendment) ───────────────────────────────────
+
+/**
+ * The Worker's record of one thread the bot was summoned in: whether it
+ * follows the thread's un-summoned messages, and which question cards in it
+ * still await an answer. It holds ids and flags only — never message text.
+ */
+export interface ThreadSession {
+  threadId: string;
+  guildId: string;
+  parentChannelId: string;
+  /** True while un-summoned messages in the thread summon the bot. */
+  active: boolean;
+  /** Messages ids of the question cards posted in the thread and not yet answered. */
+  pendingCardIds: string[];
+}
+
+/**
+ * Read or change a thread's session. Every op names the thread's guild, and
+ * the Worker acts on the row only when both match: a guild can neither read
+ * nor change another guild's thread state. `upsert` and `set_active` create
+ * the row when the thread has none; the card ops act on an existing row only.
+ */
+export type ThreadSessionRequest =
+  | { op: "get"; threadId: string; guildId: string }
+  /** Registers a thread and makes the bot follow it; an existing row keeps its cards. */
+  | {
+      op: "upsert";
+      threadId: string;
+      guildId: string;
+      parentChannelId: string;
+      /** The user whose summon started or resumed the thread. */
+      createdBy: string;
+    }
+  | {
+      op: "set_active";
+      threadId: string;
+      guildId: string;
+      parentChannelId: string;
+      createdBy: string;
+      active: boolean;
+    }
+  | { op: "add_card"; threadId: string; guildId: string; cardMessageId: string }
+  /** Forgets the listed cards; cards that could not be deleted from Discord stay listed, to be cleaned up by a later turn. */
+  | { op: "clear_cards"; threadId: string; guildId: string; clearedIds: string[] };
+
+/** The session as it stands after the op; `session` is null when no row is (or came) involved. */
+export type ThreadSessionResponse =
+  | { status: "ok"; session: ThreadSession | null }
+  | { status: "error"; code: "invalid_body" | "thread_state_failed" };
+
+/**
+ * Whether the Worker would answer in a channel at all — the guild's switch
+ * and its channel allowlist, exactly as the generation gate reads them. The
+ * Runtime asks before it starts a thread there, so a disabled guild or a
+ * channel off the allowlist never gets an empty thread of its own.
+ */
+export interface ChannelAllowedRequest {
+  guildId: string;
+  channelId: string;
+}
+
+export type ChannelAllowedResponse =
+  | { status: "ok"; allowed: boolean }
+  | { status: "error"; code: "invalid_body" };
 
 // ── Usage ─────────────────────────────────────────────────────────────────
 

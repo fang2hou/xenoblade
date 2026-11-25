@@ -1,4 +1,4 @@
-import type { DMChannel, Message, TextChannel, ThreadChannel } from "discord.js";
+import type { DMChannel, Message, Snowflake, TextChannel, ThreadChannel } from "discord.js";
 import type { HistoryMessage } from "@xenoblade/contracts";
 
 /** Page size when fetching recent messages from Discord. */
@@ -15,13 +15,19 @@ const RETURN_LIMIT = 40;
  *
  * Fetches up to {@link FETCH_LIMIT} messages (discord.js returns newest-first),
  * drops messages with empty content, trims to {@link RETURN_LIMIT}, and returns
- * the result in chronological (oldest-first) order for the Worker.
+ * the result in chronological (oldest-first) order for the Worker. With
+ * `before`, only messages older than that message's id are fetched — never
+ * the message itself, nor anything posted after it.
  */
 export async function fetchHistory(
   channel: TextChannel | ThreadChannel | DMChannel,
   limit: number = FETCH_LIMIT,
+  before?: Snowflake,
 ): Promise<HistoryMessage[]> {
-  const fetched = await channel.messages.fetch({ limit });
+  const fetched = await channel.messages.fetch({
+    limit,
+    ...(before === undefined ? {} : { before }),
+  });
 
   const recent = [...fetched.values()]
     .filter((msg) => msg.content.trim() !== "")

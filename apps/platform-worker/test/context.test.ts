@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { GenerationRequest, HistoryMessage } from "@xenoblade/contracts";
 
-import { buildContext, isThreadContainer } from "../src/context";
+import { buildContext, isThreadContainer, threadOf } from "../src/context";
 
 /**
  * Context membership and budgets. ADR-011 isolation invariants: DM context
@@ -144,6 +144,99 @@ describe("context limits", () => {
     // Two messages of 12,000 Latin chars fill the 24,000-char budget at 3,000 tokens
     // each; at one token per character the second would already bust the budget.
     expect(ids(many(2, "x".repeat(12_000)))).toEqual(["m0", "m1"]);
+  });
+});
+
+describe("anchor history (a thread started from a channel discussion)", () => {
+  const thread = "discord:123:c1:t1";
+
+  function anchor(id: string, createdAt = 1000): HistoryMessage {
+    return message({ id, authorId: "user-b", createdAt });
+  }
+
+  /** A thread's first turn: the mention is its starter, so it sits in both lists. */
+  function startedRequest(
+    anchorHistory: HistoryMessage[],
+    history: HistoryMessage[] = [],
+  ): GenerationRequest {
+    return { ...request(thread, history), messageId: "mention", anchorHistory };
+  }
+
+  const anchors = [anchor("a1"), anchor("a2"), anchor("mention")];
+
+  it("reads the parent channel's discussion ahead of the thread's own history", () => {
+    const decision = buildContext(startedRequest(anchors), 0);
+
+    expect(decision.mode).toBe("thread");
+    expect(decision.messages.map((m) => m.id)).toEqual(["a1", "a2"]);
+  });
+
+  it("shows a message present in both lists once, where it was said", () => {
+    const decision = buildContext(startedRequest(anchors, [anchor("mention"), anchor("h1")]), 0);
+
+    expect(decision.messages.map((m) => m.id)).toEqual(["a1", "a2", "h1"]);
+  });
+
+  it("applies the reset cutoff to the anchors like to any other message", () => {
+    const decision = buildContext(startedRequest([anchor("a1", 1000), anchor("a2", 2000)]), 1500);
+
+    expect(decision.messages.map((m) => m.id)).toEqual(["a2"]);
+  });
+
+  it("lets a long thread history crowd out the oldest anchors first", () => {
+    const many = (prefix: string, count: number): HistoryMessage[] =>
+      Array.from({ length: count }, (_, i) => anchor(`${prefix}${i}`));
+
+    // 35 thread messages leave room for all five anchors; 40 leave none.
+    const short = buildContext(startedRequest(many("a", 5), many("h", 35)), 0).messages;
+    expect(short).toHaveLength(40);
+    expect(short.slice(0, 5).map((m) => m.id)).toEqual(["a0", "a1", "a2", "a3", "a4"]);
+
+    const full = buildContext(startedRequest(many("a", 5), many("h", 40)), 0).messages;
+    expect(full).toHaveLength(40);
+    expect(full.every((m) => m.id.startsWith("h"))).toBe(true);
+  });
+
+  it("answers from the anchors alone when the thread is new", () => {
+    const decision = buildContext(startedRequest(anchors), 0);
+
+    expect(decision.messages).toHaveLength(2);
+    expect(buildContext(startedRequest([]), 0)).toEqual({ mode: "none", messages: [] });
+  });
+
+  it("keeps a DM to the requesting user's and the bot's anchors, as with its history", () => {
+    const req: GenerationRequest = {
+      ...request("discord:@me:999888", []),
+      anchorHistory: [
+        anchor("theirs", 1000),
+        message({ id: "mine", authorId: "user-a", createdAt: 1100 }),
+        message({ id: "bots", authorId: "bot", isBot: true, createdAt: 1200 }),
+      ],
+    };
+
+    const decision = buildContext(req, 0);
+
+    expect(decision.messages.map((m) => m.id)).toEqual(["mine", "bots"]);
+  });
+});
+
+describe("threadOf", () => {
+  const thread: GenerationRequest = {
+    ...request("123", []),
+    containerId: "discord:123:c1:t1",
+    channelId: "t1",
+    parentChannelId: "c1",
+  };
+
+  it("names the thread and its parent channel for a thread request", () => {
+    expect(threadOf(thread)).toEqual({ threadId: "t1", parentChannelId: "c1" });
+  });
+
+  it("answers null for a channel, for a thread without a parent, and always for a DM", () => {
+    expect(threadOf(request("123", []))).toBeNull();
+    expect(threadOf({ ...thread, parentChannelId: null })).toBeNull();
+    expect(threadOf({ ...thread, parentChannelId: undefined })).toBeNull();
+    expect(threadOf({ ...thread, scopeId: "dm", containerId: "discord:@me:t1" })).toBeNull();
   });
 });
 
