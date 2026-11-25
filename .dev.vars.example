@@ -1,14 +1,13 @@
-# Discord application secrets (from Discord Developer Portal)
-DISCORD_BOT_TOKEN=
-# Discord application public key (Ed25519 verification)
-DISCORD_PUBLIC_KEY=
-# Discord application ID (OAuth2 / General Information)
-DISCORD_APPLICATION_ID=
-
-# OpenRouter API key (https://openrouter.ai/keys)
+# Required Platform Worker secrets (copy to apps/platform-worker/.dev.vars)
+INTERNAL_API_TOKEN=
 OPENROUTER_API_KEY=
 
-# Gateway control token: authorizes POST /gateway/connect and /gateway/disconnect
-GATEWAY_CONTROL_TOKEN=
-# Gateway status token: authorizes GET /gateway/status (must differ from control token)
-GATEWAY_STATUS_TOKEN=
+# Optional tool & MCP secrets
+BRAVE_SEARCH_API_KEY=
+BRAVE_ANSWER_API_KEY=
+GITHUB_MCP_TOKEN=
+ARTIFICIAL_ANALYSIS_API_KEY=
+
+# Optional owner-approved server administration gate (both required to enable)
+ADMIN_GUILD_ID=
+ADMIN_OWNER_USER_ID=

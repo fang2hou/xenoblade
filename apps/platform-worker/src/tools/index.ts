@@ -1,6 +1,13 @@
 import type { ToolSet } from "ai";
 import type { GenerationRequest } from "@xenoblade/contracts";
 
+import { getAdminConfig, isAdminSession } from "../admin-plans";
+import {
+  createAdminTools,
+  extractAdminOperations,
+  extractDiscordReadRequests,
+  stoppedOnDiscordRead,
+} from "./admin-tools";
 import {
   createInteractionTools,
   extractAskPrompt,
@@ -21,7 +28,17 @@ export { createReadUrlTool } from "./read-url";
 export { createSearchTools } from "./search";
 export { createVisionTool } from "./vision";
 export { connectMcpServers, closeMcpClients } from "./mcp-clients";
-export { extractAskPrompt, hasRetry, hasThreadPause, pauseThread, stoppedOnAskUser };
+export {
+  createAdminTools,
+  extractAdminOperations,
+  extractAskPrompt,
+  extractDiscordReadRequests,
+  hasRetry,
+  hasThreadPause,
+  pauseThread,
+  stoppedOnAskUser,
+  stoppedOnDiscordRead,
+};
 
 /**
  * The Worker's own tools for one generation, acting on the generation's
@@ -30,8 +47,19 @@ export { extractAskPrompt, hasRetry, hasThreadPause, pauseThread, stoppedOnAskUs
  * shared memory, and the history tools read only the stored history of its
  * guild, its allowlisted public channels, and no further back in the current
  * channel than `resetAt` — the triggering user's context watermark (ADR-014).
+ *
+ * Server administration tools exist ONLY in verified owner-only private admin
+ * sessions (`isAdminSession`) and are completely absent everywhere else.
  */
 export function createFirstPartyTools(env: Env, req: GenerationRequest, resetAt: number): ToolSet {
+  const adminConfig = isAdminSession(env, req) ? getAdminConfig(env) : null;
+  const protectedChannelIds = [
+    ...new Set([
+      req.channelId,
+      ...(req.parentChannelId ? [req.parentChannelId] : []),
+      ...(req.adminProtectedChannelIds ?? []),
+    ]),
+  ];
   return {
     ...createSearchTools(env),
     read_url: createReadUrlTool(env),
@@ -47,5 +75,12 @@ export function createFirstPartyTools(env: Env, req: GenerationRequest, resetAt:
       resetAt,
     }),
     ...createInteractionTools({ db: env.DB, req, resetAt }),
+    ...(adminConfig === null
+      ? {}
+      : createAdminTools({
+          config: adminConfig,
+          protectedChannelIds,
+          readResults: req.adminReadResults ?? [],
+        })),
   };
 }

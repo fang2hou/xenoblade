@@ -9,6 +9,12 @@ import type {
   UsageSummaryResponse,
 } from "@xenoblade/contracts";
 
+import {
+  handleAdminPlanCancel,
+  handleAdminPlanClaim,
+  handleAdminPlanComplete,
+  handleAdminPlanGet,
+} from "./admin-plans";
 import { isInternalAuthorized } from "./auth";
 import { clearUserContext, getUsageSummary, restoreUserContext, truncateUserContext } from "./db";
 import { generate } from "./generation";
@@ -225,6 +231,40 @@ export default {
       return json(
         result,
         result.status === "ok" ? 200 : result.code === "invalid_body" ? 400 : 500,
+      );
+    }
+
+    // POST /internal/v1/admin/plans/* (owner-approved server administration)
+    if (request.method === "POST" && path === "/internal/v1/admin/plans/get") {
+      const req = await readJson<unknown>(request);
+      const result = await handleAdminPlanGet(env.DB, env, req);
+      return json(
+        result,
+        result.status === "ok" ? 200 : result.code === "invalid_body" ? 400 : 200,
+      );
+    }
+    if (request.method === "POST" && path === "/internal/v1/admin/plans/claim") {
+      const req = await readJson<unknown>(request);
+      const result = await handleAdminPlanClaim(env.DB, env, req);
+      return json(
+        result,
+        result.status === "ok" ? 200 : result.code === "invalid_body" ? 400 : 200,
+      );
+    }
+    if (request.method === "POST" && path === "/internal/v1/admin/plans/complete") {
+      const req = await readJson<unknown>(request);
+      const result = await handleAdminPlanComplete(env.DB, env, req);
+      return json(
+        result,
+        result.status === "ok" ? 200 : result.code === "invalid_body" ? 400 : 200,
+      );
+    }
+    if (request.method === "POST" && path === "/internal/v1/admin/plans/cancel") {
+      const req = await readJson<unknown>(request);
+      const result = await handleAdminPlanCancel(env.DB, env, req);
+      return json(
+        result,
+        result.status === "ok" ? 200 : result.code === "invalid_body" ? 400 : 200,
       );
     }
 

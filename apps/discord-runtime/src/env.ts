@@ -7,6 +7,15 @@
  * the process.
  */
 
+/** Valid Discord Snowflake pattern (17–20 decimal digits). */
+const SNOWFLAKE_RE = /^\d{17,20}$/;
+
+/** Owner-approved Discord server administration configuration (both required). */
+export interface AdminRuntimeConfig {
+  readonly guildId: string;
+  readonly ownerUserId: string;
+}
+
 export interface EnvConfig {
   readonly discordBotToken: string;
   readonly discordApplicationId: string;
@@ -14,6 +23,8 @@ export interface EnvConfig {
   readonly internalApiToken: string;
   readonly mentionRoleIds: readonly string[];
   readonly healthPort: number;
+  /** Optional owner-approved server administration scope; null/undefined disables it. */
+  readonly admin?: AdminRuntimeConfig | null;
 }
 
 const REQUIRED_VARS = [
@@ -54,6 +65,23 @@ export function loadEnv(): EnvConfig {
     throw new Error(`Invalid HEALTH_PORT: ${String(process.env.HEALTH_PORT)}`);
   }
 
+  const adminGuildId = process.env.ADMIN_GUILD_ID?.trim() ?? "";
+  const adminOwnerUserId = process.env.ADMIN_OWNER_USER_ID?.trim() ?? "";
+  let admin: AdminRuntimeConfig | null = null;
+  if (adminGuildId !== "" || adminOwnerUserId !== "") {
+    if (SNOWFLAKE_RE.test(adminGuildId) && SNOWFLAKE_RE.test(adminOwnerUserId)) {
+      admin = { guildId: adminGuildId, ownerUserId: adminOwnerUserId };
+    } else {
+      console.log(
+        JSON.stringify({
+          event: "admin_config_incomplete",
+          hasGuildId: SNOWFLAKE_RE.test(adminGuildId),
+          hasOwnerUserId: SNOWFLAKE_RE.test(adminOwnerUserId),
+        }),
+      );
+    }
+  }
+
   // The required-vars check above guarantees every value read here is
   // present and non-empty.
   return {
@@ -63,5 +91,6 @@ export function loadEnv(): EnvConfig {
     internalApiToken: process.env.INTERNAL_API_TOKEN!,
     mentionRoleIds,
     healthPort,
+    admin,
   };
 }

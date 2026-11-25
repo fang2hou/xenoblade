@@ -90,7 +90,7 @@ function mayPostInThreads(channel: TextChannel, client: Pick<Client, "user">): b
   const bot = client.user;
   if (bot === null) return false;
   const permissions = channel.permissionsFor(bot);
-  return permissions?.has(PermissionFlagsBits.SendMessagesInThreads, false) === true;
+  return permissions?.has(PermissionFlagsBits.SendMessagesInThreads) === true;
 }
 
 /**

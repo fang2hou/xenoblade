@@ -41,6 +41,21 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: pnpm exec wrangler d1 migrations apply xenoblade --remote
 
+      - name: Sync admin Worker secrets
+        working-directory: apps/platform-worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ADMIN_GUILD_ID: ${{ secrets.ADMIN_GUILD_ID }}
+          ADMIN_OWNER_USER_ID: ${{ secrets.ADMIN_OWNER_USER_ID }}
+        run: |
+          for key in ADMIN_GUILD_ID ADMIN_OWNER_USER_ID; do
+            val="${!key:-}"
+            if [ -n "$val" ]; then
+              printf '%s' "$val" | pnpm exec wrangler secret put "$key" >/dev/null
+              echo "Synced Worker secret: $key"
+            fi
+          done
+
       - name: Deploy Worker
         working-directory: apps/platform-worker
         env:
@@ -102,13 +117,48 @@ jobs:
 
       - name: Deploy runtime via SSH
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          SYNC_ADMIN_GUILD_ID: ${{ secrets.ADMIN_GUILD_ID }}
+          SYNC_ADMIN_OWNER_USER_ID: ${{ secrets.ADMIN_OWNER_USER_ID }}
         with:
           host: ${{ secrets.GATEWAY_HOST }}
           username: ${{ secrets.GATEWAY_USER }}
           key: ${{ secrets.GATEWAY_SSH_KEY }}
           port: ${{ secrets.GATEWAY_SSH_PORT }}
+          envs: SYNC_ADMIN_GUILD_ID,SYNC_ADMIN_OWNER_USER_ID
           script: |
             cd ${{ secrets.GATEWAY_DEPLOY_PATH }}
+            touch .env
+            chmod 600 .env
+            python3 - <<'PY'
+            import os, pathlib
+            env_path = pathlib.Path(".env")
+            lines = env_path.read_text(encoding="utf-8").splitlines()
+            updates = {}
+            for key in ["ADMIN_GUILD_ID", "ADMIN_OWNER_USER_ID"]:
+                val = os.environ.get(f"SYNC_{key}", "").strip()
+                if val:
+                    updates[key] = val
+            if updates:
+                seen = set()
+                out = []
+                for line in lines:
+                    if "=" in line and not line.lstrip().startswith("#"):
+                        k = line.split("=", 1)[0].strip()
+                        if k in updates:
+                            out.append(f"{k}={updates[k]}")
+                            seen.add(k)
+                            continue
+                    out.append(line)
+                for k, v in updates.items():
+                    if k not in seen:
+                        out.append(f"{k}={v}")
+                tmp = env_path.with_suffix(".env.tmp")
+                tmp.write_text("\n".join(out) + "\n", encoding="utf-8")
+                os.chmod(tmp, 0o600)
+                os.replace(tmp, env_path)
+                print("Synced runtime .env keys:", ", ".join(sorted(updates.keys())))
+            PY
             docker compose pull
             docker compose down
             docker compose up -d

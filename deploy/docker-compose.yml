@@ -12,9 +12,12 @@
 # Required environment variables in .env:
 #   DISCORD_BOT_TOKEN=
 #   DISCORD_APPLICATION_ID=
-#   DISCORD_PUBLIC_KEY=
 #   WORKER_URL=https://your-worker.workers.dev
 #   INTERNAL_API_TOKEN=
+#
+# Optional owner-approved server administration (both required to enable):
+#   ADMIN_GUILD_ID=
+#   ADMIN_OWNER_USER_ID=
 #
 services:
   discord-runtime:
