@@ -113,6 +113,10 @@ export type GenerationResult =
        * awaiting the user's reaction confirmation (ADR-013). The Runtime
        * posts one confirmation message and executes nothing until confirmed. */
       memoryProposals?: MemoryProposal[];
+      /** A server persona change the model proposed via the soul_update tool,
+       * awaiting the user's button confirmation. The Runtime posts one
+       * confirmation card and executes nothing until confirmed. */
+      soulProposal?: SoulProposal;
     }
   | {
       status: "rejected";
@@ -221,6 +225,37 @@ export type MemoryProposalResponse =
       /** One outcome per request proposal, request order preserved. */
       results: Array<{ id: string; ok: boolean; code?: string }>;
     }
+  | { status: "error"; code: string };
+
+// ── Soul (bot persona & voice) ────────────────────────────────────────────
+
+/**
+ * One soul change the model proposed during a generation. Nothing is written
+ * during generation: the proposal travels back inside the generation result
+ * and only the Runtime's button-confirmed call to `/internal/v1/soul/apply`
+ * executes it.
+ */
+export interface SoulProposal {
+  /** Client-side id; the Runtime keys its pending confirmation by it. */
+  id: string;
+  /** Scope the new soul applies to: a guild id. Never `"dm"`. */
+  scopeId: string;
+  /** The complete new soul text; it replaces the scope's current soul. */
+  content: string;
+  /** One-line description of the change, shown on the confirmation card. */
+  summary: string;
+}
+
+/** Apply a user-confirmed soul proposal (button-gated). */
+export type SoulApplyRequest = {
+  /** The confirmed proposal, forwarded verbatim. */
+  proposal: SoulProposal;
+  /** Id of the user who confirmed it; recorded as the soul's `updated_by`. */
+  updatedBy: string;
+};
+
+export type SoulApplyResponse =
+  | { status: "ok"; scopeId: string }
   | { status: "error"; code: string };
 
 // ── User Settings ─────────────────────────────────────────────────────────

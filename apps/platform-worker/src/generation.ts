@@ -29,6 +29,7 @@ import {
 import { buildContext } from "./context";
 import { extractMemoryProposals } from "./memory-proposals";
 import { extractSources } from "./sources";
+import { extractSoulProposal, formatSoulSegment, getBotSoul } from "./soul";
 import {
   buildGenerationMessages,
   buildTextOnlyGenerationMessages,
@@ -83,6 +84,13 @@ const CHAIN_DEADLINE_MS = 135_000;
  * cannot finish in time.
  */
 const MIN_ATTEMPT_MS = 5_000;
+
+/**
+ * Most model steps (rounds of tool calls) one attempt may take. The last one
+ * runs without tools (see `prepareStep` below), so a run that spends every
+ * earlier step on tool calls still ends with a text reply.
+ */
+const MAX_STEPS = 8;
 
 /**
  * Thrown when the model chain runs out of {@link CHAIN_DEADLINE_MS} before a
@@ -240,9 +248,11 @@ async function runGenerationPipeline(
   } catch (error) {
     console.log(JSON.stringify({ event: "memory_read_error", error: String(error) }));
   }
+  const soul = await getBotSoul(env.DB, req.scopeId);
   const system = composeSystemPrompt({
     safety: SAFETY_SYSTEM,
     base: MEMORY_GUIDANCE,
+    soul: formatSoulSegment(soul.content),
     persona,
     now: new Date(now),
   });
@@ -254,8 +264,9 @@ async function runGenerationPipeline(
     await getRecentSources(env.DB, { containerId: req.containerId, now }),
   );
 
-  // Tools — ALL models get ALL tools (MCP + first-party + vision)
-  const firstPartyTools = createFirstPartyTools(env);
+  // Tools — ALL models get ALL tools (MCP + first-party + vision); the soul
+  // tools act on this request's scope
+  const firstPartyTools = createFirstPartyTools(env, req.scopeId);
   // The route tests pass a bare object as the context, so waitUntil is not assumed here.
   const mcpResult = await connectMcpServers(env, { waitUntil: ctx?.waitUntil?.bind(ctx) });
   const allTools = { ...firstPartyTools, ...mcpResult.tools };
@@ -289,7 +300,13 @@ async function runGenerationPipeline(
             system,
             messages: isPrimary ? messagesWithImages : messagesTextOnly,
             tools: allTools,
-            stopWhen: isStepCount(5),
+            stopWhen: isStepCount(MAX_STEPS),
+            // Step 8, the last one, offers no tools to push the model into a
+            // final synthesis instead of another tool call. A provider that
+            // still answers with empty text is caught by the empty-reply check
+            // below and falls through to the next model as usual.
+            prepareStep: ({ stepNumber }) =>
+              stepNumber >= MAX_STEPS - 1 ? { activeTools: [] } : undefined,
             maxRetries: 1,
             timeout: Math.min(GENERATION_LIMITS.timeout.totalMs, remainingMs),
             maxOutputTokens: config.maxOutputTokens ?? GENERATION_LIMITS.maxOutputTokens,
@@ -425,6 +442,7 @@ async function runGenerationPipeline(
 
   const sources = extractSources(result.toolResults ?? []);
   const memoryProposals = extractMemoryProposals(result.toolResults ?? []);
+  const soulProposal = extractSoulProposal(result.toolResults ?? []);
   await recordInteractionSources(env.DB, {
     interactionId: requestId,
     containerId: req.containerId,
@@ -444,6 +462,7 @@ async function runGenerationPipeline(
       steps: result.steps.length,
       sources: sources.length,
       memoryProposals: memoryProposals.length,
+      soulProposal: soulProposal !== undefined,
     }),
   );
 
@@ -454,5 +473,6 @@ async function runGenerationPipeline(
     usage,
     sources,
     ...(memoryProposals.length > 0 ? { memoryProposals } : {}),
+    ...(soulProposal !== undefined ? { soulProposal } : {}),
   };
 }

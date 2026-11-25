@@ -26,6 +26,7 @@ function readMigrations(): string {
     "0004_context_truncate.sql",
     "0005_interaction_sources.sql",
     "0006_regenerate_leases.sql",
+    "0007_bot_soul.sql",
   ];
   return names.map((name) => readFileSync(new URL(name, dir), "utf8")).join("\n");
 }

@@ -11,6 +11,8 @@ import type {
   MemoryProposalResponse,
   MemoryRequest,
   MemoryResponse,
+  SoulApplyRequest,
+  SoulApplyResponse,
   UsageSummaryResponse,
   SettingsRequest,
   SettingsResponse,
@@ -110,6 +112,20 @@ export function applyMemoryProposals(
 ): Promise<MemoryProposalResponse> {
   return postJson<MemoryProposalResponse>(
     `${workerUrl}/internal/v1/memory/proposals`,
+    req,
+    token,
+    CONTROL_TIMEOUT_MS,
+  );
+}
+
+/** Apply a button-confirmed soul proposal on the Worker. */
+export function applySoulProposal(
+  req: SoulApplyRequest,
+  workerUrl: string,
+  token: string,
+): Promise<SoulApplyResponse> {
+  return postJson<SoulApplyResponse>(
+    `${workerUrl}/internal/v1/soul/apply`,
     req,
     token,
     CONTROL_TIMEOUT_MS,

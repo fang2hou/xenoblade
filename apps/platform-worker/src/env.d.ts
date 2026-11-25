@@ -3,8 +3,12 @@
 interface Env {
   DB: D1Database;
   BROWSER: Fetcher;
-  /** JSON: Record<ModelRole, ModelConfig[]>. Defines all model chains. */
-  MODEL_CONFIG: string;
+  /**
+   * JSON: partial Record<ModelRole, ModelConfig[]>. Not set by
+   * `wrangler.jsonc` — the chains in `packages/ai` apply unless a role is
+   * overridden here.
+   */
+  MODEL_CONFIG?: string;
   OPENROUTER_API_KEY: string;
   INTERNAL_API_TOKEN: string;
   BRAVE_SEARCH_API_KEY: string;
