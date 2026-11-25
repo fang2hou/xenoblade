@@ -1,4 +1,4 @@
-import { APICallError, generateText, isStepCount, type ToolSet } from "ai";
+import { APICallError, generateText, isStepCount, type ModelMessage, type ToolSet } from "ai";
 
 import { composeSystemPrompt, createModel, GENERATION_LIMITS, getModelChain } from "@xenoblade/ai";
 import type {
@@ -131,10 +131,36 @@ const MIN_ATTEMPT_MS = 5_000;
 
 /**
  * Most model steps (rounds of tool calls) one attempt may take. The last one
- * runs without tools (see `prepareStep` below), so a run that spends every
- * earlier step on tool calls still ends with a text reply.
+ * forbids further tool calls with `toolChoice: "none"` and a synthesis notice
+ * (see `prepareStep` below), so a run that spends every earlier step on tool
+ * calls still ends with a clean text reply.
  */
-const MAX_STEPS = 8;
+const MAX_STEPS = 12;
+
+/**
+ * Appended on the last step and on DSML-leak rescue calls so the model knows
+ * its tool budget is spent and writes the final answer directly. Keeping
+ * `tools` intact while setting `toolChoice: "none"` ensures OpenRouter sends
+ * `tool_choice: "none"` (dropping `tools` via `activeTools: []` omits
+ * `tool_choice`, invalidates the prompt cache, and causes DeepSeek models to
+ * emit raw DSML markup as plain text).
+ */
+const FINAL_STEP_SYNTHESIS_NOTICE =
+  "[Tool call limit reached. Do not call any more tools or output tool-call markup. " +
+  "Answer the user now using only the information already gathered, and note briefly if anything could not be verified.]";
+
+/**
+ * Matches raw DeepSeek DSML tool-call markup leaked into assistant text when
+ * an upstream provider fails to parse a tool call — both canonical single-bar
+ * fullwidth `<｜DSML｜function_calls>` (U+FF5C) and degraded double/ASCII forms
+ * such as `<｜｜DSML｜｜ calls>` or `<||DSML||invoke ...>`.
+ */
+const LEAKED_TOOL_MARKUP_RE =
+  /<\/?[｜|]+\s*DSML\s*[｜|]+\s*(?:function_calls|calls|invoke|parameter)\b/i;
+
+export function containsLeakedToolMarkup(text: string): boolean {
+  return LEAKED_TOOL_MARKUP_RE.test(text);
+}
 
 /**
  * Thrown when the model chain runs out of {@link CHAIN_DEADLINE_MS} before a
@@ -332,6 +358,13 @@ async function runGenerationPipeline(
   const chainDeadline = now + CHAIN_DEADLINE_MS;
 
   let result: Awaited<ReturnType<typeof generateText>> | undefined;
+  let finalReply = "";
+  let extraInputTokens = 0;
+  let extraOutputTokens = 0;
+  let extraCacheReadTokens = 0;
+  let extraCacheWriteTokens = 0;
+  let hasExtraCacheRead = false;
+  let hasExtraCacheWrite = false;
   let usedModel = chain[0]?.id ?? "unknown";
 
   GENERATION_LOOP: try {
@@ -343,22 +376,27 @@ async function runGenerationPipeline(
       }
       try {
         const model = createModel(env, config, sessionId);
+        const attemptMessages = isPrimary ? messagesWithImages : messagesTextOnly;
 
         result = await withDeadline(
           generateText({
             model,
             system,
-            messages: isPrimary ? messagesWithImages : messagesTextOnly,
+            messages: attemptMessages,
             tools: allTools,
             // A question for the user ends the run: nothing in a later step
             // of this one can build on an answer that has not been given.
             stopWhen: [isStepCount(MAX_STEPS), stoppedOnAskUser],
-            // Step 8, the last one, offers no tools to push the model into a
-            // final synthesis instead of another tool call. A provider that
-            // still answers with empty text is caught by the empty-reply check
-            // below and falls through to the next model as usual.
-            prepareStep: ({ stepNumber }) =>
-              stepNumber >= MAX_STEPS - 1 ? { activeTools: [] } : undefined,
+            // The last step keeps `tools` defined so OpenRouter serializes
+            // `tool_choice: "none"` and keeps the prompt cache warm, paired
+            // with an explicit synthesis notice so the model answers directly.
+            prepareStep: ({ stepNumber, messages }) =>
+              stepNumber >= MAX_STEPS - 1
+                ? {
+                    toolChoice: "none",
+                    messages: [...messages, { role: "user", content: FINAL_STEP_SYNTHESIS_NOTICE }],
+                  }
+                : undefined,
             maxRetries: 1,
             timeout: Math.min(GENERATION_LIMITS.timeout.totalMs, remainingMs),
             maxOutputTokens: config.maxOutputTokens ?? GENERATION_LIMITS.maxOutputTokens,
@@ -369,10 +407,93 @@ async function runGenerationPipeline(
         );
 
         usedModel = config.id;
+        finalReply = result.text;
+        extraInputTokens = 0;
+        extraOutputTokens = 0;
+        extraCacheReadTokens = 0;
+        extraCacheWriteTokens = 0;
+        hasExtraCacheRead = false;
+        hasExtraCacheWrite = false;
 
         // A run that stopped on a question has no answer text to check: the
         // question is its result, and the user's answer is the next turn.
-        if (extractAskPrompt(result.toolResults ?? []) === undefined && result.text.trim() === "") {
+        const askedUser = extractAskPrompt(result.toolResults ?? []) !== undefined;
+        if (!askedUser && containsLeakedToolMarkup(finalReply)) {
+          console.log(
+            JSON.stringify({
+              event: "tool_markup_leaked",
+              messageId: req.messageId,
+              model: config.id,
+              steps: result.steps.length,
+            }),
+          );
+          const rescueRemainingMs = chainDeadline - Date.now();
+          const priorMessages: ModelMessage[] =
+            result.steps.length > 1
+              ? result.steps.slice(0, -1).flatMap((step) => step.response?.messages ?? [])
+              : [];
+          let rescued = false;
+          if (priorMessages.length > 0 && rescueRemainingMs >= MIN_ATTEMPT_MS) {
+            try {
+              const rescue = await withDeadline(
+                generateText({
+                  model,
+                  system,
+                  messages: [
+                    ...attemptMessages,
+                    ...priorMessages,
+                    { role: "user", content: FINAL_STEP_SYNTHESIS_NOTICE },
+                  ],
+                  tools: allTools,
+                  toolChoice: "none",
+                  stopWhen: isStepCount(1),
+                  maxRetries: 0,
+                  timeout: Math.min(GENERATION_LIMITS.timeout.totalMs, rescueRemainingMs),
+                  maxOutputTokens: config.maxOutputTokens ?? GENERATION_LIMITS.maxOutputTokens,
+                  ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
+                }),
+                rescueRemainingMs,
+              );
+              extraInputTokens = rescue.usage.inputTokens ?? 0;
+              extraOutputTokens = rescue.usage.outputTokens ?? 0;
+              if (rescue.usage.inputTokenDetails.cacheReadTokens !== undefined) {
+                extraCacheReadTokens = rescue.usage.inputTokenDetails.cacheReadTokens;
+                hasExtraCacheRead = true;
+              }
+              if (rescue.usage.inputTokenDetails.cacheWriteTokens !== undefined) {
+                extraCacheWriteTokens = rescue.usage.inputTokenDetails.cacheWriteTokens;
+                hasExtraCacheWrite = true;
+              }
+              if (rescue.text.trim() !== "" && !containsLeakedToolMarkup(rescue.text)) {
+                finalReply = rescue.text;
+                rescued = true;
+                console.log(
+                  JSON.stringify({
+                    event: "tool_markup_rescued",
+                    messageId: req.messageId,
+                    model: config.id,
+                  }),
+                );
+              }
+            } catch (rescueError) {
+              if (rescueError instanceof GenerationDeadlineError) throw rescueError;
+              console.log(
+                JSON.stringify({
+                  event: "tool_markup_rescue_failed",
+                  messageId: req.messageId,
+                  model: config.id,
+                  error: rescueError instanceof Error ? rescueError.name : typeof rescueError,
+                }),
+              );
+            }
+          }
+          if (!rescued) {
+            if (i < chain.length - 1) continue;
+            throw new Error(`${config.id} leaked raw tool markup`);
+          }
+        }
+
+        if (!askedUser && finalReply.trim() === "") {
           console.log(
             JSON.stringify({
               event: "empty_generation",
@@ -440,12 +561,20 @@ async function runGenerationPipeline(
   if (!result) throw new Error("unreachable: no generation result");
 
   // Telemetry
+  const baseCacheRead = result.usage.inputTokenDetails.cacheReadTokens;
+  const baseCacheWrite = result.usage.inputTokenDetails.cacheWriteTokens;
   const usage: GenerationUsage = {
     model: usedModel,
-    inputTokens: result.usage.inputTokens ?? 0,
-    outputTokens: result.usage.outputTokens ?? 0,
-    cacheReadTokens: result.usage.inputTokenDetails.cacheReadTokens,
-    cacheWriteTokens: result.usage.inputTokenDetails.cacheWriteTokens,
+    inputTokens: (result.usage.inputTokens ?? 0) + extraInputTokens,
+    outputTokens: (result.usage.outputTokens ?? 0) + extraOutputTokens,
+    cacheReadTokens:
+      baseCacheRead !== undefined || hasExtraCacheRead
+        ? (baseCacheRead ?? 0) + extraCacheReadTokens
+        : undefined,
+    cacheWriteTokens:
+      baseCacheWrite !== undefined || hasExtraCacheWrite
+        ? (baseCacheWrite ?? 0) + extraCacheWriteTokens
+        : undefined,
     durationMs: Date.now() - now,
   };
 
@@ -523,7 +652,7 @@ async function runGenerationPipeline(
   // stay the user's own.
   const retried = askPrompt === undefined && hasRetry(result.toolResults ?? []);
   if (askPrompt === undefined) {
-    const assistantReply = result.text;
+    const assistantReply = finalReply;
     const storedAt = Date.now();
     await safeRecordTurn(() =>
       retried
@@ -559,7 +688,7 @@ async function runGenerationPipeline(
       model: usedModel,
       // Length only: a reply can echo personal or shared memory, so no scope
       // logs a preview of it.
-      replyLength: result.text.length,
+      replyLength: finalReply.length,
       toolCalls: (result.toolResults ?? []).length,
       steps: result.steps.length,
       sources: sources.length,
@@ -574,7 +703,7 @@ async function runGenerationPipeline(
   return {
     status: "completed",
     requestId,
-    reply: result.text,
+    reply: finalReply,
     usage,
     sources,
     ...(guildMemoryProposals.length > 0 ? { guildMemoryProposals } : {}),
