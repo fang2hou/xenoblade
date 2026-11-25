@@ -41,11 +41,13 @@ export const GENERATION_LIMITS = {
 
 /**
  * Elevated generation budget for owner-only server administration sessions,
- * which combine reasoning with multi-step bulk planning tool calls.
+ * which combine DeepSeek reasoning with bulk planning tool calls. No short
+ * per-step timeout is imposed because a single reasoning + batch-planning step
+ * routinely takes 50–90s on OpenRouter.
  */
 export const ADMIN_GENERATION_LIMITS = {
   maxOutputTokens: 16_384,
-  timeout: { totalMs: 110_000, stepMs: 45_000 },
+  timeout: { totalMs: 120_000 },
 } as const;
 
 export interface AiEnv {
