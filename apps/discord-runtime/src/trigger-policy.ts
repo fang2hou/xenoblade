@@ -1,4 +1,4 @@
-import type { Message } from "discord.js";
+import { MessageReferenceType, MessageType, type Message } from "discord.js";
 import type { SummonKind } from "@xenoblade/contracts";
 
 /** Outcome of evaluating a message against the summon matrix. */
@@ -10,6 +10,30 @@ export interface TriggerDecision {
    * caller should use this message's content as the trigger instead.
    */
   fallbackMessage?: Message;
+}
+
+/** Why Layer 1 deterministically skipped an un-summoned message in a followed thread. */
+export type ThreadSkipReason = "reply-to-other" | "leading-mention" | "system-message";
+
+/**
+ * Whether a message is a user-authored chat message rather than a Discord
+ * system event (thread rename, pin notice, member join). Test doubles that
+ * omit `type` are treated as regular chat messages.
+ */
+function isChatMessage(message: Message): boolean {
+  const type: MessageType | undefined = message.type;
+  return type === undefined || type === MessageType.Default || type === MessageType.Reply;
+}
+
+/**
+ * Whether `message.reference` represents a Discord reply rather than a
+ * forwarded message (`MessageReferenceType.Forward`). Forwarding into a
+ * thread shares material for discussion instead of addressing another user.
+ */
+function isReplyReference(message: Message): boolean {
+  const reference = message.reference;
+  if (!reference?.messageId) return false;
+  return reference.type !== MessageReferenceType.Forward;
 }
 
 /**
@@ -35,9 +59,19 @@ export async function evaluateTrigger(
   botId: string,
   roleIds: readonly string[],
 ): Promise<TriggerDecision | null> {
-  // Never trigger on bot or webhook messages.
+  return evaluateTriggerInternal(message, botId, roleIds, undefined);
+}
+
+async function evaluateTriggerInternal(
+  message: Message,
+  botId: string,
+  roleIds: readonly string[],
+  knownReplyAuthorId: string | null | undefined,
+): Promise<TriggerDecision | null> {
+  // Never trigger on bot, webhook, or non-chat system messages.
   if (message.author.bot) return null;
   if (message.webhookId) return null;
+  if (!isChatMessage(message)) return null;
 
   // (a) Direct user mention of the bot.
   if (message.mentions.users.has(botId)) {
@@ -60,9 +94,11 @@ export async function evaluateTrigger(
     }
   }
 
-  // (c) Reply to one of the bot's messages.
-  if (message.reference?.messageId) {
-    if (await resolveReplyToBot(message, botId)) {
+  // (c) Reply to one of the bot's messages (never a forwarded message).
+  if (isReplyReference(message)) {
+    const replyAuthorId =
+      knownReplyAuthorId !== undefined ? knownReplyAuthorId : await resolveReplyAuthorId(message);
+    if (replyAuthorId === botId) {
       return { kind: "reply-to-bot" };
     }
   }
@@ -71,11 +107,14 @@ export async function evaluateTrigger(
 }
 
 /**
- * A message sent inside a thread resolves to one of three outcomes: nothing
- * to do, an explicit summon, or ordinary chat in a thread the bot follows.
+ * A message sent inside a thread resolves to one of four outcomes: nothing to
+ * do (bot/webhook or unfollowed thread), deterministically skipped as
+ * addressed to another participant in a followed thread, an explicit summon,
+ * or ordinary chat in a thread the bot follows.
  */
 export type ThreadTrigger =
   | { kind: "none" }
+  | { kind: "skipped"; reason: ThreadSkipReason }
   | {
       kind: "summon";
       decision: TriggerDecision;
@@ -89,9 +128,12 @@ export type ThreadTrigger =
  *
  * The summon matrix of {@link evaluateTrigger} comes first, so an explicit
  * summon is answered whether or not the bot follows the thread — and tells
- * the caller to resume following when it had stopped. A message that summons
- * nobody is answered only in a thread the bot follows (`isFollowed`), as
- * `thread-chat`. A bot's or a webhook's message never triggers.
+ * the caller to resume following when it had stopped. In a followed thread,
+ * an un-summoned message that is deterministically addressed to another user
+ * (a reply to someone else, or a leading `@someone` / `@role` / `@everyone` /
+ * `@here` mention) is skipped without unfollowing the thread; self-replies,
+ * forwarded messages, and mid-sentence mentions pass through as `thread-chat`.
+ * A bot's, webhook's, or non-chat system message never triggers.
  */
 export async function evaluateThreadTrigger(
   message: Message,
@@ -102,12 +144,89 @@ export async function evaluateThreadTrigger(
   // The follow covers what members say, not what posts itself: a bot's or a
   // webhook's message would otherwise answer itself in a followed thread.
   if (message.author.bot || message.webhookId) return { kind: "none" };
+  if (!isChatMessage(message)) return { kind: "skipped", reason: "system-message" };
 
-  const decision = await evaluateTrigger(message, botId, roleIds);
+  // Resolve a reply's author at most once so explicit reply-to-bot and
+  // Layer 1 reply-to-other never double-fetch the referenced message.
+  const hasReply = isReplyReference(message);
+  const needsReplyAuthor =
+    hasReply &&
+    !message.mentions.users.has(botId) &&
+    !roleIds.some((roleId) => message.mentions.roles.has(roleId));
+  const replyAuthorId = needsReplyAuthor ? await resolveReplyAuthorId(message) : undefined;
+
+  const decision = await evaluateTriggerInternal(message, botId, roleIds, replyAuthorId);
   if (decision !== null) {
     return { kind: "summon", decision, resume: !(await isFollowed(message.channel.id)) };
   }
-  return (await isFollowed(message.channel.id)) ? { kind: "thread-chat" } : { kind: "none" };
+
+  if (!(await isFollowed(message.channel.id))) {
+    return { kind: "none" };
+  }
+
+  // Layer 1 deterministic checks for followed threads:
+  // 1. Reply to another user/bot (self-replies pass through as added context).
+  if (hasReply && replyAuthorId !== message.author.id) {
+    return { kind: "skipped", reason: "reply-to-other" };
+  }
+
+  // 2. Leading mention targeting another user, a non-watched role, or @everyone/@here.
+  // Mid-sentence mentions (e.g. "summarize what @Alice said") pass through.
+  if (hasLeadingOtherMention(message.content, message.author.id, botId, roleIds)) {
+    return { kind: "skipped", reason: "leading-mention" };
+  }
+
+  return { kind: "thread-chat" };
+}
+
+/**
+ * One leading mention token at the start of a message: `<@id>`, `<@!id>`,
+ * `<@&roleId>`, or `@everyone` / `@here` followed by whitespace, punctuation,
+ * or end of message.
+ */
+const LEADING_MENTION_TOKEN =
+  /^(?:<@!?(\d+)>|<@&(\d+)>|@(everyone|here)(?=\s|$|[,.:;!?，。、：；！？]))/;
+
+/** Separators allowed between multiple consecutive leading mentions (`@A @B`, `@A, @B`). */
+const LEADING_MENTION_SEP = /^[\s,，、]+/;
+
+/**
+ * True when `content` opens with one or more mentions targeting someone other
+ * than the author or the bot (and not a watched role). Mid-sentence mentions
+ * return false because the user is talking *about* that person to the bot.
+ */
+export function hasLeadingOtherMention(
+  content: string,
+  authorId: string,
+  botId: string,
+  roleIds: readonly string[],
+): boolean {
+  let rest = content.trimStart();
+  let sawOther = false;
+
+  while (rest.length > 0) {
+    const match = LEADING_MENTION_TOKEN.exec(rest);
+    if (match === null) break;
+
+    const userId = match[1];
+    const roleId = match[2];
+    const broadcast = match[3];
+
+    if (userId !== undefined) {
+      if (userId !== authorId && userId !== botId) sawOther = true;
+    } else if (roleId !== undefined) {
+      if (!roleIds.includes(roleId)) sawOther = true;
+    } else if (broadcast !== undefined) {
+      sawOther = true;
+    }
+
+    rest = rest.slice(match[0].length);
+    const sep = LEADING_MENTION_SEP.exec(rest);
+    if (sep === null) break;
+    rest = rest.slice(sep[0].length);
+  }
+
+  return sawOther;
 }
 
 /**
@@ -152,19 +271,19 @@ export async function findLastUserMessage(message: Message): Promise<Message | n
 }
 
 /**
- * Resolve whether a message is a reply to the bot. Uses the synchronous
+ * Resolve the author id of the message being replied to. Uses the synchronous
  * `repliedUser` hint when present, otherwise fetches the referenced message via
- * REST once. Never throws — any fetch failure resolves to `false`.
+ * REST once. Never throws — any fetch failure resolves to `null`.
  */
-export async function resolveReplyToBot(message: Message, botId: string): Promise<boolean> {
-  if (message.mentions.repliedUser?.id === botId) return true;
+export async function resolveReplyAuthorId(message: Message): Promise<string | null> {
+  if (message.mentions.repliedUser?.id) return message.mentions.repliedUser.id;
 
   const reference = message.reference;
-  if (!reference?.messageId) return false;
+  if (!reference?.messageId) return null;
 
   try {
     const referenced = await message.channel?.messages.fetch(reference.messageId);
-    return referenced?.author.id === botId;
+    return referenced?.author?.id ?? null;
   } catch (error) {
     console.log(
       JSON.stringify({
@@ -174,6 +293,15 @@ export async function resolveReplyToBot(message: Message, botId: string): Promis
         error: String(error),
       }),
     );
-    return false;
+    return null;
   }
+}
+
+/**
+ * Resolve whether a message is a reply to the bot. Uses the synchronous
+ * `repliedUser` hint when present, otherwise fetches the referenced message via
+ * REST once. Never throws — any fetch failure resolves to `false`.
+ */
+export async function resolveReplyToBot(message: Message, botId: string): Promise<boolean> {
+  return (await resolveReplyAuthorId(message)) === botId;
 }

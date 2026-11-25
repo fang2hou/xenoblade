@@ -65,6 +65,9 @@ type Send = NonNullable<ThreadSessionsOptions["send"]>;
 /** The Worker client a `ThreadSessions` asks about channels with. */
 type Ask = NonNullable<ThreadSessionsOptions["ask"]>;
 
+/** The Worker client a `ThreadSessions` asks for Layer 2 semantic gating with. */
+type ShouldReply = NonNullable<ThreadSessionsOptions["shouldReply"]>;
+
 /** The flow's view of a discord.js client: its own id, and channel lookups. */
 interface FakeClient {
   user: { id: string };
@@ -145,11 +148,13 @@ function fakeWorker(): {
   sessions: Map<string, ThreadSession>;
   send: Mock<Send>;
   ask: Mock<Ask>;
+  shouldReply: Mock<ShouldReply>;
 } {
   const sessions = new Map<string, ThreadSession>();
   const send = vi.fn<Send>(async (req) => respond(req, sessions));
   const ask = vi.fn<Ask>(async () => ({ status: "ok", allowed: true }));
-  return { sessions, send, ask };
+  const shouldReply = vi.fn<ShouldReply>(async () => ({ status: "ok", shouldReply: true }));
+  return { sessions, send, ask, shouldReply };
 }
 
 /** A queue that keeps its tasks for the test to run one at a time. */
@@ -197,6 +202,7 @@ function withPrototype(prototype: object, fields: object): SendableChannels {
 interface FakeChannel {
   channel: SendableChannels;
   sent: MessageCreateOptions[];
+  sendTyping: Mock<() => Promise<void>>;
   /**
    * Messages a fetch from Discord finds. A posted card is not in it unless a
    * test puts it there — which is what a card whose delete failed amounts to.
@@ -252,6 +258,7 @@ function fakeChannel(
   const id = kind === "thread" ? THREAD : kind === "dm" ? "dm1" : CHANNEL;
   const sent: MessageCreateOptions[] = [];
   const stored: Message[] = [];
+  const sendTyping = vi.fn<() => Promise<void>>(async () => undefined);
   const common = {
     id,
     send: vi.fn<(payload: MessageCreateOptions) => Promise<Message>>(async (payload) => {
@@ -262,7 +269,7 @@ function fakeChannel(
         content: payload.content ?? "",
       });
     }),
-    sendTyping: vi.fn<() => Promise<void>>(async () => undefined),
+    sendTyping,
     messages: {
       fetch: vi.fn<(messageId: string) => Promise<Message>>(async (messageId) => {
         const found = stored.find((message) => message.id === messageId);
@@ -285,17 +292,21 @@ function fakeChannel(
       : kind === "dm"
         ? withPrototype(DMChannel.prototype, { ...common, type: ChannelType.DM, guild: null })
         : withPrototype(TextChannel.prototype, { ...common, type: ChannelType.GuildText });
-  return { channel, sent, stored };
+  return { channel, sent, sendTyping, stored };
 }
 
 /** A member's message in a channel, as the trigger matrix and the request builder read it. */
 function fakeSummon(options: {
   id?: string;
+  authorId?: string;
+  authorName?: string;
   content?: string;
   channel: FakeChannel;
   mentionsBot?: boolean;
   /** The message replies to one of the bot's messages. */
   repliesBot?: boolean;
+  /** Author id of the replied-to message (when simulating a reply to any user). */
+  repliedUserId?: string;
   startThread?: Mock<() => Promise<SendableChannels>>;
 }): Message {
   const users = new Map<string, { id: string }>();
@@ -304,19 +315,31 @@ function fakeSummon(options: {
   const startThread =
     options.startThread ??
     vi.fn<() => Promise<SendableChannels>>(async () => options.channel.channel);
+  const authorId = options.authorId ?? USER;
+  const authorName = options.authorName ?? "User";
+  const repliedUser =
+    options.repliedUserId !== undefined
+      ? { id: options.repliedUserId }
+      : options.repliesBot
+        ? { id: BOT }
+        : null;
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test double standing in for a discord.js Message
   const message = {
     id: options.id ?? "m1",
     channelId: options.channel.channel.id,
     content: options.content ?? "how do I deploy this?",
     createdTimestamp: SENT_AT,
-    author: { id: USER, bot: false, displayName: "User", username: "user" },
+    author: {
+      id: authorId,
+      bot: false,
+      displayName: authorName,
+      username: authorName.toLowerCase(),
+    },
     member: null,
     webhookId: null,
-    mentions: { users, roles: new Map(), repliedUser: options.repliesBot ? { id: BOT } : null },
-    reference: options.repliesBot
-      ? { messageId: "bot-reply", channelId: options.channel.channel.id }
-      : null,
+    mentions: { users, roles: new Map(), repliedUser },
+    reference:
+      repliedUser !== null ? { messageId: "ref-msg", channelId: options.channel.channel.id } : null,
     attachments: new Map(),
     channel: options.channel.channel,
     guildId: inGuild ? GUILD : null,
@@ -395,6 +418,7 @@ interface Harness {
   sessions: Map<string, ThreadSession>;
   send: Mock<Send>;
   ask: Mock<Ask>;
+  shouldReply: Mock<ShouldReply>;
   runtime: Runtime;
   fakeClient: FakeClient;
   client: Client;
@@ -414,6 +438,7 @@ function setup(worker = fakeWorker()): Harness {
       token: env.internalApiToken,
       send: worker.send,
       ask: worker.ask,
+      shouldReply: worker.shouldReply,
     }),
   };
   const fakeClient: FakeClient = { user: { id: BOT }, channels: { fetch: async () => null } };
@@ -1238,5 +1263,220 @@ describe("a button this process cannot place", () => {
       content: "该按钮已失效。",
     });
     expect(test.enqueue).not.toHaveBeenCalled();
+  });
+});
+
+describe("followed-thread relevance filter (Layer 1 + Layer 2)", () => {
+  it("skips leading @other and reply-to-other in Layer 1 without unfollowing or dismissing pending cards", async () => {
+    const worker = fakeWorker();
+    worker.sessions.set(THREAD, followed);
+    const thread = fakeChannel("thread");
+    const test = setup(worker);
+
+    // First post an ask_user card waiting on Alice (u1).
+    vi.mocked(fetchHistory).mockResolvedValue([]);
+    vi.mocked(generate).mockResolvedValueOnce(completed({ reply: "", askPrompt: ASK }));
+    await handleMessageCreate(
+      fakeSummon({ id: "m1", authorId: USER, channel: thread, content: "deploy this" }),
+      test.client,
+      test.runtime,
+    );
+    await test.tasks[0]?.run();
+    expect(test.runtime.askCards.inChannel(THREAD)).toHaveLength(1);
+
+    // Bob mentions Carol at the start of his message, then replies to Carol.
+    await handleMessageCreate(
+      fakeSummon({ id: "m2", authorId: "222", channel: thread, content: "<@333> 你看下" }),
+      test.client,
+      test.runtime,
+    );
+    await handleMessageCreate(
+      fakeSummon({
+        id: "m3",
+        authorId: "222",
+        channel: thread,
+        content: "对的",
+        repliedUserId: "333",
+      }),
+      test.client,
+      test.runtime,
+    );
+
+    expect(test.tasks).toHaveLength(1);
+    expect(test.sessions.get(THREAD)?.active).toBe(true);
+    expect(test.runtime.askCards.inChannel(THREAD)).toHaveLength(1);
+    expect(test.shouldReply).not.toHaveBeenCalled();
+  });
+
+  it("bypasses Layer 2 with zero extra calls for single-human follow-ups", async () => {
+    const worker = fakeWorker();
+    worker.sessions.set(THREAD, followed);
+    const thread = fakeChannel("thread");
+    const test = setup(worker);
+    vi.mocked(fetchHistory).mockResolvedValue([historyOf("m1")[0]!, botReply("b1", 1)]);
+
+    await handleMessageCreate(
+      fakeSummon({ id: "m2", authorId: USER, channel: thread, content: "what about staging?" }),
+      test.client,
+      test.runtime,
+    );
+    await test.tasks[0]?.run();
+
+    expect(test.shouldReply).not.toHaveBeenCalled();
+    expect(generate).toHaveBeenCalledTimes(1);
+  });
+
+  it("invokes Layer 2 in a multi-human thread and skips side-talk without typing or deleting another user's card", async () => {
+    const worker = fakeWorker();
+    worker.sessions.set(THREAD, followed);
+    worker.shouldReply.mockResolvedValueOnce({ status: "ok", shouldReply: false });
+    const thread = fakeChannel("thread");
+    const test = setup(worker);
+
+    // Bot asks Alice (u1) a question card.
+    vi.mocked(fetchHistory).mockResolvedValue([]);
+    vi.mocked(generate).mockResolvedValueOnce(completed({ reply: "", askPrompt: ASK }));
+    await handleMessageCreate(
+      fakeSummon({ id: "m1", authorId: USER, channel: thread, content: "deploy this" }),
+      test.client,
+      test.runtime,
+    );
+    await test.tasks[0]?.run();
+    expect(test.runtime.askCards.inChannel(THREAD)).toHaveLength(1);
+    thread.sendTyping.mockClear();
+
+    // Bob (u2) posts plain-text banter while Alice's card is waiting.
+    vi.mocked(fetchHistory).mockResolvedValue([
+      {
+        id: "m1",
+        text: "deploy this",
+        authorId: USER,
+        authorName: "Alice",
+        isBot: false,
+        createdAt: 1000,
+      },
+      botReply("b1", 1),
+      {
+        id: "m2",
+        text: "哈哈确实",
+        authorId: "u2",
+        authorName: "Bob",
+        isBot: false,
+        createdAt: 1002,
+      },
+    ]);
+    await handleMessageCreate(
+      fakeSummon({
+        id: "m2",
+        authorId: "u2",
+        authorName: "Bob",
+        channel: thread,
+        content: "哈哈确实",
+      }),
+      test.client,
+      test.runtime,
+    );
+    await test.tasks[1]?.run();
+
+    expect(test.shouldReply).toHaveBeenCalledTimes(1);
+    expect(test.shouldReply.mock.calls[0]?.[0]).toMatchObject({
+      channelId: THREAD,
+      messageId: "m2",
+      pendingQuestionForOther: true,
+    });
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(thread.sendTyping).not.toHaveBeenCalled();
+    // Alice's pending question card is still untouched.
+    expect(test.runtime.askCards.inChannel(THREAD)).toHaveLength(1);
+  });
+
+  it("bypasses Layer 2 when the user answering an active ask_user card types in a multi-human thread", async () => {
+    const worker = fakeWorker();
+    worker.sessions.set(THREAD, followed);
+    const thread = fakeChannel("thread");
+    const test = setup(worker);
+
+    vi.mocked(fetchHistory).mockResolvedValue([]);
+    vi.mocked(generate).mockResolvedValueOnce(completed({ reply: "", askPrompt: ASK }));
+    await handleMessageCreate(
+      fakeSummon({ id: "m1", authorId: USER, channel: thread, content: "deploy this" }),
+      test.client,
+      test.runtime,
+    );
+    await test.tasks[0]?.run();
+
+    // Even with Bob in recent history, Alice answering her own card bypasses Layer 2.
+    vi.mocked(fetchHistory).mockResolvedValue([
+      {
+        id: "m1",
+        text: "deploy this",
+        authorId: USER,
+        authorName: "Alice",
+        isBot: false,
+        createdAt: 1000,
+      },
+      { id: "m2", text: "hi", authorId: "u2", authorName: "Bob", isBot: false, createdAt: 1001 },
+    ]);
+    await handleMessageCreate(
+      fakeSummon({ id: "m3", authorId: USER, channel: thread, content: "选第一个" }),
+      test.client,
+      test.runtime,
+    );
+    await test.tasks[1]?.run();
+
+    expect(test.shouldReply).not.toHaveBeenCalled();
+    expect(generate).toHaveBeenCalledTimes(2);
+  });
+
+  it("invokes Layer 2 after a Layer 1 skip even if only one human is in fetched history, and reuses fetched history when allowed", async () => {
+    const worker = fakeWorker();
+    worker.sessions.set(THREAD, followed);
+    worker.shouldReply.mockResolvedValueOnce({ status: "ok", shouldReply: true });
+    const thread = fakeChannel("thread");
+    const test = setup(worker);
+
+    // Layer 1 skips @other and marks recent side-talk.
+    await handleMessageCreate(
+      fakeSummon({ id: "m1", authorId: USER, channel: thread, content: "<@222> 看下这个" }),
+      test.client,
+      test.runtime,
+    );
+    expect(test.tasks).toHaveLength(0);
+
+    // Next message has no @ and only USER in history, yet Layer 2 runs because of recent side-talk.
+    vi.mocked(fetchHistory).mockClear();
+    vi.mocked(fetchHistory).mockResolvedValue([historyOf("m0")[0]!]);
+    await handleMessageCreate(
+      fakeSummon({ id: "m2", authorId: USER, channel: thread, content: "顺便帮我查下最新版本" }),
+      test.client,
+      test.runtime,
+    );
+    await test.tasks[0]?.run();
+
+    expect(test.shouldReply).toHaveBeenCalledTimes(1);
+    expect(fetchHistory).toHaveBeenCalledTimes(1);
+    expect(generate).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails open when the Layer 2 gate returns an error", async () => {
+    const worker = fakeWorker();
+    worker.sessions.set(THREAD, followed);
+    worker.shouldReply.mockRejectedValueOnce(new Error("worker timeout"));
+    const thread = fakeChannel("thread");
+    const test = setup(worker);
+
+    vi.mocked(fetchHistory).mockResolvedValue([
+      { id: "m1", text: "hi", authorId: USER, authorName: "Alice", isBot: false, createdAt: 1000 },
+      { id: "m2", text: "hey", authorId: "u2", authorName: "Bob", isBot: false, createdAt: 1001 },
+    ]);
+    await handleMessageCreate(
+      fakeSummon({ id: "m3", authorId: USER, channel: thread, content: "帮我查一下这个" }),
+      test.client,
+      test.runtime,
+    );
+    await test.tasks[0]?.run();
+
+    expect(test.shouldReply).toHaveBeenCalledTimes(1);
+    expect(generate).toHaveBeenCalledTimes(1);
   });
 });
