@@ -26,8 +26,8 @@ const EXECUTION: ToolExecutionOptions<Record<string, unknown>> = {
 
 type ToolName = "memory_list" | "memory_save" | "memory_delete";
 
-/** Run one memory tool for a user in a scope; it answers with one plain object. */
-function run<T>(name: ToolName, input: object, context: MemoryToolContext): Promise<T> {
+/** Run one memory tool for a user in a scope with whatever arguments a model might send; it answers with one plain object. */
+function run<T>(name: ToolName, input: unknown, context: MemoryToolContext): Promise<T> {
   const memoryTool = createMemoryTools(context)[name];
   if (memoryTool?.execute === undefined) throw new Error(`${name} has no execute`);
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test helper: the caller names the output type it reads
@@ -468,21 +468,50 @@ describe("memory_save: scope guild", () => {
       updated_by: "u1",
     });
   });
+
+  it("proposes bytes that apply accepts even when the cut lands right after whitespace", async () => {
+    const context = guildContext();
+    const output = await run<MemorySaveOutput>(
+      "memory_save",
+      {
+        scope: "guild",
+        key: `${"k".repeat(MAX_MEMORY_KEY_CHARS - 1)} \t tail`,
+        value: `${"v".repeat(MAX_MEMORY_VALUE_CHARS - 1)} \n tail`,
+      },
+      context,
+    );
+    if (output.status !== "proposed") throw new Error("expected the save to be proposed");
+
+    // Apply re-runs the tool's normalization and refuses anything it would rewrite.
+    expect(
+      await handleGuildMemoryApply(context.db, { proposals: [output.proposal], updatedBy: "u1" }),
+    ).toEqual({ status: "ok", results: [{ id: output.proposal.id, ok: true }] });
+    expect(await guildMemoryCount(context.db)).toBe(1);
+  });
 });
 
 describe("memory_delete: scope user", () => {
-  /** u1 and u2 each hold the key under both categories; u1 holds one more entry. */
+  /**
+   * u1 and u2 each hold the key under both categories; u1 also holds a persona
+   * entry under the same key and one unrelated fact.
+   */
   async function sharedKey(): Promise<MemoryToolContext> {
     const context = guildContext();
     for (const userId of ["u1", "u2"]) {
       await setUserMemory(context.db, { userId, category: "fact", key: "lang", value: "Rust" });
       await setUserMemory(context.db, { userId, category: "preference", key: "lang", value: "Go" });
     }
+    await setUserMemory(context.db, {
+      userId: "u1",
+      category: "persona",
+      key: "lang",
+      value: "concise",
+    });
     await setUserMemory(context.db, { userId: "u1", category: "fact", key: "pet", value: "cat" });
     return context;
   }
 
-  it("deletes at once and reports how many entries went", async () => {
+  it("deletes the key from fact and preference at once, and leaves a persona entry of the same name alone", async () => {
     const context = await sharedKey();
 
     const output = await run<MemoryDeleteOutput>(
@@ -494,6 +523,7 @@ describe("memory_delete: scope user", () => {
     expect(output).toEqual({ status: "deleted", scope: "user", key: "lang", deletedCount: 2 });
     expect(await userMemoryOf(context.db, "u1")).toEqual([
       { scope: "user", category: "fact", key: "pet", value: "cat" },
+      { scope: "user", category: "persona", key: "lang", value: "concise" },
     ]);
   });
 
@@ -509,6 +539,7 @@ describe("memory_delete: scope user", () => {
     expect(output).toEqual({ status: "deleted", scope: "user", key: "lang", deletedCount: 1 });
     expect(await userMemoryOf(context.db, "u1")).toEqual([
       { scope: "user", category: "fact", key: "pet", value: "cat" },
+      { scope: "user", category: "persona", key: "lang", value: "concise" },
       { scope: "user", category: "preference", key: "lang", value: "Go" },
     ]);
   });
@@ -645,5 +676,59 @@ describe("memory_delete: scope guild", () => {
       status: "rejected",
       reason: "empty_key",
     });
+  });
+});
+
+describe("memory tools: arguments that break the schema", () => {
+  const invalid = { status: "error", code: "invalid_input" };
+
+  it("memory_list refuses a scope it does not know", async () => {
+    const context = guildContext();
+    for (const args of [{ scope: "server" }, { scope: null }, "all", null, []]) {
+      expect(await run("memory_list", args, context)).toEqual(invalid);
+    }
+  });
+
+  it("memory_save refuses a non-string key or value, an unknown scope, and an unknown category", async () => {
+    const context = guildContext();
+    for (const args of [
+      { scope: "user", key: 42, value: "Rust" },
+      { scope: "user", key: null, value: "Rust" },
+      { scope: "user", key: ["lang"], value: "Rust" },
+      { scope: "user", key: "lang", value: { text: "Rust" } },
+      { scope: "user", key: "lang", value: null },
+      { scope: "user", key: "lang" },
+      { scope: "server", key: "lang", value: "Rust" },
+      { scope: "dm", key: "lang", value: "Rust" },
+      { scope: "user", key: "lang", value: "Rust", category: "persona" },
+      { scope: "user", key: "lang", value: "Rust", category: null },
+      { scope: "guild", key: 42, value: "Rust" },
+      "save",
+      null,
+    ]) {
+      expect(await run("memory_save", args, context)).toEqual(invalid);
+    }
+    expect(await userMemoryOf(context.db, "u1")).toEqual([]);
+    expect(await guildMemoryCount(context.db)).toBe(0);
+  });
+
+  it("memory_delete refuses a non-string key, an unknown scope, and an unknown category", async () => {
+    const db = createTestD1();
+    await setUserMemory(db, { userId: "u1", category: "fact", key: "pet", value: "cat" });
+    const context = guildContext(db);
+    const before = await userMemoryOf(db, "u1");
+    for (const args of [
+      { scope: "user", key: 42 },
+      { scope: "user", key: null },
+      { scope: "user" },
+      { scope: "server", key: "pet" },
+      { scope: "user", key: "pet", category: "persona" },
+      { scope: "guild", key: 42 },
+      null,
+    ]) {
+      expect(await run("memory_delete", args, context)).toEqual(invalid);
+    }
+    // A malformed delete never widens into another one.
+    expect(await userMemoryOf(db, "u1")).toEqual(before);
   });
 });

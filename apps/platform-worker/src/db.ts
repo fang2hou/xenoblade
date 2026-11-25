@@ -799,6 +799,30 @@ export async function clearUserMemory(
   return res.meta.changes;
 }
 
+/**
+ * Delete a user's fact and preference entries by key — in one of the two
+ * categories, or in both when `category` is omitted. Persona entries are never
+ * touched: only the `/persona` command manages them. Returns the number of
+ * rows deleted.
+ */
+export async function clearUserMemoryEntries(
+  db: D1Database,
+  entry: { userId: string; category?: GuildMemoryCategory; key: string },
+): Promise<number> {
+  const stmt =
+    entry.category === undefined
+      ? db
+          .prepare(
+            "DELETE FROM user_memory WHERE user_id = ?1 AND category IN ('fact', 'preference') AND key = ?2",
+          )
+          .bind(entry.userId, entry.key)
+      : db
+          .prepare("DELETE FROM user_memory WHERE user_id = ?1 AND category = ?2 AND key = ?3")
+          .bind(entry.userId, entry.category, entry.key);
+  const res = await stmt.run();
+  return res.meta.changes;
+}
+
 // ── Guild memory (shared server knowledge, ADR-013 amendment) ─────────────
 
 /** Cap on entries one guild may hold in its shared memory. */

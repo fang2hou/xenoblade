@@ -1,4 +1,4 @@
-import { generateText, isStepCount, type ToolSet } from "ai";
+import { APICallError, generateText, isStepCount, type ToolSet } from "ai";
 
 import { composeSystemPrompt, createModel, GENERATION_LIMITS, getModelChain } from "@xenoblade/ai";
 import type {
@@ -353,7 +353,12 @@ async function runGenerationPipeline(
             messageId: req.messageId,
             model: config.id,
             retryable: isRetryable(error),
-            error: error instanceof Error ? error.message : String(error),
+            // Never the message: a provider or a tool may fill it with
+            // request content, which no log may carry in any scope.
+            error: error instanceof Error ? error.name : typeof error,
+            ...(APICallError.isInstance(error) && error.statusCode !== undefined
+              ? { statusCode: error.statusCode }
+              : {}),
           }),
         );
         // The chain's time is gone: nothing is left to try another model with.
@@ -471,9 +476,9 @@ async function runGenerationPipeline(
       event: "generation_completed",
       messageId: req.messageId,
       model: usedModel,
+      // Length only: a reply can echo personal or shared memory, so no scope
+      // logs a preview of it.
       replyLength: result.text.length,
-      // DM-scope generations never log content previews (ADR-011 privacy posture).
-      ...(req.scopeId === DM_SCOPE ? {} : { replyPreview: result.text.slice(0, 100) }),
       toolCalls: (result.toolResults ?? []).length,
       steps: result.steps.length,
       sources: sources.length,

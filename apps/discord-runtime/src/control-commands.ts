@@ -81,7 +81,12 @@ async function handleCategoryCommand(
         env.internalApiToken,
       );
       await interaction.editReply({
-        content: response.status === "ok" ? table.memorySet(label, key) : table.memoryError,
+        content:
+          response.status === "ok"
+            ? table.memorySet(label, key)
+            : response.code === "memory_full"
+              ? table.memoryFull
+              : table.memoryError,
       });
       return;
     }

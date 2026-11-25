@@ -394,7 +394,6 @@ async function executeGeneration(
     staged,
     channel,
     language,
-    redactContent: request.scopeId === "dm",
   });
 }
 
@@ -414,7 +413,6 @@ interface PostContext {
   channel: SendableChannels;
   /** UI language for this user's failure/rate-limit notices. */
   language: UiLanguage;
-  redactContent: boolean;
 }
 
 /**
@@ -422,7 +420,9 @@ interface PostContext {
  * staged status placeholder (if any) with the outcome text. A regenerate
  * replaces its tracked reply in place; any failed or rejected re-run
  * restores the previous reply instead of posting a notice over it.
- * DM-scope results never log content previews (ADR-011 privacy posture).
+ * Nothing here logs content in any scope: a reply can echo personal or
+ * shared memory, and the Worker's error text can quote a request, so the
+ * logs carry lengths, statuses, and codes only.
  */
 async function applyGenerationResult(result: GenerationResult, ctx: PostContext): Promise<void> {
   const messageId = ctx.request.messageId;
@@ -438,13 +438,11 @@ async function applyGenerationResult(result: GenerationResult, ctx: PostContext)
     case "completed": {
       const content = renderReply(result.reply);
       const replyLength = result.reply.length;
-      const replyPreview = ctx.redactContent ? "" : result.reply.slice(0, 100);
       console.log(
         JSON.stringify({
           event: "reply_posting",
           messageId,
           replyLength,
-          ...(replyPreview === "" ? {} : { replyPreview }),
           sources: result.sources.length,
         }),
       );
@@ -579,12 +577,13 @@ async function applyGenerationResult(result: GenerationResult, ctx: PostContext)
       );
       return;
     case "error":
+      // The Worker's message is provider text that may quote request
+      // content; its code (the error's name) is all the log needs.
       console.log(
         JSON.stringify({
           event: "generation_error",
           messageId,
           code: result.code,
-          message: result.message,
           retryable: result.retryable,
         }),
       );

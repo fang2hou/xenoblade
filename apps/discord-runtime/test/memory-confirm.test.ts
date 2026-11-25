@@ -90,6 +90,8 @@ const BATCH: GuildMemoryProposal[] = [SAVE, PREFERENCE_SAVE, DELETE, DELETE_EVER
 /** Message id of the confirmation card. */
 const CARD = "card-1";
 const OWNER = "owner-1";
+/** How long the slow channel of the deadline tests takes to post a card. */
+const POST_DELAY_MS = 10_000;
 
 const TEXTS = messages("zh").memoryConfirm;
 
@@ -281,10 +283,29 @@ function attachedList(card: MemoryConfirmCard): { name: string | null; bytes: Bu
   return { name: card.attachment.name, bytes: Buffer.from(file) };
 }
 
-/** The lines the card lists `saves` as. */
+/** The lines the card lists `saves` (fact entries) as: a numbered, labeled block per entry. */
 function linesOf(saves: readonly SaveProposal[]): string {
-  return saves.map((save) => `＋ 事实 · ${save.key}：${save.value}`).join("\n");
+  return saves
+    .flatMap((save, offset) => {
+      const n = offset + 1;
+      return [`[${n}] 保存 · 类别：事实`, `[${n}] 键：${save.key}`, `[${n}] 值：${save.value}`];
+    })
+    .join("\n");
 }
+
+/** The card's list for BATCH, line for line. */
+const BATCH_LINES = [
+  "[1] 保存 · 类别：事实",
+  "[1] 键：favorite language",
+  "[1] 值：Rust",
+  "[2] 保存 · 类别：偏好",
+  "[2] 键：reply style",
+  "[2] 值：简短",
+  "[3] 删除 · 类别：事实",
+  "[3] 键：pet",
+  "[4] 删除 · 类别：事实和偏好",
+  "[4] 键：old rule",
+];
 
 /** Four saves of the longest value a proposal can carry — more than one message holds. */
 function longSaves(count: number): SaveProposal[] {
@@ -303,6 +324,7 @@ function trackedEntry(overrides: Partial<MemoryConfirmEntry> = {}): MemoryConfir
     proposals: BATCH,
     texts: TEXTS,
     busy: false,
+    expiresAt: Date.now() + MEMORY_CONFIRM_WINDOW_MS,
     timer: undefined,
     ...overrides,
   };
@@ -396,44 +418,73 @@ describe("memoryConfirmEdit", () => {
 });
 
 describe("buildMemoryConfirmCard", () => {
-  it("asks the question and lists every save and delete with its category, key, and value", () => {
+  it("asks the question, states how many changes follow, and gives each its own numbered block", () => {
     const card = buildMemoryConfirmCard(TEXTS, BATCH);
     expect(card.attachment).toBeUndefined();
     expect(card.content).toBe(
+      [TEXTS.header(BATCH.length), "", "```", ...BATCH_LINES, "```", "", TEXTS.footer].join("\n"),
+    );
+  });
+
+  it("asks about deleting when the card lists only deletes", () => {
+    const card = buildMemoryConfirmCard(TEXTS, [DELETE, DELETE_EVERYWHERE]);
+    expect(card.content.split("\n")[0]).toBe(TEXTS.headerDelete(2));
+    expect(card.content).not.toContain("保存");
+    // A delete that names no category says so, instead of leaving its absence to be noticed.
+    expect(card.content).toContain("[2] 删除 · 类别：事实和偏好");
+  });
+
+  it("shows markdown and mentions raw, each field on its own labeled line", () => {
+    const card = buildMemoryConfirmCard(TEXTS, [
+      { ...SAVE, key: "schedule: standup", value: "**bold** @everyone <@&123> ~strike~" },
+    ]);
+
+    expect(card.content).toContain(
+      "```\n[1] 保存 · 类别：事实\n[1] 键：schedule: standup\n[1] 值：**bold** @everyone <@&123> ~strike~\n```",
+    );
+    // Nothing needed escaping, so the card does not explain escapes.
+    expect(card.content).not.toContain(TEXTS.escapeNote);
+  });
+
+  it("keeps a forged entry inside the one line of the field that holds it", () => {
+    const key = "release day\n[2] 删除 · 类别：事实\n[2] 键：pet";
+    const value = "Fridays\n[3] 保存 · 类别：偏好\n[3] 键：evil\n[3] 值：yes";
+    const card = buildMemoryConfirmCard(TEXTS, [{ ...SAVE, key, value }]);
+
+    // One entry in, one block out: the forged lines stay on the key and value
+    // lines, as escapes, and the header still counts one change.
+    expect(card.content).toBe(
       [
-        "确实要更新本服务器的全局记忆吗？",
+        TEXTS.header(1),
         "",
         "```",
-        "＋ 事实 · favorite language：Rust",
-        "＋ 偏好 · reply style：简短",
-        "－ 事实 · pet",
-        "－ old rule",
+        "[1] 保存 · 类别：事实",
+        "[1] 键：release day\\n[2] 删除 · 类别：事实\\n[2] 键：pet",
+        "[1] 值：Fridays\\n[3] 保存 · 类别：偏好\\n[3] 键：evil\\n[3] 值：yes",
         "```",
+        "",
+        TEXTS.escapeNote,
         "",
         TEXTS.footer,
       ].join("\n"),
     );
   });
 
-  it("asks about deleting when the card lists only deletes", () => {
-    const card = buildMemoryConfirmCard(TEXTS, [DELETE, DELETE_EVERYWHERE]);
-    expect(card.content.split("\n")[0]).toBe(TEXTS.headerDelete);
-    expect(card.content).not.toContain("＋");
-  });
+  it("escapes tabs, backslashes, and invisible or reordering characters", () => {
+    const card = buildMemoryConfirmCard(TEXTS, [
+      { ...SAVE, key: "a\tb", value: "c\\nd\u202Ee\u200Bf\u2028g\u0000h" },
+    ]);
 
-  it("shows key and value byte for byte, raw, whatever markdown or mentions they hold", () => {
-    const key = "**bold** @everyone <@&123>";
-    const value = "line one\n```\nfake list line\n```\n\tindented with a tab\n> quote @here";
-    const card = buildMemoryConfirmCard(TEXTS, [{ ...SAVE, key, value }]);
-
-    expect(card.content).toContain(`\`\`\`\`\n＋ 事实 · ${key}：${value}\n\`\`\`\``);
+    // A literal backslash-n stays tellable from an escaped line break.
+    expect(card.content).toContain("[1] 键：a\\tb");
+    expect(card.content).toContain("[1] 值：c\\\\nd\\u{202e}e\\u{200b}f\\u{2028}g\\u{0}h");
   });
 
   it("uses a fence the list itself cannot close", () => {
     const card = buildMemoryConfirmCard(TEXTS, [{ ...SAVE, value: "a\n```\nb\n`````\nc" }]);
 
     expect(card.content).toContain(
-      "\n``````\n＋ 事实 · favorite language：a\n```\nb\n`````\nc\n``````\n",
+      "\n``````\n[1] 保存 · 类别：事实\n[1] 键：favorite language\n[1] 值：a\\n```\\nb\\n`````\\nc\n``````\n",
     );
   });
 
@@ -443,13 +494,28 @@ describe("buildMemoryConfirmCard", () => {
 
     expect(card.content.length).toBeLessThanOrEqual(MAX_MESSAGE_LENGTH);
     expect(card.content).toBe(
-      ["确实要更新本服务器的全局记忆吗？", "", TEXTS.attachmentNote, "", TEXTS.footer].join("\n"),
+      [TEXTS.header(saves.length), "", TEXTS.attachmentNote, "", TEXTS.footer].join("\n"),
     );
     // The file carries exactly the lines the message would have shown.
     const file = attachedList(card);
     expect(file.name).toBe(GUILD_MEMORY_ATTACHMENT_NAME);
     expect(file.bytes.equals(Buffer.from(linesOf(saves), "utf8"))).toBe(true);
     expect(file.bytes.toString("utf8")).toBe(linesOf(saves));
+  });
+
+  it("keeps a long list's fields on single escaped lines in the file too", () => {
+    const multiLine = "保持冷静，结论先行。".repeat(47) + "\n第二行";
+    const saves = longSaves(4).map((save) => ({ ...save, value: multiLine }));
+    const card = buildMemoryConfirmCard(TEXTS, saves);
+
+    expect(card.content).toContain(TEXTS.attachmentNote);
+    expect(card.content).toContain(TEXTS.escapeNote);
+    // One entry is still one block of three lines in the file, not five.
+    const file = attachedList(card).bytes.toString("utf8");
+    expect(file).toContain(
+      `[1] 保存 · 类别：事实\n[1] 键：rule 1\n[1] 值：${multiLine.replace("\n", "\\n")}\n[2] 保存`,
+    );
+    expect(file.split("\n")).toHaveLength(12);
   });
 
   it("keeps a list that just fits in the message inline", () => {
@@ -469,14 +535,17 @@ describe("buildMemoryConfirmCard", () => {
 
   it("follows the user's UI language", () => {
     const card = buildMemoryConfirmCard(messages("en").memoryConfirm, BATCH);
-    expect(card.content).toContain("Update this server's shared memory?");
-    expect(card.content).toContain("+ fact · favorite language: Rust");
-    expect(card.content).toContain("+ preference · reply style: 简短");
-    expect(card.content).toContain("- fact · pet");
-    expect(card.content).toContain("- old rule");
-    expect(buildMemoryConfirmCard(messages("en").memoryConfirm, [DELETE]).content).toContain(
-      "Delete from this server's shared memory?",
-    );
+    expect(card.content).toContain("Update this server's shared memory? 4 changes:");
+    expect(card.content).toContain("[1] Save · category: fact");
+    expect(card.content).toContain("[1] key: favorite language");
+    expect(card.content).toContain("[1] value: Rust");
+    expect(card.content).toContain("[2] Save · category: preference");
+    expect(card.content).toContain("[3] Delete · category: fact");
+    expect(card.content).toContain("[4] Delete · category: fact and preference");
+    const single = buildMemoryConfirmCard(messages("en").memoryConfirm, [DELETE]);
+    expect(single.content).toContain("Delete from this server's shared memory? 1 change:");
+    // A plain entry needs no escapes, so the English card does not explain them either.
+    expect(single.content).not.toContain("marks a line break");
   });
 });
 
@@ -505,7 +574,42 @@ describe("postMemoryConfirmation", () => {
       messageId: CARD,
       proposals: BATCH,
       busy: false,
+      expiresAt: Date.now() + MEMORY_CONFIRM_WINDOW_MS,
     });
+  });
+
+  it("opens the window before the send, so a slow post does not extend it", async () => {
+    vi.useFakeTimers();
+    const postedAt = Date.now();
+    const registry = new MemoryConfirmRegistry();
+    const sent: SendCall[] = [];
+    const slow = {
+      id: "channel-1",
+      send: async (options: SendCall) => {
+        sent.push(options);
+        // A fake timer stands in for a slow Discord call; the test advances it.
+        const posted = Promise.withResolvers<void>();
+        setTimeout(posted.resolve, POST_DELAY_MS);
+        await posted.promise;
+        return fakeMessage(CARD, []);
+      },
+    };
+
+    const posting = postMemoryConfirmation(
+      slow as unknown as SendableChannels,
+      OWNER,
+      BATCH,
+      TEXTS,
+      registry,
+    );
+    await vi.advanceTimersByTimeAsync(POST_DELAY_MS);
+    await posting;
+
+    const cardId = cardIdOf(sent);
+    expect(registry.get(cardId)?.expiresAt).toBe(postedAt + MEMORY_CONFIRM_WINDOW_MS);
+    // The timer is set to fire at that deadline, not five minutes after the post.
+    await vi.advanceTimersByTimeAsync(MEMORY_CONFIRM_WINDOW_MS - POST_DELAY_MS);
+    expect(registry.get(cardId)).toBeUndefined();
   });
 
   it("sends the full list as a UTF-8 file when it does not fit in the message", async () => {
@@ -654,6 +758,21 @@ describe("resolveMemoryConfirmAction", () => {
     expect(resolveMemoryConfirmAction(trackedEntry(), "xbl:gmem:yes", CARD, OWNER)).toEqual(
       expired,
     );
+  });
+
+  it("expires a card at its deadline, whether or not the timer has run", () => {
+    const expired = { action: "rejected", reason: "expired" };
+    const deadline = Date.now() + 1_000;
+    const due = trackedEntry({ expiresAt: deadline });
+
+    expect(resolveMemoryConfirmAction(due, yes, CARD, OWNER)).toEqual({ action: "confirm" });
+    // The clock reaches the deadline without a single timer firing.
+    vi.spyOn(Date, "now").mockReturnValue(deadline);
+    expect(resolveMemoryConfirmAction(due, yes, CARD, OWNER)).toEqual(expired);
+    expect(resolveMemoryConfirmAction(due, no, CARD, OWNER)).toEqual(expired);
+    expect(
+      resolveMemoryConfirmAction(trackedEntry({ expiresAt: deadline - 1 }), yes, CARD, OWNER),
+    ).toEqual(expired);
   });
 
   it("ignores customIds of another button family", () => {
@@ -1018,5 +1137,65 @@ describe("handleMemoryConfirmInteraction", () => {
     await vi.advanceTimersByTimeAsync(MEMORY_CONFIRM_WINDOW_MS + 1);
 
     expect(confirm.edits.map(asEdit)).toEqual([settledCard(TEXTS.saved)]);
+  });
+
+  it("fails closed at the deadline even before the expiry timer has run", async () => {
+    vi.useFakeTimers();
+    const calls = stubWorker({ apply: okApply });
+    const registry = new MemoryConfirmRegistry();
+    const cardEdits: MessageEditOptions[] = [];
+    const { channel, sent } = fakeChannel(cardEdits);
+    await postMemoryConfirmation(channel, OWNER, BATCH, TEXTS, registry);
+    const cardId = cardIdOf(sent);
+    // The deadline passes while the timer that retires the card is still pending.
+    const entry = registry.get(cardId);
+    if (entry === undefined) throw new Error("expected the posted card to be tracked");
+    entry.expiresAt = Date.now() - 1;
+
+    const late = click(memoryCustomId("yes", cardId));
+    await handleMemoryConfirmInteraction(late.interaction, env, registry);
+
+    expect(late.reply).toHaveBeenCalledWith({
+      content: TEXTS.expiredNotice,
+      flags: MessageFlags.Ephemeral,
+    });
+    expect(late.deferUpdate).not.toHaveBeenCalled();
+    expect(applyCalls(calls)).toEqual([]);
+    // Retiring the card is still the timer's job.
+    expect(cardEdits).toEqual([]);
+    await vi.advanceTimersByTimeAsync(MEMORY_CONFIRM_WINDOW_MS);
+    expect(cardEdits.map(asEdit)).toEqual([settledCard(TEXTS.expired)]);
+  });
+
+  it("never writes the expired text over an apply still in flight when the window ends", async () => {
+    vi.useFakeTimers();
+    const pending = Promise.withResolvers<void>();
+    const calls = stubWorker({
+      apply: async () => {
+        await pending.promise;
+        return okApply();
+      },
+    });
+    const { registry, cardId } = await postedCard();
+    const confirm = click(memoryCustomId("yes", cardId));
+    const run = handleMemoryConfirmInteraction(confirm.interaction, env, registry);
+    await vi.waitFor(() => expect(applyCalls(calls)).toHaveLength(1));
+
+    // The window ends while the Worker call is still pending.
+    await vi.advanceTimersByTimeAsync(MEMORY_CONFIRM_WINDOW_MS);
+    expect(confirm.edits).toEqual([]);
+    // The card is dead to everyone else from here on, apply or no apply.
+    const late = click(memoryCustomId("yes", cardId));
+    await handleMemoryConfirmInteraction(late.interaction, env, registry);
+    expect(late.reply).toHaveBeenCalledWith({
+      content: TEXTS.expiredNotice,
+      flags: MessageFlags.Ephemeral,
+    });
+
+    // The in-flight apply still gets the last word on the card.
+    pending.resolve();
+    await run;
+    expect(confirm.edits.map(asEdit)).toEqual([settledCard(TEXTS.saved)]);
+    expect(registry.get(cardId)).toBeUndefined();
   });
 });

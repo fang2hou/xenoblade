@@ -40,12 +40,16 @@ const zh = {
     restoreFailure: "撤销截断失败，请稍后重试。",
   },
   memoryConfirm: {
-    header: "确实要更新本服务器的全局记忆吗？",
-    headerDelete: "确实要删除本服务器的全局记忆吗？",
-    saveLine: (label: string, key: string, value: string) => `＋ ${label} · ${key}：${value}`,
-    deleteLine: (label: string | null, key: string) =>
-      label === null ? `－ ${key}` : `－ ${label} · ${key}`,
+    header: (count: number) => `确实要更新本服务器的全局记忆吗？共 ${count} 项：`,
+    headerDelete: (count: number) => `确实要删除本服务器的全局记忆吗？共 ${count} 项：`,
+    entry: (index: number, action: string, category: string) =>
+      `[${index}] ${action} · 类别：${category}`,
+    key: (index: number, key: string) => `[${index}] 键：${key}`,
+    value: (index: number, value: string) => `[${index}] 值：${value}`,
+    actionSave: "保存",
+    actionDelete: "删除",
     footer: "点击后才会生效（5 分钟内有效）。",
+    escapeNote: "字段里的 \\n 表示换行，\\t 表示制表符，\\u{…} 表示其他不可见字符。",
     attachmentNote:
       "列表放不进一条消息，完整内容见附件 guild-memory-proposal.txt（确认后按附件里的内容原样执行）。",
     yes: "是",
@@ -62,6 +66,7 @@ const zh = {
     expiredNotice: "该确认已失效（机器人可能已重启或已超时）。",
     labelFact: "事实",
     labelPreference: "偏好",
+    labelBothCategories: "事实和偏好",
   },
   soulConfirm: {
     header: "确实要更新本服务器的助手人设（soul）吗？",
@@ -114,6 +119,8 @@ const zh = {
     ].join("\n"),
     genericError: "命令执行失败，请稍后重试。",
     memoryError: "读取记忆失败，请稍后重试。",
+    memoryFull:
+      "个人记忆条数已达上限（50 条），请先用 /preference clear 或 /memory clear 清理后再试。",
     memorySet: (label: string, key: string) => `已设置${label}记忆：${key}`,
     memoryCleared: (label: string) => `已清除${label}记忆。`,
     allMemoriesCleared: "已清除全部记忆。",
@@ -157,11 +164,15 @@ export type Messages = {
     restoreFailure: string;
   };
   memoryConfirm: {
-    header: string;
-    headerDelete: string;
-    saveLine: (label: string, key: string, value: string) => string;
-    deleteLine: (label: string | null, key: string) => string;
+    header: (count: number) => string;
+    headerDelete: (count: number) => string;
+    entry: (index: number, action: string, category: string) => string;
+    key: (index: number, key: string) => string;
+    value: (index: number, value: string) => string;
+    actionSave: string;
+    actionDelete: string;
     footer: string;
+    escapeNote: string;
     attachmentNote: string;
     yes: string;
     no: string;
@@ -177,6 +188,7 @@ export type Messages = {
     expiredNotice: string;
     labelFact: string;
     labelPreference: string;
+    labelBothCategories: string;
   };
   soulConfirm: {
     header: string;
@@ -210,6 +222,7 @@ export type Messages = {
     help: string;
     genericError: string;
     memoryError: string;
+    memoryFull: string;
     memorySet: (label: string, key: string) => string;
     memoryCleared: (label: string) => string;
     allMemoriesCleared: string;
@@ -266,12 +279,22 @@ const en: Messages = {
     restoreFailure: "Failed to undo the truncation. Please try again later.",
   },
   memoryConfirm: {
-    header: "Update this server's shared memory?",
-    headerDelete: "Delete from this server's shared memory?",
-    saveLine: (label: string, key: string, value: string) => `+ ${label} · ${key}: ${value}`,
-    deleteLine: (label: string | null, key: string) =>
-      label === null ? `- ${key}` : `- ${label} · ${key}`,
+    header: (count: number) =>
+      count === 1
+        ? "Update this server's shared memory? 1 change:"
+        : `Update this server's shared memory? ${count} changes:`,
+    headerDelete: (count: number) =>
+      count === 1
+        ? "Delete from this server's shared memory? 1 change:"
+        : `Delete from this server's shared memory? ${count} changes:`,
+    entry: (index: number, action: string, category: string) =>
+      `[${index}] ${action} · category: ${category}`,
+    key: (index: number, key: string) => `[${index}] key: ${key}`,
+    value: (index: number, value: string) => `[${index}] value: ${value}`,
+    actionSave: "Save",
+    actionDelete: "Delete",
     footer: "Nothing changes until you choose (valid for 5 minutes).",
+    escapeNote: "\\n marks a line break, \\t a tab, and \\u{…} another invisible character.",
     attachmentNote:
       "The full list is too long to show here. It is attached as guild-memory-proposal.txt and will be applied exactly as shown in that file.",
     yes: "Yes",
@@ -289,6 +312,7 @@ const en: Messages = {
     expiredNotice: "This confirmation has expired (the bot may have restarted or timed out).",
     labelFact: "fact",
     labelPreference: "preference",
+    labelBothCategories: "fact and preference",
   },
   soulConfirm: {
     header: "Update this server's assistant persona (soul)?",
@@ -341,6 +365,8 @@ const en: Messages = {
     ].join("\n"),
     genericError: "Command failed. Please try again later.",
     memoryError: "Failed to read memories. Please try again later.",
+    memoryFull:
+      "Your personal memory is full (50 entries); clear some with /preference clear or /memory clear first.",
     memorySet: (label: string, key: string) => `Set ${label} memory: ${key}`,
     memoryCleared: (label: string) => `Cleared ${label} memories.`,
     allMemoriesCleared: "Cleared all memories.",

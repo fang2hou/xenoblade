@@ -59,6 +59,8 @@ export interface MemoryConfirmEntry {
   texts: MemoryConfirmTexts;
   /** True while the confirmed apply call is in flight (double-click guard). */
   busy: boolean;
+  /** Wall-clock end of the window: a click at or after it is expired, whether or not the timer has fired. */
+  expiresAt: number;
   /** Expiry timer; cleared once the entry settles. */
   timer: NodeJS.Timeout | undefined;
 }
@@ -128,22 +130,62 @@ export interface MemoryConfirmCard {
 function categoryLabel(
   category: GuildMemoryCategory | undefined,
   texts: MemoryConfirmTexts,
-): string | null {
-  if (category === undefined) return null;
+): string {
+  if (category === undefined) return texts.labelBothCategories;
   return category === "preference" ? texts.labelPreference : texts.labelFact;
 }
 
-/** The card's list of changes: every proposal as one line, key and value verbatim. */
+/**
+ * Characters of a key or value that would break the card's line structure or
+ * reorder and hide what follows: control characters (`\p{Cc}` — line breaks
+ * and tabs among them), format characters (`\p{Cf}` — bidi controls,
+ * zero-width characters, and the like), the line and paragraph separators,
+ * and the backslash that escapes them.
+ */
+const ESCAPED_CHARACTERS = /[\p{Cc}\p{Cf}\u2028\u2029\\]/gu;
+
+/** How the escapes that occur in ordinary text are spelled. */
+const ESCAPE_BY_CHARACTER: Record<string, string> = {
+  "\\": "\\\\",
+  "\n": "\\n",
+  "\r": "\\r",
+  "\t": "\\t",
+};
+
+/** A key or value on one card line, with everything that would start, reorder, or hide a line shown as an escape. */
+function escapeField(text: string): string {
+  return text.replace(ESCAPED_CHARACTERS, (character) => {
+    const escape = ESCAPE_BY_CHARACTER[character];
+    if (escape !== undefined) return escape;
+    return `\\u{${(character.codePointAt(0) ?? 0).toString(16)}}`;
+  });
+}
+
+/**
+ * The card's list of changes: one numbered block of labeled lines per
+ * proposal. A block's first line names the action and category, then each
+ * field gets its own line that starts with the block's number and its label,
+ * so a bullet or a colon inside a key or value reads as part of that field.
+ */
 function proposalLines(
   proposals: readonly GuildMemoryProposal[],
   texts: MemoryConfirmTexts,
-): string[] {
-  return proposals.map((proposal) => {
-    const label = categoryLabel(proposal.category, texts);
-    return proposal.action === "save"
-      ? texts.saveLine(label ?? texts.labelFact, proposal.key, proposal.value)
-      : texts.deleteLine(label, proposal.key);
-  });
+): { lines: string[]; escaped: boolean } {
+  const lines: string[] = [];
+  let escaped = false;
+  for (const [offset, proposal] of proposals.entries()) {
+    const index = offset + 1;
+    const key = escapeField(proposal.key);
+    escaped ||= key !== proposal.key;
+    const action = proposal.action === "save" ? texts.actionSave : texts.actionDelete;
+    lines.push(texts.entry(index, action, categoryLabel(proposal.category, texts)));
+    lines.push(texts.key(index, key));
+    if (proposal.action !== "save") continue;
+    const value = escapeField(proposal.value);
+    escaped ||= value !== proposal.value;
+    lines.push(texts.value(index, value));
+  }
+  return { lines, escaped };
 }
 
 /** The list in a code block that no line of it can close. */
@@ -159,27 +201,30 @@ function listCodeBlock(lines: readonly string[]): string {
 /**
  * Build the confirmation card for a generation's guild memory proposals.
  *
- * Every proposed save and delete is listed with its full normalized key and
- * value, so the user confirms exactly the bytes that will be stored or
- * removed. The list sits in a code block no line of it can close, so
- * model-written keys and values render raw and cannot pass for card chrome.
- * When the list does not fit in one message, it travels as a UTF-8 file
- * holding the same lines, and the message says so.
+ * Every proposed save and delete gets its own numbered block of labeled
+ * lines, so the user confirms exactly which key and value will be stored or
+ * removed: the header states how many changes follow, and each line break,
+ * invisible character, or backslash in a key or value appears as an escape
+ * the card explains. The list sits in a code block no line of it can close,
+ * so model-written keys and values render raw and cannot pass for card
+ * chrome. When the list does not fit in one message, it travels as a UTF-8
+ * file holding the same lines, and the message says so.
  */
 export function buildMemoryConfirmCard(
   texts: MemoryConfirmTexts,
   proposals: readonly GuildMemoryProposal[],
 ): MemoryConfirmCard {
-  const header = proposals.some((proposal) => proposal.action === "save")
-    ? texts.header
-    : texts.headerDelete;
-  const lines = proposalLines(proposals, texts);
-  const inline = [header, "", listCodeBlock(lines), "", texts.footer].join("\n");
+  const header = (
+    proposals.some((proposal) => proposal.action === "save") ? texts.header : texts.headerDelete
+  )(proposals.length);
+  const { lines, escaped } = proposalLines(proposals, texts);
+  const notes = escaped ? [texts.escapeNote, ""] : [];
+  const inline = [header, "", listCodeBlock(lines), "", ...notes, texts.footer].join("\n");
   if (inline.length <= MAX_MESSAGE_LENGTH) {
     return { content: inline, attachment: undefined };
   }
   return {
-    content: [header, "", texts.attachmentNote, "", texts.footer].join("\n"),
+    content: [header, "", texts.attachmentNote, "", ...notes, texts.footer].join("\n"),
     attachment: new AttachmentBuilder(Buffer.from(lines.join("\n"), "utf8"), {
       name: GUILD_MEMORY_ATTACHMENT_NAME,
     }),
@@ -251,9 +296,11 @@ export type MemoryConfirmDecision =
  * `null` when the customId belongs to another button family; callers treat
  * that like every other button that is not theirs. A family customId this
  * process cannot act on — unknown card (restart, eviction, settled), a
- * button that fires on a message other than its own card, a malformed id —
- * is rejected as expired, so it fails closed with an ephemeral notice and no
- * action.
+ * button that fires on a message other than its own card, a malformed id, or
+ * a card past its deadline — is rejected as expired, so it fails closed with
+ * an ephemeral notice and no action. The deadline is checked on the clock,
+ * not left to the expiry timer: a click that arrives after the window but
+ * before the timer runs is still too late.
  */
 export function resolveMemoryConfirmAction(
   entry: MemoryConfirmEntry | undefined,
@@ -265,7 +312,7 @@ export function resolveMemoryConfirmAction(
   if (parsed === null) {
     return isMemoryConfirmCustomId(customId) ? { action: "rejected", reason: "expired" } : null;
   }
-  if (entry === undefined || entry.messageId !== messageId) {
+  if (entry === undefined || entry.messageId !== messageId || Date.now() >= entry.expiresAt) {
     return { action: "rejected", reason: "expired" };
   }
   if (userId !== entry.userId) return { action: "rejected", reason: "not-owner" };
@@ -336,6 +383,9 @@ export async function postMemoryConfirmation(
     proposals: [...proposals],
     texts,
     busy: false,
+    // The window opens before the send: a card that took long to post does
+    // not get that time back.
+    expiresAt: Date.now() + MEMORY_CONFIRM_WINDOW_MS,
     timer: undefined,
   };
   registry.register(cardId, entry);
@@ -363,7 +413,10 @@ export async function postMemoryConfirmation(
     return;
   }
   entry.messageId = message.id;
-  entry.timer = setTimeout(() => expire(message, entry, registry), MEMORY_CONFIRM_WINDOW_MS);
+  entry.timer = setTimeout(
+    () => expire(message, entry, registry),
+    Math.max(0, entry.expiresAt - Date.now()),
+  );
   entry.timer.unref();
 }
 

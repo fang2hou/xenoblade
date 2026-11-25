@@ -14,14 +14,17 @@ import {
   getUserMemory,
   setGuildMemory,
   setUserMemory,
+  setUserMemoryWithinCap,
 } from "./db";
 
 /**
  * Handle a memory command (get/set/clear) against the `user_memory` table.
  *
  * `set` and `clear` return the user's full post-operation memory list so the
- * caller can reconcile state without a follow-up `get`. Never throws — a
- * failure returns `{ status: "error", code }`.
+ * caller can reconcile state without a follow-up `get`. A `set` of a fact or
+ * preference goes through the same capped upsert as the chat `memory_save`
+ * tool and answers `memory_full` past the cap; persona rows do not count
+ * toward it. Never throws — a failure returns `{ status: "error", code }`.
  */
 export async function handleMemory(db: D1Database, req: MemoryRequest): Promise<MemoryResponse> {
   try {
@@ -30,12 +33,22 @@ export async function handleMemory(db: D1Database, req: MemoryRequest): Promise<
     }
 
     if (req.op === "set") {
-      await setUserMemory(db, {
-        userId: req.userId,
-        category: req.category,
-        key: req.key,
-        value: req.value,
-      });
+      if (req.category === "persona") {
+        await setUserMemory(db, {
+          userId: req.userId,
+          category: "persona",
+          key: req.key,
+          value: req.value,
+        });
+      } else {
+        const outcome = await setUserMemoryWithinCap(db, {
+          userId: req.userId,
+          category: req.category,
+          key: req.key,
+          value: req.value,
+        });
+        if (outcome === "memory_full") return { status: "error", code: "memory_full" };
+      }
       return { status: "ok", memories: await getUserMemory(db, req.userId) };
     }
 
@@ -59,11 +72,17 @@ export const MAX_MEMORY_KEY_CHARS = 64;
 /** Longest memory value that is stored or proposed. */
 export const MAX_MEMORY_VALUE_CHARS = 500;
 
-/** Trimmed text, cut to `max` code points; null when nothing remains. */
+/**
+ * Trimmed text, cut to `max` code points, and trimmed once more; null when
+ * nothing remains. The second trim matters: a cut that lands right after
+ * inner whitespace would otherwise leave that whitespace trailing, and
+ * normalizing an already-normalized text must be a no-op, because apply
+ * refuses any proposal whose bytes are not in exactly this form.
+ */
 function normalizeClamped(text: string, max: number): string | null {
   const chars = Array.from(text.trim());
   if (chars.length === 0) return null;
-  return chars.slice(0, max).join("");
+  return chars.slice(0, max).join("").trim();
 }
 
 /**

@@ -41,7 +41,7 @@ What must remain true about the architecture:
 
 ## Cross-Cutting Concerns
 
-- **Logging**: structured JSON only — `console.log(JSON.stringify({ event, ... }))`, one line per event, on both tiers. DM-scope events never include content previews (lengths and statuses only).
+- **Logging**: structured JSON only — `console.log(JSON.stringify({ event, ... }))`, one line per event, on both tiers. No event carries a reply preview or a provider error message: replies can echo personal or shared memory and provider text can quote a request, so generation logs hold lengths, counts, statuses, and error names. DM-scope events never include content previews.
 
 ## Decisions
 

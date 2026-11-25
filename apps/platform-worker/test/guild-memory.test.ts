@@ -357,6 +357,38 @@ describe("memory normalization", () => {
     expect(normalizeMemoryKey(key)).toBe(key);
     expect(normalizeMemoryValue(value)).toBe(value);
   });
+
+  it("stays idempotent when the cut lands right after inner whitespace", () => {
+    // The 64th / 500th code point is whitespace: the cut must not leave it trailing.
+    const key = `${"k".repeat(MAX_MEMORY_KEY_CHARS - 1)} \t tail`;
+    const value = `${"v".repeat(MAX_MEMORY_VALUE_CHARS - 1)} \n tail`;
+    const normalizedKey = normalizeMemoryKey(key);
+    const normalizedValue = normalizeMemoryValue(value);
+
+    expect(normalizedKey).toBe("k".repeat(MAX_MEMORY_KEY_CHARS - 1));
+    expect(normalizedValue).toBe("v".repeat(MAX_MEMORY_VALUE_CHARS - 1));
+    expect(normalizeMemoryKey(normalizedKey ?? "")).toBe(normalizedKey);
+    expect(normalizeMemoryValue(normalizedValue ?? "")).toBe(normalizedValue);
+  });
+
+  it("reaches its fixed point in one pass, whatever it is given", () => {
+    const inputs = [
+      "  padded  ",
+      "a\n\nb  ",
+      "\t\n",
+      "字 ".repeat(300),
+      `${"x".repeat(600)} `,
+      `${"😀".repeat(520)} end `,
+      " \u00a0 ",
+    ];
+    for (const normalize of [normalizeMemoryKey, normalizeMemoryValue]) {
+      for (const input of inputs) {
+        const once = normalize(input);
+        if (once === null) continue;
+        expect(normalize(once)).toBe(once);
+      }
+    }
+  });
 });
 
 describe("extractGuildMemoryProposals", () => {

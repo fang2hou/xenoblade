@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { generateText } from "ai";
+import { APICallError, generateText } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 import type * as Ai from "ai";
 import type * as AiPackage from "@xenoblade/ai";
@@ -806,6 +806,92 @@ async function recordedRun(db: D1Database): Promise<{ status: string; total_dura
     .all<{ status: string; total_duration_ms: number }>();
   return results[0] ?? { status: "missing", total_duration_ms: -1 };
 }
+
+/** Every structured event a run logged since the console spy was armed. */
+function loggedEvents(): Array<Record<string, unknown>> {
+  return vi
+    .mocked(console.log)
+    .mock.calls.map((line) => JSON.parse(String(line[0])) as Record<string, unknown>);
+}
+
+describe("generate log hygiene", () => {
+  /** Something only the request, the reply, or the provider's error text could put into a log line. */
+  const PRIVATE = "pet-name-Mr-Whiskers-7f3a";
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it.each([
+    ["a guild", {}],
+    ["a DM", { scopeId: "dm", containerId: "discord:@me:42", channelId: "42" }],
+  ])(
+    "logs no reply text, memory content, or provider error text from %s generation",
+    async (_case, scope) => {
+      const env = makeEnv([{ id: "test/failing" }, { id: "test/primary" }]);
+      await setUserMemory(env.DB, { userId: "u1", category: "fact", key: "pet", value: PRIVATE });
+      const failure = new APICallError({
+        message: `provider rejected the prompt about ${PRIVATE}`,
+        url: "https://provider.invalid/v1/chat",
+        requestBodyValues: {},
+        statusCode: 502,
+      });
+      vi.mocked(generateText)
+        .mockRejectedValueOnce(failure)
+        .mockResolvedValueOnce({
+          text: `Your pet is ${PRIVATE}.`,
+          usage: { inputTokens: 12, outputTokens: 34, inputTokenDetails: {} },
+          toolResults: [],
+          steps: [{}],
+        } as unknown as Ai.GenerateTextResult<Ai.ToolSet, never, never>);
+
+      const result = await settleRun(generate(env, request(scope)));
+
+      expect(result.status).toBe("completed");
+      const events = loggedEvents();
+      // The failed attempt stays identifiable by name and status, not by its message.
+      expect(events.filter((event) => event.event === "attempt_failed")).toEqual([
+        {
+          event: "attempt_failed",
+          messageId: "m1",
+          model: "test/failing",
+          retryable: false,
+          error: failure.name,
+          statusCode: 502,
+        },
+      ]);
+      // The completion is a length and counts, never a preview.
+      expect(events.filter((event) => event.event === "generation_completed")).toEqual([
+        expect.objectContaining({ replyLength: `Your pet is ${PRIVATE}.`.length }),
+      ]);
+      expect(JSON.stringify(events)).not.toContain(PRIVATE);
+    },
+  );
+
+  it("names the error of a run that failed on every model, and logs nothing else about it", async () => {
+    const env = makeEnv([{ id: "test/only" }]);
+    vi.mocked(generateText).mockRejectedValueOnce(new Error(`tool read the page about ${PRIVATE}`));
+
+    const result = await settleRun(generate(env, request()));
+
+    expect(result).toMatchObject({ status: "error", code: "Error" });
+    const failures = loggedEvents().filter((event) => event.event === "attempt_failed");
+    expect(failures).toEqual([
+      {
+        event: "attempt_failed",
+        messageId: "m1",
+        model: "test/only",
+        retryable: false,
+        error: "Error",
+      },
+    ]);
+    expect(JSON.stringify(loggedEvents())).not.toContain(PRIVATE);
+  });
+});
 
 describe("generate chain deadline", () => {
   beforeEach(() => {

@@ -94,7 +94,7 @@ Follow the guidelines repository's coding standards. Project-specific rules:
 
 ## Debugging
 
-- Worker logs: `wrangler dev` streams them; every event is one JSON line (`event`, ids, timings, errors — content previews only on the guild path, never DM).
+- Worker logs: `wrangler dev` streams them; every event is one JSON line (`event`, ids, timings, lengths, error names and status codes — never a reply preview or a provider error message).
 - Runtime health: `curl localhost:8397/health` (bound to localhost only).
 - Worker health: `curl -H "Authorization: Bearer $INTERNAL_API_TOKEN" $WORKER_URL/internal/v1/health`.
 - Common failure: missing/blank env vars fail fast at startup on both tiers (check `.dev.vars` placement — wrangler reads it from `apps/platform-worker/`).

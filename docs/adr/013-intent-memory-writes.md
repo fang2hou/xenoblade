@@ -81,7 +81,11 @@ the shared tier keeps a confirmation gate.
    as `memory_full`) for the model to pass on. No confirmation card follows:
    personal memory has one owner, the person who asked, and the same tools
    plus `/memory`, `/persona`, and `/preference` let them audit and undo it.
-   The 50-entry cap on fact + preference still applies.
+   The 50-entry cap on fact + preference still applies, and `/preference set`
+   goes through the same capped upsert. A personal delete that names no
+   category removes the key from fact and preference only — `/persona`
+   entries stay with the `/persona` command — and every tool refuses
+   arguments that do not match its schema.
 3. **`guild` — the server's shared memory, confirmed by button.** The new
    table `guild_memory` (migration 0008) holds shared knowledge per server,
    at most 100 entries, injected into guild conversations only — never into a
@@ -89,20 +93,27 @@ the shared tier keeps a confirmation gate.
    generation: the tool returns a proposal that travels in
    `GenerationResult.guildMemoryProposals`, and nothing reaches `guild_memory`
    until the triggering user clicks 是 on the card (不是 drops it, 5-minute
-   window, owner-only, fail-closed after a restart). The card lists every
-   proposed key and value verbatim, and `POST /internal/v1/memory/guild/apply`
-   stores exactly those bytes, refusing any that are not already normalized.
+   window, owner-only, fail-closed after a restart). The card gives every
+   change its own numbered block of labeled lines, with each line break or
+   invisible character in a key or value shown as an escape, so nothing
+   inside a field can pass for another entry;
+   `POST /internal/v1/memory/guild/apply` stores exactly the proposed key and
+   value, refusing any that are not already normalized.
    Guild writes are refused in a DM (`dm_not_allowed`).
 4. **Buttons replace reactions.** The memory card is a Discord message with
    是 / 不是 buttons (`xbl:gmem:<choice>:<cardId>`), built to the same
-   discipline as the soul card. The Runtime no longer listens to
+   discipline as the soul card. Its window is checked on the clock at every
+   click: a card past its deadline fails closed even before the timer that
+   retires it has run, while an apply already in flight when the window ends
+   still settles the card. The Runtime no longer listens to
    `messageReactionAdd`, so the `GuildMessageReactions` intent and the
    reaction partial are removed, and `POST /internal/v1/memory/proposals` goes
    with the reaction flow it served.
 5. **One normalization.** `normalizeMemoryKey` and `normalizeMemoryValue`
-   (trim, 64 / 500 code points, empty rejected) apply to both tiers: a tool
-   normalizes once when it saves or proposes, and apply refuses anything that
-   is not in that form.
+   (trim, cut to 64 / 500 code points, trim again — so normalizing an
+   already-normalized text changes nothing — and empty rejected) apply to
+   both tiers: a tool normalizes once when it saves or proposes, and apply
+   refuses anything that is not in that form.
 
 Why the gate moved rather than disappeared: a confirmation step protects
 whoever owns the data from a change they did not ask for. For personal memory
