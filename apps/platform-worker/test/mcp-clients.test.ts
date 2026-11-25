@@ -5,10 +5,15 @@ import { closeMcpClients, connectMcpServers } from "../src/tools/mcp-clients";
 
 const CONTEXT7 = "https://mcp.context7.com/mcp";
 const GITHUB = "https://api.githubcopilot.com/mcp/";
+const ARTIFICIAL_ANALYSIS = "https://mcp.artificialanalysis.ai/mcp";
 const CONNECT_DEADLINE_MS = 3_000;
 const SESSION_DELETE_TIMEOUT_MS = 2_000;
 const NEGOTIATED_PROTOCOL_VERSION = "2025-06-18";
 const ENV_WITH_GITHUB = { GITHUB_MCP_TOKEN: "test-token" } as Env;
+const ENV_WITH_ALL_MCP = {
+  GITHUB_MCP_TOKEN: "test-token",
+  ARTIFICIAL_ANALYSIS_API_KEY: "aa_test_key",
+} as Env;
 
 interface JsonRpcMessage {
   id?: number;
@@ -78,17 +83,80 @@ describe("connectMcpServers", () => {
   });
 
   it("connects every server at once instead of one after another", async () => {
-    // Each server answers only once both handshakes are in flight, so a serial
+    // Each server answers only once all three handshakes are in flight, so a serial
     // loop would run the first server into the connect deadline.
-    const bothHandshakesStarted = barrier(2);
+    const allHandshakesStarted = barrier(3);
     stubMcpNetwork({
-      [CONTEXT7]: healthyServer(["resolve-library-id"], bothHandshakesStarted),
-      [GITHUB]: healthyServer(["get_me"], bothHandshakesStarted),
+      [CONTEXT7]: healthyServer(["resolve-library-id"], allHandshakesStarted),
+      [GITHUB]: healthyServer(["get_me"], allHandshakesStarted),
+      [ARTIFICIAL_ANALYSIS]: healthyServer(["aa_language_models_free"], allHandshakesStarted),
     });
 
-    const result = await connectMcpServers(ENV_WITH_GITHUB);
+    const result = await connectMcpServers(ENV_WITH_ALL_MCP);
 
-    expect(Object.keys(result.tools)).toEqual(["context7_resolve-library-id", "github_get_me"]);
+    expect(Object.keys(result.tools)).toEqual([
+      "context7_resolve-library-id",
+      "github_get_me",
+      "artificial-analysis_aa_language_models_free",
+    ]);
+  });
+
+  it("connects Artificial Analysis with x-api-key and exposes only allowlisted free read-only tools", async () => {
+    const logs = captureLogs();
+    const network = stubMcpNetwork({
+      [CONTEXT7]: healthyServer(["resolve-library-id"]),
+      [ARTIFICIAL_ANALYSIS]: healthyServer([
+        "aa_language_models_free",
+        "aa_media_rankings_free",
+        "aa_api_context",
+        "aa_describe_endpoint",
+        "aa_describe_fields",
+        "aa_describe_schema",
+        "aa_language_models",
+        "aa_language_model",
+        "aa_media_rankings",
+        "artificial_analysis_help",
+        "critpt_evaluate",
+      ]),
+    });
+
+    const result = await connectMcpServers({ ARTIFICIAL_ANALYSIS_API_KEY: "aa_test_key" } as Env);
+
+    expect(Object.keys(result.tools)).toEqual([
+      "context7_resolve-library-id",
+      "artificial-analysis_aa_language_models_free",
+      "artificial-analysis_aa_media_rankings_free",
+      "artificial-analysis_aa_api_context",
+      "artificial-analysis_aa_describe_endpoint",
+      "artificial-analysis_aa_describe_fields",
+      "artificial-analysis_aa_describe_schema",
+    ]);
+    const initHeaders = Object.fromEntries(
+      new Headers(network.rpcRequestsTo(ARTIFICIAL_ANALYSIS, "initialize")[0]?.headers),
+    );
+    expect(initHeaders["x-api-key"]).toBe("aa_test_key");
+    expect(logs.events()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          event: "mcp_connected",
+          server: "artificial-analysis",
+          exposedTools: 6,
+          filteredTools: 5,
+        }),
+      ]),
+    );
+  });
+
+  it("skips Artificial Analysis when ARTIFICIAL_ANALYSIS_API_KEY is unset", async () => {
+    const network = stubMcpNetwork({
+      [CONTEXT7]: healthyServer(["resolve-library-id"]),
+      [ARTIFICIAL_ANALYSIS]: healthyServer(["aa_language_models_free"]),
+    });
+
+    const result = await connectMcpServers({} as Env);
+
+    expect(Object.keys(result.tools)).toEqual(["context7_resolve-library-id"]);
+    expect(network.requestsTo(ARTIFICIAL_ANALYSIS, "POST")).toHaveLength(0);
   });
 
   it("drops a server that fails and keeps the healthy one", async () => {

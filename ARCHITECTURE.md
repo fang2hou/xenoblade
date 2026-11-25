@@ -16,7 +16,7 @@ lives in D1.
 
 ## Codebase Map
 
-- **platform-worker** — the Cloudflare Worker: `/internal/v1/*` routes with bearer auth, the generation pipeline (budget, dedup, memory injection, model chains), first-party tools (`web_search`, `web_answer`, `read_url`, `vision_describe`, model-info), the 90-day guild message history index (D1 + FTS5) with its read-only tools (`get_recent_messages`, `search_chat_history`, `get_message_context`), the interaction tools (`ask_user`, `retry_last_reply`, `thread_pause`) with thread sessions and last-turn snapshots, MCP clients, and the D1 access layer
+- **platform-worker** — the Cloudflare Worker: `/internal/v1/*` routes with bearer auth, the generation pipeline (budget, dedup, memory injection, model chains), first-party tools (`web_search`, `web_answer`, `read_url`, `vision_describe`), the 90-day guild message history index (D1 + FTS5) with its read-only tools (`get_recent_messages`, `search_chat_history`, `get_message_context`), the interaction tools (`ask_user`, `retry_last_reply`, `thread_pause`) with thread sessions and last-turn snapshots, MCP clients, and the D1 access layer
 - **discord-runtime** — the self-hosted gateway: discord.js client, trigger policy, auto-started discussion threads and their followed sessions, per-container conversation queue, staged status, `ask_user` question cards, 是 / 不是 confirmation cards (soul, guild memory), slash commands, the DM control plane, and the batched history ingest that keeps the Worker's message index in step with Discord
 - **contracts** — wire types for every runtime↔worker call; shared verbatim by both apps
 - **ai** — model chains per role (generation/summarization/transcription/vision) via the OpenRouter provider, system-prompt composition, generation limits

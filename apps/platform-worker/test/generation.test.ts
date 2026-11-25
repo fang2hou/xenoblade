@@ -38,7 +38,11 @@ vi.mock("../src/tools", async (importOriginal) => {
   return {
     ...actual,
     connectMcpServers: async () => ({
-      tools: { context7_resolve_library_id: {}, github_search: {} },
+      tools: {
+        context7_resolve_library_id: {},
+        github_search: {},
+        "artificial-analysis_aa_language_models_free": {},
+      },
       clients: [],
     }),
     closeMcpClients: async () => {},
@@ -49,11 +53,11 @@ vi.mock("../src/tools", async (importOriginal) => {
 const CALLED_TOOLS = [
   "web_search",
   "read_url",
-  "model_list",
   "vision_describe",
   "memory_list",
   "context7_resolve_library_id",
   "github_search",
+  "artificial-analysis_aa_language_models_free",
 ];
 
 /** Tool results of a run that called each audited tool once. */
@@ -88,7 +92,6 @@ function makeEnv(generation: ModelConfig[], db = createTestD1()): Env {
     DB: db,
     INTERNAL_API_TOKEN: "test-internal-token",
     OPENROUTER_API_KEY: "test-key",
-    // The model-info tools only exist when this key is configured.
     ARTIFICIAL_ANALYSIS_API_KEY: "test-key",
     MODEL_CONFIG: JSON.stringify({ generation }),
   } as Env;
@@ -179,11 +182,14 @@ describe("generate tool audit", () => {
     expect(results).toEqual([
       { tool_name: "web_search", server: "builtin" },
       { tool_name: "read_url", server: "builtin" },
-      { tool_name: "model_list", server: "builtin" },
       { tool_name: "vision_describe", server: "builtin" },
       { tool_name: "memory_list", server: "builtin" },
       { tool_name: "context7_resolve_library_id", server: "context7" },
       { tool_name: "github_search", server: "github" },
+      {
+        tool_name: "artificial-analysis_aa_language_models_free",
+        server: "artificial-analysis",
+      },
     ]);
   });
 });
