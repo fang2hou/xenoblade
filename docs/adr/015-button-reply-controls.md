@@ -14,7 +14,7 @@ Bot replies carried two emoji reactions as affordances — 🔁 regenerate and �
 ## Decision
 
 1. **Native buttons replace reactions.** Every completed bot reply carries one action row: Regenerate (🔁 + localized label, `Secondary`) and Delete (🗑️, `Danger`), with customIds `xbl:regen:<headMessageId>` / `xbl:del:<headMessageId>`. Button labels follow the triggering user's UI language (zh default) — the language is already resolved in the generation path, so no extra fetch is needed at reply time; the Disable button is emoji-only by design.
-2. **Interaction dispatch.** `interactionCreate` routes message-component interactions. Only the triggering user may act; anyone else gets an ephemeral refusal (`flags: MessageFlags.Ephemeral`, the current discord.js v14 idiom). Memory confirmations (ADR-013) stay on ✅/❌ reactions — they are a separate message family and unchanged.
+2. **Interaction dispatch.** `interactionCreate` routes message-component interactions. Only the triggering user may act; anyone else gets an ephemeral refusal (`flags: MessageFlags.Ephemeral`, the current discord.js v14 idiom). Memory confirmations (ADR-013) stay on ✅/❌ reactions — they are a separate message family and unchanged. _(Superseded by the ADR-013 amendment of 2026-11-25: memory confirmations moved to 是 / 不是 buttons, and no reaction handling remains.)_
 3. **Regenerate edits in place.** The click is acknowledged by disabling both buttons (`interaction.update`). The re-run reuses the staged-status pattern (ADR-003 amendment) with the _existing head message_ as the placeholder: milestones edit it, the result replaces its content, surplus continuation chunks of the old answer are deleted, and the buttons are re-enabled on the new content. The regenerated reply keeps full controls — every completed answer is regenerable again.
 4. **Failure restores.** A failed, rejected, or erroring re-run puts the previous content back with its buttons re-enabled instead of overwriting the answer with a failure notice; budget-exceeded and error outcomes additionally notify the clicker through an ephemeral follow-up on the spent interaction.
 5. **Restart safety.** The reply registry stays in-memory (bounded, FIFO). Buttons on old messages after a restart — or any customId this process cannot resolve — fail closed: a graceful ephemeral "expired" notice, no action, no crash.
@@ -50,7 +50,7 @@ The staged-status bounds are unchanged: ≤ 4 placeholder edits per generation (
 
 **Negative:** one extra REST edit per completed reply and one per regenerate click (see ADR-003 relation); buttons on pre-migration messages from before a restart show the expiry notice until they scroll away; the regenerate lease adds a small D1 table.
 
-**Neutral:** `GatewayMessageReactions` and the reaction partials remain required for ADR-013 confirmations; the reply registry stays in-memory and bounded — eviction and restart share the same fail-closed expiry path.
+**Neutral:** `GatewayMessageReactions` and the reaction partials remain required for ADR-013 confirmations _(until the ADR-013 amendment of 2026-11-25 retired reaction confirmations and both were removed)_; the reply registry stays in-memory and bounded — eviction and restart share the same fail-closed expiry path.
 
 Merging to main auto-deploys both apps (CI deploy pipeline); the wire contract change (`regenerateOf` semantics) ships atomically with both sides.
 

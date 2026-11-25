@@ -7,12 +7,15 @@ import { createModel, GENERATION_LIMITS, type ModelConfig } from "@xenoblade/ai"
 import type {
   GenerationRequest,
   GenerationResult,
+  GuildMemoryProposal,
   HistoryMessage,
   SoulProposal,
 } from "@xenoblade/contracts";
 import type * as Tools from "../src/tools";
 
 import { generate } from "../src/generation";
+import { setGuildMemory, setUserMemory } from "../src/db";
+import { handleGuildMemoryApply } from "../src/memory";
 import { DEFAULT_SOUL, formatSoulSegment, handleSoulApply, setBotSoul } from "../src/soul";
 import { createTestD1 } from "./helpers/d1";
 
@@ -48,6 +51,7 @@ const CALLED_TOOLS = [
   "read_url",
   "model_list",
   "vision_describe",
+  "memory_list",
   "context7_resolve_library_id",
   "github_search",
 ];
@@ -79,15 +83,30 @@ function sentMessages(): Ai.ModelMessage[] {
   return vi.mocked(generateText).mock.calls[0]?.[0]?.messages ?? [];
 }
 
-function makeEnv(generation: ModelConfig[]): Env {
+function makeEnv(generation: ModelConfig[], db = createTestD1()): Env {
   return {
-    DB: createTestD1(),
+    DB: db,
     INTERNAL_API_TOKEN: "test-internal-token",
     OPENROUTER_API_KEY: "test-key",
     // The model-info tools only exist when this key is configured.
     ARTIFICIAL_ANALYSIS_API_KEY: "test-key",
     MODEL_CONFIG: JSON.stringify({ generation }),
   } as Env;
+}
+
+/** A test D1 that also records the SQL text of every statement it prepares. */
+function recordingDb(): { db: D1Database; queries: string[] } {
+  const queries: string[] = [];
+  const inner = createTestD1();
+  const db = {
+    prepare: (query: string) => {
+      queries.push(query);
+      return inner.prepare(query);
+    },
+    batch: (statements: D1PreparedStatement[]) => inner.batch(statements),
+  };
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test double wrapping the SQLite facade
+  return { db: db as unknown as D1Database, queries };
 }
 
 async function allowChannels(db: D1Database, channels: string[]): Promise<void> {
@@ -162,6 +181,7 @@ describe("generate tool audit", () => {
       { tool_name: "read_url", server: "builtin" },
       { tool_name: "model_list", server: "builtin" },
       { tool_name: "vision_describe", server: "builtin" },
+      { tool_name: "memory_list", server: "builtin" },
       { tool_name: "context7_resolve_library_id", server: "context7" },
       { tool_name: "github_search", server: "github" },
     ]);
@@ -264,20 +284,13 @@ describe("generate soul", () => {
         input: { content: "x", summary: "s" },
         output: { status: "rejected", reason: "dm_not_allowed" },
       },
-      {
-        toolName: "remember",
-        input: { key: "pet", value: "cat" },
-        output: {
-          status: "proposed",
-          proposal: { id: "m1", action: "save", category: "fact", key: "pet", value: "cat" },
-        },
-      },
+      ...guildMemoryCalls(GUILD_SAVE),
     ]);
 
     const result = await generate(env, request());
 
     expect(result).not.toHaveProperty("soulProposal");
-    expect(result).toMatchObject({ memoryProposals: [{ id: "m1" }] });
+    expect(result).toMatchObject({ guildMemoryProposals: [{ id: "m1" }] });
   });
 
   it("records the soul tools as builtin, not as an MCP server named soul", async () => {
@@ -300,6 +313,189 @@ describe("generate soul", () => {
       { tool_name: "soul_read", server: "builtin" },
       { tool_name: "soul_update", server: "builtin" },
     ]);
+  });
+});
+
+/** First line of the shared-memory block the system prompt carries in a guild. */
+const GUILD_MEMORY_HEADER = "What this server asked you to remember";
+/** Start of the personal-memory block the system prompt carries for User. */
+const USER_MEMORY_HEADER = "What you already know about User (";
+
+const GUILD_SAVE: GuildMemoryProposal = {
+  id: "m1",
+  scope: "guild",
+  guildId: "g1",
+  action: "save",
+  category: "fact",
+  key: "release day",
+  value: "Fridays",
+};
+
+const GUILD_DELETE: GuildMemoryProposal = {
+  id: "m2",
+  scope: "guild",
+  guildId: "g1",
+  action: "delete",
+  key: "tone",
+};
+
+/** Tool results of a run whose memory tools proposed each of these guild changes. */
+function guildMemoryCalls(...proposals: GuildMemoryProposal[]) {
+  return proposals.map((proposal) => ({
+    toolName: proposal.action === "save" ? "memory_save" : "memory_delete",
+    input: { scope: "guild", key: proposal.key },
+    output: { status: "proposed", proposal },
+  }));
+}
+
+/** Number of rows a run left in `guild_memory`. */
+async function storedGuildMemory(db: D1Database): Promise<number> {
+  const row = await db.prepare("SELECT COUNT(*) AS n FROM guild_memory").first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
+describe("generate guild memory", () => {
+  it("injects the guild's shared memory after the soul and ahead of the user's own memory", async () => {
+    const { db, queries } = recordingDb();
+    const env = makeEnv([{ id: "test/primary" }], db);
+    await setBotSoul(env.DB, { scopeId: "g1", content: "Speak like a pirate.", now: 1 });
+    await setGuildMemory(env.DB, {
+      guildId: "g1",
+      category: "fact",
+      key: "release day",
+      value: "Fridays",
+      now: 1,
+    });
+    await setUserMemory(env.DB, { userId: "u1", category: "fact", key: "pet", value: "cat" });
+    stubModel();
+    queries.length = 0;
+
+    expect((await generate(env, request())).status).toBe("completed");
+
+    const prompt = systemPrompt();
+    expect(prompt).toContain(GUILD_MEMORY_HEADER);
+    expect(prompt).toContain("- release day: Fridays");
+    const soul = prompt.indexOf(formatSoulSegment("Speak like a pirate."));
+    const shared = prompt.indexOf(GUILD_MEMORY_HEADER);
+    const personal = prompt.indexOf(USER_MEMORY_HEADER);
+    expect(soul).toBeLessThan(shared);
+    expect(shared).toBeLessThan(personal);
+    expect(personal).toBeLessThan(prompt.indexOf("Current date:"));
+    // A guild run reads the table once; the DM case below is measured against this.
+    expect(queries.filter((query) => query.includes("guild_memory"))).toHaveLength(1);
+  });
+
+  it("gives every member of the guild the same prefix through the shared memory, then their own memory", async () => {
+    const env = makeEnv([{ id: "test/primary" }]);
+    await setGuildMemory(env.DB, {
+      guildId: "g1",
+      category: "fact",
+      key: "release day",
+      value: "Fridays",
+      now: 1,
+    });
+    await setUserMemory(env.DB, { userId: "u1", category: "fact", key: "pet", value: "cat" });
+    await setUserMemory(env.DB, { userId: "u2", category: "fact", key: "tea", value: "oolong" });
+    stubModel();
+
+    await generate(env, request({ userDisplayName: "Alice" }));
+    await generate(env, request({ messageId: "m2", userId: "u2", userDisplayName: "Bob" }));
+
+    const prompts = vi.mocked(generateText).mock.calls.map((call) => String(call[0]?.system));
+    expect(prompts).toHaveLength(2);
+    // Everything up to the shared entry is byte-identical for both members.
+    const [alice, bob] = prompts.map((prompt) =>
+      prompt.slice(0, prompt.indexOf("- release day: Fridays")),
+    );
+    expect(alice).toContain(GUILD_MEMORY_HEADER);
+    expect(alice).toBe(bob);
+    // After it, each member gets their own memory and nobody else's.
+    expect(prompts[0]).toContain("What you already know about Alice (");
+    expect(prompts[0]).toContain("- pet: cat");
+    expect(prompts[0]).not.toContain("- tea: oolong");
+    expect(prompts[1]).toContain("What you already know about Bob (");
+    expect(prompts[1]).toContain("- tea: oolong");
+    expect(prompts[1]).not.toContain("- pet: cat");
+  });
+
+  it("never gives a DM generation the guild's shared memory, and never queries it", async () => {
+    const { db, queries } = recordingDb();
+    const env = makeEnv([{ id: "test/primary" }], db);
+    await setGuildMemory(env.DB, {
+      guildId: "g1",
+      category: "fact",
+      key: "release day",
+      value: "Fridays",
+      now: 1,
+    });
+    await setUserMemory(env.DB, { userId: "u1", category: "fact", key: "pet", value: "cat" });
+    stubModel();
+    queries.length = 0;
+
+    await generate(env, request({ scopeId: "dm", containerId: "discord:@me:42", channelId: "42" }));
+
+    // The user's own memory still arrives; the guild's never does.
+    expect(systemPrompt()).toContain("- pet: cat");
+    expect(systemPrompt()).not.toContain(GUILD_MEMORY_HEADER);
+    expect(systemPrompt()).not.toContain("Fridays");
+    expect(queries.some((query) => query.includes("guild_memory"))).toBe(false);
+  });
+
+  it("carries no shared-memory block for a guild that has none", async () => {
+    const env = makeEnv([{ id: "test/primary" }]);
+    stubModel();
+
+    await generate(env, request());
+
+    expect(systemPrompt()).not.toContain(GUILD_MEMORY_HEADER);
+  });
+
+  it("completes without shared memory when the table cannot be read", async () => {
+    const env = makeEnv([{ id: "test/primary" }]);
+    await env.DB.prepare("DROP TABLE guild_memory").run();
+    stubModel();
+
+    expect((await generate(env, request())).status).toBe("completed");
+    expect(systemPrompt()).not.toContain(GUILD_MEMORY_HEADER);
+  });
+
+  it("returns the guild memory proposals of the run in order and stores nothing", async () => {
+    const env = makeEnv([{ id: "test/primary" }]);
+    stubModel([
+      ...guildMemoryCalls(GUILD_SAVE),
+      { toolName: "web_search", output: { results: [] } },
+      ...guildMemoryCalls(GUILD_DELETE),
+    ]);
+
+    const result = await generate(env, request());
+
+    expect(result).toMatchObject({
+      status: "completed",
+      guildMemoryProposals: [GUILD_SAVE, GUILD_DELETE],
+    });
+    expect(await storedGuildMemory(env.DB)).toBe(0);
+  });
+
+  it("omits guildMemoryProposals when nothing was proposed, beside whatever soul was proposed", async () => {
+    const env = makeEnv([{ id: "test/primary" }]);
+    stubModel([
+      {
+        toolName: "memory_save",
+        input: { scope: "guild", key: "release day", value: "Fridays" },
+        output: { status: "rejected", reason: "dm_not_allowed" },
+      },
+      {
+        toolName: "memory_save",
+        input: { scope: "user", key: "pet", value: "cat" },
+        output: { status: "saved", scope: "user", category: "fact", key: "pet", value: "cat" },
+      },
+      ...soulUpdates("Calm down."),
+    ]);
+
+    const result = await generate(env, request());
+
+    expect(result).not.toHaveProperty("guildMemoryProposals");
+    expect(result).toMatchObject({ soulProposal: { content: "Calm down." } });
   });
 });
 
@@ -443,17 +639,25 @@ function scriptedModel(toolCalls: ReadonlyArray<{ toolName: string; input: objec
   return { model, offered };
 }
 
-const REMEMBER = { toolName: "remember", input: { key: "pet", value: "cat" } };
+const MEMORY_LIST = { toolName: "memory_list", input: {} };
 const SOUL_UPDATE = {
   toolName: "soul_update",
   input: { content: "Be calm and precise.", summary: "Calm down the tone." },
+};
+const GUILD_MEMORY_SAVE = {
+  toolName: "memory_save",
+  input: { scope: "guild", key: "release day", value: "Fridays" },
+};
+const USER_MEMORY_SAVE = {
+  toolName: "memory_save",
+  input: { scope: "user", key: "pet", value: "cat" },
 };
 
 describe("generate tool loop", () => {
   it("ends a tool-only run with a text reply instead of an empty one", async () => {
     const env = makeEnv([{ id: "test/primary" }]);
     // The model would keep calling tools forever, given the chance.
-    const { model, offered } = scriptedModel(Array.from({ length: 12 }, () => REMEMBER));
+    const { model, offered } = scriptedModel(Array.from({ length: 12 }, () => MEMORY_LIST));
     await useRealLoop(model);
 
     const result = await generate(env, request());
@@ -508,6 +712,77 @@ describe("generate tool loop", () => {
     expect(result).toMatchObject({ status: "completed", reply: "Final answer." });
     expect(result).not.toHaveProperty("soulProposal");
     expect(await storedSouls(env.DB)).toBe(0);
+  });
+
+  it("carries a guild memory_save call back as a proposal for this guild, and stores nothing", async () => {
+    const env = makeEnv([{ id: "test/primary" }]);
+    const { model } = scriptedModel([GUILD_MEMORY_SAVE]);
+    await useRealLoop(model);
+
+    const result = await generate(env, request());
+
+    expect(result).toMatchObject({
+      status: "completed",
+      reply: "Final answer.",
+      guildMemoryProposals: [
+        {
+          scope: "guild",
+          guildId: "g1",
+          action: "save",
+          category: "fact",
+          key: "release day",
+          value: "Fridays",
+        },
+      ],
+    });
+    expect(await storedGuildMemory(env.DB)).toBe(0);
+
+    // What the card shows is what gets stored: the proposal, forwarded as-is.
+    if (result.status !== "completed" || result.guildMemoryProposals === undefined) {
+      throw new Error("expected a completed result with guild memory proposals");
+    }
+    const [proposal] = result.guildMemoryProposals;
+    if (proposal?.action !== "save") throw new Error("expected one guild memory save proposal");
+    expect(
+      await handleGuildMemoryApply(env.DB, { proposals: [proposal], updatedBy: "u1" }),
+    ).toEqual({ status: "ok", results: [{ id: proposal.id, ok: true }] });
+    const row = await env.DB.prepare(
+      "SELECT guild_id, key, value, updated_by FROM guild_memory",
+    ).first();
+    expect(row).toEqual({
+      guild_id: "g1",
+      key: proposal.key,
+      value: proposal.value,
+      updated_by: "u1",
+    });
+  });
+
+  it("brings back no guild memory proposal from a DM, where the tool refuses", async () => {
+    const env = makeEnv([{ id: "test/primary" }]);
+    const { model } = scriptedModel([GUILD_MEMORY_SAVE]);
+    await useRealLoop(model);
+
+    const result = await generate(
+      env,
+      request({ scopeId: "dm", containerId: "discord:@me:42", channelId: "42" }),
+    );
+
+    expect(result).toMatchObject({ status: "completed", reply: "Final answer." });
+    expect(result).not.toHaveProperty("guildMemoryProposals");
+    expect(await storedGuildMemory(env.DB)).toBe(0);
+  });
+
+  it("saves the triggering user's own memory at once, with no proposal", async () => {
+    const env = makeEnv([{ id: "test/primary" }]);
+    const { model } = scriptedModel([USER_MEMORY_SAVE]);
+    await useRealLoop(model);
+
+    const result = await generate(env, request());
+
+    expect(result).toMatchObject({ status: "completed", reply: "Final answer." });
+    expect(result).not.toHaveProperty("guildMemoryProposals");
+    const row = await env.DB.prepare("SELECT user_id, key, value FROM user_memory").first();
+    expect(row).toEqual({ user_id: "u1", key: "pet", value: "cat" });
   });
 });
 

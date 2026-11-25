@@ -7,8 +7,8 @@ import type {
   ContextTruncateResult,
   GenerationRequest,
   GenerationResult,
-  MemoryProposalRequest,
-  MemoryProposalResponse,
+  GuildMemoryApplyRequest,
+  GuildMemoryApplyResponse,
   MemoryRequest,
   MemoryResponse,
   SoulApplyRequest,
@@ -104,14 +104,14 @@ export function memoryOp(
   );
 }
 
-/** Execute user-confirmed memory proposals on the Worker (ADR-013). */
-export function applyMemoryProposals(
-  req: MemoryProposalRequest,
+/** Apply button-confirmed guild memory proposals on the Worker. */
+export function applyGuildMemoryProposals(
+  req: GuildMemoryApplyRequest,
   workerUrl: string,
   token: string,
-): Promise<MemoryProposalResponse> {
-  return postJson<MemoryProposalResponse>(
-    `${workerUrl}/internal/v1/memory/proposals`,
+): Promise<GuildMemoryApplyResponse> {
+  return postJson<GuildMemoryApplyResponse>(
+    `${workerUrl}/internal/v1/memory/guild/apply`,
     req,
     token,
     CONTROL_TIMEOUT_MS,

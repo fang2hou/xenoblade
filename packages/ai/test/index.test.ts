@@ -119,6 +119,19 @@ describe("composeSystemPrompt", () => {
     expect(prompt).toBe("Safety.\n\nMemory guidance.\n\nSoul.\n\nKnown about the user.");
   });
 
+  it("places the guild's shared memory after the soul and before the persona", () => {
+    const prompt = composeSystemPrompt({
+      safety: "Safety.",
+      base: "Memory guidance.",
+      soul: "Soul.",
+      guildMemory: "Shared memory.",
+      persona: "Known about the user.",
+    });
+    expect(prompt).toBe(
+      "Safety.\n\nMemory guidance.\n\nSoul.\n\nShared memory.\n\nKnown about the user.",
+    );
+  });
+
   it("skips an empty soul", () => {
     expect(composeSystemPrompt({ safety: "Safety.", soul: "  ", persona: "Persona." })).toBe(
       "Safety.\n\nPersona.",

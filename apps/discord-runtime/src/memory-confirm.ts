@@ -1,76 +1,80 @@
+import {
+  ActionRowBuilder,
+  AttachmentBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  MessageFlags,
+} from "discord.js";
 import type {
   Message,
-  MessageReaction,
-  PartialMessageReaction,
-  PartialUser,
+  MessageComponentInteraction,
+  MessageEditOptions,
   SendableChannels,
-  User,
 } from "discord.js";
-import type { MemoryProposal, MemoryProposalResponse } from "@xenoblade/contracts";
+import type {
+  GuildMemoryApplyResponse,
+  GuildMemoryCategory,
+  GuildMemoryProposal,
+} from "@xenoblade/contracts";
 
-import { applyMemoryProposals } from "./ai-client";
+import { applyGuildMemoryProposals } from "./ai-client";
 import type { EnvConfig } from "./env";
+import { messages, type Messages } from "./i18n";
+import { resolveUiLanguageBounded } from "./language";
+import { MAX_MESSAGE_LENGTH } from "./output";
 
-/** Confirm (save/execute) affordance on memory confirmation messages. */
-export const CONFIRM_EMOJI = "✅";
-/** Cancel affordance on memory confirmation messages. */
-export const CANCEL_EMOJI = "❌";
-
-const VARIATION_SELECTOR = /\uFE0F/g;
-
-/**
- * Compare a reaction emoji name against an affordance emoji, ignoring the
- * emoji variation selector: clients send emoji with or without U+FE0F
- * depending on platform, and both must match.
- */
-export function isAffordanceEmoji(name: string | null | undefined, emoji: string): boolean {
-  if (name === undefined || name === null) return false;
-  return name.replace(VARIATION_SELECTOR, "") === emoji.replace(VARIATION_SELECTOR, "");
-}
-/** How long a confirmation message stays actionable (ADR-013). */
-const CONFIRM_WINDOW_MS = 5 * 60 * 1000;
+/** How long a confirmation card stays actionable. */
+export const MEMORY_CONFIRM_WINDOW_MS = 5 * 60 * 1000;
 
 /** Cap on tracked confirmations; the oldest entry is evicted beyond this. */
 const MAX_TRACKED_CONFIRMS = 128;
 
-/** Strings the confirmation flow renders (from the i18n table). */
-type ConfirmTexts = {
-  header: string;
-  saveLine: (label: string, key: string, value: string) => string;
-  forgetLine: (label: string | null, key: string) => string;
-  footer: string;
-  saved: string;
-  savedPartial: (ok: number, total: number) => string;
-  full: string;
-  cancelled: string;
-  expired: string;
-  failed: string;
-  labelFact: string;
-  labelPreference: string;
-};
+/** Family prefix of every memory-confirmation customId: `xbl:gmem:<choice>:<cardId>`. */
+const CUSTOM_ID_FAMILY = "xbl:gmem";
 
-/** Registry entry for one posted confirmation message. */
+/** File name of the full proposal list when it does not fit in the card's message. */
+export const GUILD_MEMORY_ATTACHMENT_NAME = "guild-memory-proposal.txt";
+
+/**
+ * Mentions are never parsed on a confirmation card. Keys and values are
+ * model-written text and may contain `@everyone` or a role mention.
+ */
+const NO_MENTIONS = { parse: [] };
+
+/** Strings the confirmation flow renders (from the i18n table). */
+export type MemoryConfirmTexts = Messages["memoryConfirm"];
+
+export type MemoryConfirmChoice = "yes" | "no";
+
+/** Registry entry for one posted confirmation card, keyed by card id. */
 export interface MemoryConfirmEntry {
-  /** Only this user's reactions act (the user whose memory is at stake). */
+  /** Id the card's buttons carry; the registry keys the entry by it. */
+  cardId: string;
+  /** Only this user's clicks act: the user who asked for the change. */
   userId: string;
-  channelId: string;
-  proposals: MemoryProposal[];
-  texts: ConfirmTexts;
-  /** Marks the entry dead once acted on or expired. */
-  settled: boolean;
+  /** The card's message id once posted; a button must fire on that message. */
+  messageId: string | null;
+  /** Every change the card lists; 是 applies them all, 不是 drops them all. */
+  proposals: GuildMemoryProposal[];
+  texts: MemoryConfirmTexts;
+  /** True while the confirmed apply call is in flight (double-click guard). */
+  busy: boolean;
+  /** Expiry timer; cleared once the entry settles. */
+  timer: NodeJS.Timeout | undefined;
 }
 
 /**
- * In-memory index of pending memory confirmations, keyed by message id.
- * Bounded and FIFO like {@link ReplyRegistry}. Entries vanish on restart:
- * reactions then go inert, which fails closed — nothing is written to
- * `user_memory` without a live confirmation.
+ * In-memory index of pending guild memory confirmations, keyed by card id —
+ * the id is minted before the card is posted, so its buttons can carry it
+ * from the start. Bounded and FIFO, like the reply registry. Entries vanish
+ * on restart: the buttons then fail closed with an ephemeral notice, and
+ * nothing reaches `guild_memory` without a live confirmation.
  */
 export class MemoryConfirmRegistry {
   private readonly entries = new Map<string, MemoryConfirmEntry>();
 
-  register(messageId: string, entry: MemoryConfirmEntry): void {
-    this.entries.set(messageId, entry);
+  register(cardId: string, entry: MemoryConfirmEntry): void {
+    this.entries.set(cardId, entry);
     if (this.entries.size > MAX_TRACKED_CONFIRMS) {
       const oldest = this.entries.keys().next().value;
       if (oldest !== undefined) {
@@ -79,157 +83,369 @@ export class MemoryConfirmRegistry {
     }
   }
 
-  get(messageId: string): MemoryConfirmEntry | undefined {
-    return this.entries.get(messageId);
+  get(cardId: string): MemoryConfirmEntry | undefined {
+    return this.entries.get(cardId);
   }
 
-  remove(messageId: string): void {
-    this.entries.delete(messageId);
+  remove(cardId: string): void {
+    this.entries.delete(cardId);
   }
+}
+
+/** Build a card button's customId: `xbl:gmem:<choice>:<cardId>`. */
+export function memoryCustomId(choice: MemoryConfirmChoice, cardId: string): string {
+  return `${CUSTOM_ID_FAMILY}:${choice}:${cardId}`;
+}
+
+/** True for any button of the memory-confirmation family, well-formed or not. */
+export function isMemoryConfirmCustomId(customId: string): boolean {
+  return customId.startsWith(`${CUSTOM_ID_FAMILY}:`);
 }
 
 /**
- * Decide what a reaction event should do against a tracked confirmation.
- * `null` when the event must be ignored: bot reactions (including the two the
- * bot itself adds), untracked or non-affordance emoji, settled entries, or
- * users other than the user whose memory would change.
+ * Parse a memory-confirmation customId into its choice and card id. Null for
+ * anything outside the scheme: another button family, a foreign verb, or a
+ * missing id.
  */
-export function resolveConfirmAction(
-  entry: MemoryConfirmEntry | undefined,
-  emojiName: string | null | undefined,
-  userId: string,
-  isBot: boolean | undefined,
-): "confirm" | "cancel" | null {
-  if (isBot === true) return null;
-  if (entry === undefined) return null;
-  if (entry.settled) return null;
-  if (userId !== entry.userId) return null;
-  if (isAffordanceEmoji(emojiName, CONFIRM_EMOJI)) return "confirm";
-  if (isAffordanceEmoji(emojiName, CANCEL_EMOJI)) return "cancel";
-  return null;
+export function parseMemoryCustomId(
+  customId: string,
+): { choice: MemoryConfirmChoice; cardId: string } | null {
+  const [family, verb, choice, cardId, ...rest] = customId.split(":");
+  if (family !== "xbl" || verb !== "gmem" || rest.length > 0) return null;
+  if (cardId === undefined || cardId === "") return null;
+  if (choice !== "yes" && choice !== "no") return null;
+  return { choice, cardId };
 }
 
-/** Render the confirmation message body listing every proposal. */
-export function renderConfirmation(
-  proposals: readonly MemoryProposal[],
-  texts: ConfirmTexts,
-): string {
-  const lines = proposals.map((proposal) => {
-    const label =
-      proposal.category === "preference"
-        ? texts.labelPreference
-        : proposal.category === "fact"
-          ? texts.labelFact
-          : null;
+/** A confirmation card ready to post. */
+export interface MemoryConfirmCard {
+  /** The question, and either the full list of changes or a pointer to `attachment`. */
+  content: string;
+  /** The full list of changes as a UTF-8 file, when it does not fit in the message. */
+  attachment: AttachmentBuilder | undefined;
+}
+
+function categoryLabel(
+  category: GuildMemoryCategory | undefined,
+  texts: MemoryConfirmTexts,
+): string | null {
+  if (category === undefined) return null;
+  return category === "preference" ? texts.labelPreference : texts.labelFact;
+}
+
+/** The card's list of changes: every proposal as one line, key and value verbatim. */
+function proposalLines(
+  proposals: readonly GuildMemoryProposal[],
+  texts: MemoryConfirmTexts,
+): string[] {
+  return proposals.map((proposal) => {
+    const label = categoryLabel(proposal.category, texts);
     return proposal.action === "save"
-      ? texts.saveLine(label ?? texts.labelFact, proposal.key, proposal.value ?? "")
-      : texts.forgetLine(label, proposal.key);
+      ? texts.saveLine(label ?? texts.labelFact, proposal.key, proposal.value)
+      : texts.deleteLine(label, proposal.key);
   });
-  return [texts.header, ...lines.map((line) => `- ${line}`), "", texts.footer].join("\n");
 }
 
-/** Render the ✅ outcome line based on per-proposal results. */
+/** The list in a code block that no line of it can close. */
+function listCodeBlock(lines: readonly string[]): string {
+  const longestRun = (lines.join("\n").match(/`+/g) ?? []).reduce(
+    (longest, run) => Math.max(longest, run.length),
+    0,
+  );
+  const fence = "`".repeat(Math.max(3, longestRun + 1));
+  return `${fence}\n${lines.join("\n")}\n${fence}`;
+}
+
+/**
+ * Build the confirmation card for a generation's guild memory proposals.
+ *
+ * Every proposed save and delete is listed with its full normalized key and
+ * value, so the user confirms exactly the bytes that will be stored or
+ * removed. The list sits in a code block no line of it can close, so
+ * model-written keys and values render raw and cannot pass for card chrome.
+ * When the list does not fit in one message, it travels as a UTF-8 file
+ * holding the same lines, and the message says so.
+ */
+export function buildMemoryConfirmCard(
+  texts: MemoryConfirmTexts,
+  proposals: readonly GuildMemoryProposal[],
+): MemoryConfirmCard {
+  const header = proposals.some((proposal) => proposal.action === "save")
+    ? texts.header
+    : texts.headerDelete;
+  const lines = proposalLines(proposals, texts);
+  const inline = [header, "", listCodeBlock(lines), "", texts.footer].join("\n");
+  if (inline.length <= MAX_MESSAGE_LENGTH) {
+    return { content: inline, attachment: undefined };
+  }
+  return {
+    content: [header, "", texts.attachmentNote, "", texts.footer].join("\n"),
+    attachment: new AttachmentBuilder(Buffer.from(lines.join("\n"), "utf8"), {
+      name: GUILD_MEMORY_ATTACHMENT_NAME,
+    }),
+  };
+}
+
+/** Build the card's button row: 是 (Primary) confirms, 不是 (Secondary) declines. */
+export function buildMemoryConfirmRow(
+  texts: MemoryConfirmTexts,
+  cardId: string,
+): ActionRowBuilder<ButtonBuilder> {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(memoryCustomId("yes", cardId))
+      .setLabel(texts.yes)
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(memoryCustomId("no", cardId))
+      .setLabel(texts.no)
+      .setStyle(ButtonStyle.Secondary),
+  );
+}
+
+/**
+ * Message edit that settles a card: replaces its text and removes the
+ * buttons. `SuppressEmbeds` is re-asserted on every edit because Discord
+ * re-scans edited content for link preview cards, and a key or value may
+ * quote a URL; mention parsing stays off for the same kind of reason — it
+ * may also quote a mention.
+ */
+export function memoryConfirmEdit(content: string): MessageEditOptions {
+  return {
+    content,
+    components: [],
+    flags: MessageFlags.SuppressEmbeds,
+    allowedMentions: NO_MENTIONS,
+  };
+}
+
+/** Render the outcome text from the Worker's per-proposal results. */
 export function renderConfirmOutcome(
-  response: MemoryProposalResponse | null,
+  response: GuildMemoryApplyResponse | null,
   total: number,
-  texts: ConfirmTexts,
+  texts: MemoryConfirmTexts,
 ): string {
   if (response === null || response.status === "error") return texts.failed;
-  const ok = response.results.filter((r) => r.ok).length;
-  if (ok === total) return texts.saved;
-  if (ok === 0) {
-    return response.results.some((r) => r.code === "memory_full") ? texts.full : texts.failed;
+  const { results } = response;
+  // A delete that matched nothing reached its end state, so it is no
+  // failure — but it changed nothing either.
+  const changed = results.filter((result) => result.ok && result.code !== "not_found").length;
+  const failed = results.filter((result) => !result.ok).length;
+  if (changed === 0) {
+    if (results.some((result) => result.code === "memory_full")) return texts.full;
+    if (failed > 0) return texts.failed;
+    return texts.nothingToDelete;
   }
-  return texts.savedPartial(ok, total);
+  if (failed === 0) return texts.saved;
+  return texts.savedPartial(results.length - failed, total);
+}
+
+/** What a memory-confirmation click should do, as decided by {@link resolveMemoryConfirmAction}. */
+export type MemoryConfirmDecision =
+  | { action: "confirm" }
+  | { action: "cancel" }
+  | { action: "rejected"; reason: "expired" | "not-owner" | "busy" };
+
+/**
+ * Decide what a memory-confirmation click should do against a tracked card.
+ * `null` when the customId belongs to another button family; callers treat
+ * that like every other button that is not theirs. A family customId this
+ * process cannot act on — unknown card (restart, eviction, settled), a
+ * button that fires on a message other than its own card, a malformed id —
+ * is rejected as expired, so it fails closed with an ephemeral notice and no
+ * action.
+ */
+export function resolveMemoryConfirmAction(
+  entry: MemoryConfirmEntry | undefined,
+  customId: string,
+  messageId: string,
+  userId: string,
+): MemoryConfirmDecision | null {
+  const parsed = parseMemoryCustomId(customId);
+  if (parsed === null) {
+    return isMemoryConfirmCustomId(customId) ? { action: "rejected", reason: "expired" } : null;
+  }
+  if (entry === undefined || entry.messageId !== messageId) {
+    return { action: "rejected", reason: "expired" };
+  }
+  if (userId !== entry.userId) return { action: "rejected", reason: "not-owner" };
+  if (entry.busy) return { action: "rejected", reason: "busy" };
+  return parsed.choice === "yes" ? { action: "confirm" } : { action: "cancel" };
+}
+
+/** Consume a pending confirmation: stop its expiry timer and forget it. */
+function settle(registry: MemoryConfirmRegistry, entry: MemoryConfirmEntry): void {
+  clearTimeout(entry.timer);
+  registry.remove(entry.cardId);
+}
+
+/** Edit the card to its outcome text without buttons. A failure is logged, never thrown. */
+async function retireCard(message: Message, content: string): Promise<void> {
+  await message.edit(memoryConfirmEdit(content)).catch((error) => {
+    console.log(
+      JSON.stringify({
+        event: "memory_confirm_edit_error",
+        messageId: message.id,
+        error: String(error),
+      }),
+    );
+  });
+}
+
+/** The window's end for a card nobody acted on: forget it and retire its buttons. */
+function expire(
+  message: Message,
+  entry: MemoryConfirmEntry,
+  registry: MemoryConfirmRegistry,
+): void {
+  registry.remove(entry.cardId);
+  // An apply still in flight settles the card itself.
+  if (entry.busy) return;
+  console.log(
+    JSON.stringify({
+      event: "memory_confirm_expired",
+      messageId: message.id,
+      userId: entry.userId,
+    }),
+  );
+  void retireCard(message, entry.texts.expired);
 }
 
 /**
- * Post the memory confirmation message for a generation's proposals: react
- * ✅ / ❌, register it, and arm the expiry timer. Best-effort throughout — a
- * failed post or react is logged and never breaks the already-delivered reply.
+ * Post the confirmation card for a generation's guild memory proposals —
+ * the question, every proposed change with its full key and value, and the
+ * 是 / 不是 buttons — and arm the expiry timer. Best-effort: a failed post is
+ * logged and never breaks the already-delivered reply. The entry is
+ * registered before the send, so a click that races the send fails closed
+ * (the card's message id is not known yet) instead of meeting a card nobody
+ * tracks.
  */
 export async function postMemoryConfirmation(
   channel: SendableChannels,
   userId: string,
-  proposals: readonly MemoryProposal[],
-  texts: ConfirmTexts,
+  proposals: readonly GuildMemoryProposal[],
+  texts: MemoryConfirmTexts,
   registry: MemoryConfirmRegistry,
 ): Promise<void> {
+  if (proposals.length === 0) return;
+  const cardId = crypto.randomUUID();
+  const entry: MemoryConfirmEntry = {
+    cardId,
+    userId,
+    messageId: null,
+    proposals: [...proposals],
+    texts,
+    busy: false,
+    timer: undefined,
+  };
+  registry.register(cardId, entry);
+
+  const card = buildMemoryConfirmCard(texts, proposals);
   let message: Message;
   try {
-    message = await channel.send(renderConfirmation(proposals, texts));
+    message = await channel.send({
+      content: card.content,
+      flags: MessageFlags.SuppressEmbeds,
+      allowedMentions: NO_MENTIONS,
+      components: [buildMemoryConfirmRow(texts, cardId)],
+      ...(card.attachment === undefined ? {} : { files: [card.attachment] }),
+    });
   } catch (error) {
+    registry.remove(cardId);
     console.log(
-      JSON.stringify({ event: "memory_confirm_post_error", userId, error: String(error) }),
+      JSON.stringify({
+        event: "memory_confirm_post_error",
+        userId,
+        cardId,
+        error: String(error),
+      }),
     );
     return;
   }
+  entry.messageId = message.id;
+  entry.timer = setTimeout(() => expire(message, entry, registry), MEMORY_CONFIRM_WINDOW_MS);
+  entry.timer.unref();
+}
 
-  registry.register(message.id, {
-    userId,
-    channelId: message.channelId,
-    proposals: [...proposals],
-    texts,
-    settled: false,
+/** Acknowledge the click inside Discord's 3-second window; the card is edited separately. */
+async function acknowledge(interaction: MessageComponentInteraction): Promise<void> {
+  await interaction.deferUpdate().catch((error) => {
+    console.log(
+      JSON.stringify({
+        event: "memory_confirm_ack_error",
+        messageId: interaction.message.id,
+        error: String(error),
+      }),
+    );
   });
+}
 
-  for (const emoji of [CONFIRM_EMOJI, CANCEL_EMOJI]) {
-    await message.react(emoji).catch((error) => {
-      console.log(
-        JSON.stringify({
-          event: "memory_confirm_react_error",
-          messageId: message.id,
-          emoji,
-          error: String(error),
-        }),
-      );
-    });
-  }
-
-  const timer = setTimeout(() => {
-    const entry = registry.get(message.id);
-    if (entry === undefined || entry.settled) return;
-    entry.settled = true;
-    registry.remove(message.id);
-    void message.edit(entry.texts.expired).catch(() => undefined);
-    console.log(JSON.stringify({ event: "memory_confirm_expired", messageId: message.id, userId }));
-  }, CONFIRM_WINDOW_MS);
-  timer.unref();
+/** Ephemeral refusal for a click that cannot act, in the clicker's own language. */
+async function refuse(
+  interaction: MessageComponentInteraction,
+  reason: "expired" | "not-owner" | "busy",
+  env: EnvConfig,
+): Promise<void> {
+  const texts = messages(
+    await resolveUiLanguageBounded(interaction.user.id, env, 1_000),
+  ).memoryConfirm;
+  const content =
+    reason === "not-owner" ? texts.notOwner : reason === "busy" ? texts.busy : texts.expiredNotice;
+  await interaction.reply({ content, flags: MessageFlags.Ephemeral }).catch((error) => {
+    console.log(
+      JSON.stringify({
+        event: "memory_confirm_refuse_error",
+        messageId: interaction.message.id,
+        error: String(error),
+      }),
+    );
+  });
 }
 
 /**
- * messageReactionAdd path for memory confirmations (ADR-013): ✅ executes the
- * proposals against the Worker, ❌ drops them. Either way the message is
- * edited to its outcome and the entry is consumed. Count-only logging —
- * proposal text never reaches the logs.
+ * interactionCreate path for the memory-confirmation buttons: 是 applies
+ * every listed proposal on the Worker and retires the card, 不是 drops them.
+ *
+ * Only the user who asked for the change may click; anyone else gets an
+ * ephemeral refusal. A card this process no longer tracks — restart,
+ * eviction, settled — fails closed the same way: no crash, no Worker call, no
+ * write. Each click is acknowledged first, so the Worker call never risks
+ * Discord's 3-second interaction window; the outcome then edits the card in
+ * place. Count-only logging — memory text never reaches the logs.
  */
-export async function handleMemoryConfirmReaction(
-  reaction: MessageReaction | PartialMessageReaction,
-  user: User | PartialUser,
+export async function handleMemoryConfirmInteraction(
+  interaction: MessageComponentInteraction,
   env: EnvConfig,
   registry: MemoryConfirmRegistry,
 ): Promise<void> {
-  const messageId = reaction.message.id;
-  const entry = registry.get(messageId);
-  const action = resolveConfirmAction(entry, reaction.emoji?.name, user.id, user.bot);
-  if (entry === undefined || action === null) return;
+  const { customId } = interaction;
+  const messageId = interaction.message.id;
+  const userId = interaction.user.id;
+  const cardId = parseMemoryCustomId(customId)?.cardId;
+  const entry = cardId === undefined ? undefined : registry.get(cardId);
+  const decision = resolveMemoryConfirmAction(entry, customId, messageId, userId);
+  if (decision === null) return;
+  if (decision.action === "rejected") {
+    await refuse(interaction, decision.reason, env);
+    return;
+  }
+  // A decision to act implies the entry resolved above.
+  if (entry === undefined) return;
 
-  entry.settled = true;
-  registry.remove(messageId);
-
-  const message = reaction.message.partial ? await reaction.message.fetch() : reaction.message;
-
-  if (action === "cancel") {
-    await message.edit(entry.texts.cancelled).catch(() => undefined);
-    await clearConfirmReactions(message);
-    console.log(JSON.stringify({ event: "memory_confirm_cancelled", messageId, userId: user.id }));
+  if (decision.action === "cancel") {
+    settle(registry, entry);
+    await acknowledge(interaction);
+    await retireCard(interaction.message, entry.texts.cancelled);
+    console.log(JSON.stringify({ event: "memory_confirm_cancelled", messageId, userId }));
     return;
   }
 
-  let response: MemoryProposalResponse | null = null;
+  entry.busy = true;
+  await acknowledge(interaction);
+  let response: GuildMemoryApplyResponse | null = null;
   try {
-    response = await applyMemoryProposals(
-      { userId: entry.userId, proposals: entry.proposals },
+    response = await applyGuildMemoryProposals(
+      { proposals: entry.proposals, updatedBy: entry.userId },
       env.workerUrl,
       env.internalApiToken,
     );
@@ -238,31 +454,21 @@ export async function handleMemoryConfirmReaction(
       JSON.stringify({ event: "memory_confirm_apply_error", messageId, error: String(error) }),
     );
   }
-
-  await message
-    .edit(renderConfirmOutcome(response, entry.proposals.length, entry.texts))
-    .catch(() => undefined);
-  await clearConfirmReactions(message);
+  settle(registry, entry);
+  await retireCard(
+    interaction.message,
+    renderConfirmOutcome(response, entry.proposals.length, entry.texts),
+  );
   console.log(
     JSON.stringify({
       event: "memory_confirm_applied",
       messageId,
-      userId: user.id,
+      userId,
       proposals: entry.proposals.length,
       ok:
         response !== null && response.status === "ok"
-          ? response.results.filter((r) => r.ok).length
+          ? response.results.filter((result) => result.ok).length
           : 0,
     }),
   );
-}
-
-/** Remove the two affordance reactions once a confirmation is settled. */
-async function clearConfirmReactions(message: Message): Promise<void> {
-  for (const emoji of [CONFIRM_EMOJI, CANCEL_EMOJI]) {
-    const affordance = message.reactions.cache.find((r) => isAffordanceEmoji(r.emoji?.name, emoji));
-    if (affordance === undefined) continue;
-    await affordance.remove().catch(() => undefined);
-    await affordance.users.remove(message.client.user.id).catch(() => undefined);
-  }
 }

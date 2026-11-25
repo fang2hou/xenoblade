@@ -100,8 +100,8 @@ export function selectModel(
 
 /**
  * Render the request-time clock as a system segment. Kept last so the
- * stable prefix (safety/base/soul/persona) stays cache-friendly; only this
- * trailing segment changes day to day.
+ * stable prefix (safety/base/soul/guild memory/persona) stays cache-friendly;
+ * only this trailing segment changes day to day.
  */
 function formatNowSegment(now: Date): string {
   const iso = now.toISOString();
@@ -120,11 +120,15 @@ export function composeSystemPrompt(parts: {
    * the soul is edited, so it belongs to the stable prefix, ahead of the
    * per-user persona. */
   soul?: string;
+  /** Shared memory of the guild the conversation runs in. Identical for
+   * every member of the guild, so it sits ahead of the per-user persona and
+   * keeps that prefix cache-friendly across members. Never set for a DM. */
+  guildMemory?: string;
   persona?: string;
   now?: Date;
 }): string {
   const segments: string[] = [];
-  for (const part of [parts.safety, parts.base, parts.soul, parts.persona]) {
+  for (const part of [parts.safety, parts.base, parts.soul, parts.guildMemory, parts.persona]) {
     if (part !== undefined && part.trim() !== "") segments.push(part);
   }
   if (parts.now !== undefined) {

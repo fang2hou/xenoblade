@@ -109,10 +109,11 @@ export type GenerationResult =
       /** Citation sources captured from search tool invocations, in the
        * order the model saw them; `index` matches inline [n] markers. */
       sources: GenerationSource[];
-      /** Memory changes the model proposed via the remember/forget tools,
-       * awaiting the user's reaction confirmation (ADR-013). The Runtime
-       * posts one confirmation message and executes nothing until confirmed. */
-      memoryProposals?: MemoryProposal[];
+      /** Changes to the guild's shared memory that the model proposed via the
+       * memory_save / memory_delete tools, awaiting the user's button
+       * confirmation (ADR-013 amendment). The Runtime posts one confirmation
+       * card and executes nothing until confirmed. */
+      guildMemoryProposals?: GuildMemoryProposal[];
       /** A server persona change the model proposed via the soul_update tool,
        * awaiting the user's button confirmation. The Runtime posts one
        * confirmation card and executes nothing until confirmed. */
@@ -197,29 +198,58 @@ export type MemoryResponse =
   | { status: "ok"; memories: UserMemory[] }
   | { status: "error"; code: string };
 
-// ── Memory Proposals (intent-based writes, ADR-013) ───────────────────────
+// ── Guild Memory (shared server knowledge, ADR-013 amendment) ─────────────
 
-/** One memory change the model proposed during a generation. */
-export interface MemoryProposal {
-  /** Client-side id for matching confirmation results back to proposals. */
-  id: string;
-  action: "save" | "forget";
-  /** Required for `save` (fact or preference). Omit on `forget` to delete
-   * the key in every category. */
-  category?: MemoryCategory;
-  /** Stable memory key; `save` upserts, `forget` deletes matching rows. */
+/** Category of a shared-memory entry; persona stays a per-user concept. */
+export type GuildMemoryCategory = "fact" | "preference";
+
+export interface GuildMemory {
+  category: GuildMemoryCategory;
   key: string;
-  /** New content for `save` proposals; absent on `forget`. */
-  value?: string;
+  value: string;
+  updatedAt: number;
 }
 
-/** Execute confirmed proposals against `user_memory` (reaction-gated). */
-export type MemoryProposalRequest = {
-  userId: string;
-  proposals: MemoryProposal[];
+/**
+ * One change to a guild's shared memory that the model proposed during a
+ * generation. Nothing is written during generation: the proposal travels back
+ * inside the generation result, and only the Runtime's button-confirmed call
+ * to `/internal/v1/memory/guild/apply` executes it.
+ */
+export type GuildMemoryProposal =
+  | {
+      /** Client-side id for matching confirmation results back to proposals. */
+      id: string;
+      scope: "guild";
+      /** The guild whose shared memory changes. Never `"dm"`. */
+      guildId: string;
+      action: "save";
+      category: GuildMemoryCategory;
+      /** Stable entry key; the save upserts the guild's entry under it. */
+      key: string;
+      /** The new content, normalized and shown to the user verbatim. */
+      value: string;
+    }
+  | {
+      id: string;
+      scope: "guild";
+      guildId: string;
+      action: "delete";
+      /** Omit to remove the key in both categories. */
+      category?: GuildMemoryCategory;
+      /** Entries under this key are removed. */
+      key: string;
+    };
+
+/** Apply user-confirmed proposals against `guild_memory` (button-gated). */
+export type GuildMemoryApplyRequest = {
+  /** The confirmed proposals of one confirmation card, forwarded verbatim. */
+  proposals: GuildMemoryProposal[];
+  /** Id of the user who confirmed them; recorded as each entry's `updated_by`. */
+  updatedBy: string;
 };
 
-export type MemoryProposalResponse =
+export type GuildMemoryApplyResponse =
   | {
       status: "ok";
       /** One outcome per request proposal, request order preserved. */

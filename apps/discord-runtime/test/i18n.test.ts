@@ -16,9 +16,24 @@ function leafValues(value: unknown): unknown[] {
   return Object.values(value).flatMap(leafValues);
 }
 
+/** Path and parameter count of every function in a table. */
+function signatures(value: unknown, path = ""): string[] {
+  if (typeof value === "function") return [`${path}(${value.length})`];
+  if (typeof value !== "object" || value === null) return [];
+  return Object.entries(value).flatMap(([key, child]) =>
+    signatures(child, path === "" ? key : `${path}.${key}`),
+  );
+}
+
 describe("i18n tables", () => {
   it("zh and en expose identical key structures", () => {
     expect(paths(MESSAGES.en)).toEqual(paths(MESSAGES.zh));
+  });
+
+  it("zh and en functions take the same parameters", () => {
+    // Same path, same arity: an en text that ignores a placeholder its zh
+    // counterpart uses (or takes one more) would render wrong, not fail.
+    expect(signatures(MESSAGES.en)).toEqual(signatures(MESSAGES.zh));
   });
 
   it("every plain leaf is a non-empty string in both languages", () => {
