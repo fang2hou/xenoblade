@@ -13,7 +13,7 @@ import type {
 } from "@xenoblade/contracts";
 import type * as Tools from "../src/tools";
 
-import { generate } from "../src/generation";
+import { containsLeakedToolMarkup, generate } from "../src/generation";
 import { setGuildMemory, setUserMemory } from "../src/db";
 import { handleGuildMemoryApply } from "../src/memory";
 import { DEFAULT_SOUL, formatSoulSegment, handleSoulApply, setBotSoul } from "../src/soul";
@@ -603,23 +603,27 @@ async function useRealLoop(model: MockLanguageModelV3): Promise<void> {
 
 /**
  * A model scripted to call `toolCalls[i]` on its i-th step while tools are on
- * offer, and to answer with text otherwise or once the script runs out.
- * `offered` records how many tools each step was offered.
+ * offer and allowed (`toolChoice !== "none"`), and to answer with text
+ * otherwise or once the script runs out. `offered` and `toolChoices` record
+ * what each step saw.
  */
 function scriptedModel(toolCalls: ReadonlyArray<{ toolName: string; input: object }>): {
   model: MockLanguageModelV3;
   offered: number[];
+  toolChoices: Array<string | undefined>;
 } {
   const offered: number[] = [];
+  const toolChoices: Array<string | undefined> = [];
   const model = new MockLanguageModelV3({
-    doGenerate: async ({ tools }) => {
+    doGenerate: async ({ tools, toolChoice }) => {
       offered.push(tools?.length ?? 0);
+      toolChoices.push(toolChoice?.type);
       const usage = {
         inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
         outputTokens: { total: 5, text: 5, reasoning: 0 },
       };
       const call = toolCalls[offered.length - 1];
-      if (call !== undefined && (tools?.length ?? 0) > 0) {
+      if (call !== undefined && (tools?.length ?? 0) > 0 && toolChoice?.type !== "none") {
         return {
           content: [
             {
@@ -642,7 +646,7 @@ function scriptedModel(toolCalls: ReadonlyArray<{ toolName: string; input: objec
       };
     },
   });
-  return { model, offered };
+  return { model, offered, toolChoices };
 }
 
 const MEMORY_LIST = { toolName: "memory_list", input: {} };
@@ -659,21 +663,165 @@ const USER_MEMORY_SAVE = {
   input: { scope: "user", key: "pet", value: "cat" },
 };
 
+const LEAKED_DSML_REPLY = [
+  "<｜｜DSML｜｜ calls>",
+  '<｜｜DSML｜｜ invoke name="web_search">',
+  '<｜｜DSML｜｜ parameter name="query" string="true">test</｜｜DSML｜｜ parameter>',
+  "</｜｜DSML｜｜ invoke>",
+  "</｜｜DSML｜｜ calls>",
+].join("\n");
+
+describe("containsLeakedToolMarkup", () => {
+  it("matches canonical fullwidth, doubled fullwidth, and ASCII DSML tool-call tags", () => {
+    expect(containsLeakedToolMarkup(LEAKED_DSML_REPLY)).toBe(true);
+    expect(containsLeakedToolMarkup('<｜DSML｜function_calls><｜DSML｜invoke name="x">')).toBe(
+      true,
+    );
+    expect(containsLeakedToolMarkup('<||DSML||invoke name="web_search">')).toBe(true);
+  });
+
+  it("ignores normal prose and ordinary angle-bracket markup", () => {
+    expect(containsLeakedToolMarkup("Here is your answer [来源](<https://example.com>).")).toBe(
+      false,
+    );
+    expect(containsLeakedToolMarkup("DeepSeek uses DSML internally for tool calls.")).toBe(false);
+  });
+});
+
 describe("generate tool loop", () => {
-  it("ends a tool-only run with a text reply instead of an empty one", async () => {
+  it("ends a tool-only run with toolChoice none on the last step while keeping tools defined", async () => {
     const env = makeEnv([{ id: "test/primary" }]);
     // The model would keep calling tools forever, given the chance.
-    const { model, offered } = scriptedModel(Array.from({ length: 12 }, () => MEMORY_LIST));
+    const { model, offered, toolChoices } = scriptedModel(
+      Array.from({ length: 16 }, () => MEMORY_LIST),
+    );
     await useRealLoop(model);
 
     const result = await generate(env, request());
 
-    // Seven steps that may call tools, then an eighth without tools: nothing is
-    // left to call, so the run's last step can only be the text reply.
-    expect(offered).toHaveLength(8);
-    expect(offered.slice(0, 7).every((count) => count > 0)).toBe(true);
-    expect(offered[7]).toBe(0);
+    // Eleven steps that may call tools, then a twelfth with `toolChoice: "none"`
+    // and `tools` still defined (so OpenRouter serializes `tool_choice: "none"`
+    // and keeps the prompt cache warm).
+    expect(offered).toHaveLength(12);
+    expect(offered.every((count) => count > 0)).toBe(true);
+    expect(toolChoices.slice(0, 11).every((choice) => choice !== "none")).toBe(true);
+    expect(toolChoices[11]).toBe("none");
     expect(result).toMatchObject({ status: "completed", reply: "Final answer." });
+  });
+
+  it("rescues a multi-step run that leaks raw DSML markup without discarding prior tool results", async () => {
+    const env = makeEnv([{ id: "test/primary" }]);
+    let calls = 0;
+    const seenToolChoices: Array<string | undefined> = [];
+    const model = new MockLanguageModelV3({
+      doGenerate: async ({ toolChoice }) => {
+        calls += 1;
+        seenToolChoices.push(toolChoice?.type);
+        const usage = {
+          inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
+          outputTokens: { total: 5, text: 5, reasoning: 0 },
+        };
+        if (calls === 1) {
+          return {
+            content: [
+              {
+                type: "tool-call",
+                toolCallId: "call-1",
+                toolName: "memory_list",
+                input: "{}",
+              },
+            ],
+            finishReason: { unified: "tool-calls", raw: "tool-calls" },
+            usage,
+            warnings: [],
+          };
+        }
+        if (calls === 2) {
+          return {
+            content: [{ type: "text", text: LEAKED_DSML_REPLY }],
+            finishReason: { unified: "stop", raw: "stop" },
+            usage,
+            warnings: [],
+          };
+        }
+        return {
+          content: [{ type: "text", text: "Rescued answer from gathered tools." }],
+          finishReason: { unified: "stop", raw: "stop" },
+          usage,
+          warnings: [],
+        };
+      },
+    });
+    await useRealLoop(model);
+
+    const result = await generate(env, request());
+
+    expect(calls).toBe(3);
+    expect(seenToolChoices[2]).toBe("none");
+    expect(result).toMatchObject({
+      status: "completed",
+      reply: "Rescued answer from gathered tools.",
+      usage: { inputTokens: 30, outputTokens: 15 },
+    });
+    const { results } = await env.DB.prepare("SELECT tool_name FROM tool_invocations").all<{
+      tool_name: string;
+    }>();
+    expect(results).toEqual([{ tool_name: "memory_list" }]);
+  });
+
+  it("falls through to the next model when step 1 leaks raw DSML markup", async () => {
+    const env = makeEnv([{ id: "test/primary" }, { id: "test/fallback" }]);
+    const usage = {
+      inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
+      outputTokens: { total: 5, text: 5, reasoning: 0 },
+    };
+    const primary = new MockLanguageModelV3({
+      doGenerate: async () => ({
+        content: [{ type: "text", text: LEAKED_DSML_REPLY }],
+        finishReason: { unified: "stop", raw: "stop" },
+        usage,
+        warnings: [],
+      }),
+    });
+    const fallback = new MockLanguageModelV3({
+      doGenerate: async () => ({
+        content: [{ type: "text", text: "Clean fallback answer." }],
+        finishReason: { unified: "stop", raw: "stop" },
+        usage,
+        warnings: [],
+      }),
+    });
+    const { generateText: realGenerateText } = await vi.importActual<typeof Ai>("ai");
+    vi.mocked(generateText).mockImplementation(realGenerateText);
+    vi.mocked(createModel).mockReturnValueOnce(primary).mockReturnValueOnce(fallback);
+
+    const result = await generate(env, request());
+
+    expect(result).toMatchObject({
+      status: "completed",
+      reply: "Clean fallback answer.",
+      usage: { model: "test/fallback" },
+    });
+  });
+
+  it("errors instead of posting raw DSML markup when every model leaks it", async () => {
+    const env = makeEnv([{ id: "test/primary" }]);
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => ({
+        content: [{ type: "text", text: LEAKED_DSML_REPLY }],
+        finishReason: { unified: "stop", raw: "stop" },
+        usage: {
+          inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
+          outputTokens: { total: 5, text: 5, reasoning: 0 },
+        },
+        warnings: [],
+      }),
+    });
+    await useRealLoop(model);
+
+    const result = await generate(env, request());
+
+    expect(result).toMatchObject({ status: "error" });
   });
 
   it("carries a soul_update call back as a proposal and stores nothing", async () => {
