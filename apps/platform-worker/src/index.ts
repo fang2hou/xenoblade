@@ -4,7 +4,6 @@ import type {
   ContextTruncateRequest,
   GenerationRequest,
   HealthResponse,
-  MemoryProposalRequest,
   MemoryRequest,
   SettingsRequest,
   UsageSummaryResponse,
@@ -13,7 +12,7 @@ import type {
 import { isInternalAuthorized } from "./auth";
 import { clearUserContext, getUsageSummary, restoreUserContext, truncateUserContext } from "./db";
 import { generate } from "./generation";
-import { handleMemory, handleMemoryProposals } from "./memory";
+import { handleGuildMemoryApply, handleMemory } from "./memory";
 import { handleSettings } from "./settings";
 import { handleSoulApply } from "./soul";
 
@@ -162,13 +161,13 @@ export default {
       return json(await handleMemory(env.DB, req));
     }
 
-    // POST /internal/v1/memory/proposals (ADR-013: confirmed intent writes)
-    if (request.method === "POST" && path === "/internal/v1/memory/proposals") {
-      const req = await readJson<MemoryProposalRequest>(request);
+    // POST /internal/v1/memory/guild/apply (button-confirmed guild memory writes)
+    if (request.method === "POST" && path === "/internal/v1/memory/guild/apply") {
+      const req = await readJson<unknown>(request);
       if (req === null) {
         return json({ status: "error", code: "invalid_body" }, 400);
       }
-      return json(await handleMemoryProposals(env.DB, req));
+      return json(await handleGuildMemoryApply(env.DB, req));
     }
 
     // POST /internal/v1/soul/apply (button-confirmed soul proposal)

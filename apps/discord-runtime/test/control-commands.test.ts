@@ -161,6 +161,56 @@ describe("handleControlCommand persona", () => {
   });
 });
 
+describe("handleControlCommand preference", () => {
+  it("tells the user when their personal memory is full, instead of a generic failure", async () => {
+    const { interaction, editContents, bodies } = makeInteraction({
+      command: "preference",
+      subcommand: "set",
+      strings: { key: "reply style", value: "简短" },
+    });
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      stubFetch(calls, bodies, {
+        "/internal/v1/settings": () => ({ status: "ok", settings: settingsFor() }),
+        "/internal/v1/memory": () => ({ status: "error", code: "memory_full" }),
+      }),
+    );
+
+    await handleControlCommand(interaction, env);
+
+    expect(bodies).toContainEqual({
+      op: "set",
+      userId: "user-1",
+      category: "preference",
+      key: "reply style",
+      value: "简短",
+    });
+    expect(editContents[0]).toBe(ZH.memoryFull);
+  });
+
+  it("still shows the generic notice for any other failure", async () => {
+    const { interaction, editContents } = makeInteraction({
+      command: "preference",
+      subcommand: "set",
+      strings: { key: "reply style", value: "简短" },
+    });
+    const calls: string[] = [];
+    const bodies: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      stubFetch(calls, bodies, {
+        "/internal/v1/settings": () => ({ status: "ok", settings: settingsFor() }),
+        "/internal/v1/memory": () => ({ status: "error", code: "memory_op_failed" }),
+      }),
+    );
+
+    await handleControlCommand(interaction, env);
+
+    expect(editContents[0]).toBe(ZH.memoryError);
+  });
+});
+
 describe("handleControlCommand memory", () => {
   it("clears all memories", async () => {
     const { interaction, editContents, bodies } = makeInteraction({

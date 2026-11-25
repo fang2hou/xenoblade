@@ -14,11 +14,7 @@ import type {
   ChatInputCommandInteraction,
   Message,
   MessageComponentInteraction,
-  MessageReaction,
-  PartialMessageReaction,
-  PartialUser,
   SendableChannels,
-  User,
 } from "discord.js";
 
 import type {
@@ -32,7 +28,8 @@ import type {
 import { loadEnv, type EnvConfig } from "./env";
 import { containerIdFromMessage, scopeIdFromMessage } from "./conversation-scope";
 import {
-  handleMemoryConfirmReaction,
+  handleMemoryConfirmInteraction,
+  isMemoryConfirmCustomId,
   MemoryConfirmRegistry,
   postMemoryConfirmation,
 } from "./memory-confirm";
@@ -69,7 +66,7 @@ async function main(): Promise<void> {
   const env = loadEnv();
   const queue = new ConversationQueue();
   const registry = new ReplyRegistry();
-  const confirms = new MemoryConfirmRegistry();
+  const memoryConfirms = new MemoryConfirmRegistry();
   const soulConfirms = new SoulConfirmRegistry();
   const client = new Client({
     intents: [
@@ -77,17 +74,12 @@ async function main(): Promise<void> {
       GatewayIntentBits.GuildMessages,
       GatewayIntentBits.MessageContent,
       GatewayIntentBits.DirectMessages,
-      // Required to receive messageReactionAdd events for the memory
-      // confirmations (ADR-013 ✅/❌). Reply controls are buttons and arrive
-      // as interactions (ADR-015).
-      GatewayIntentBits.GuildMessageReactions,
     ],
     // Partials.Channel is required to receive MESSAGE_CREATE in DM channels
-    // that are not yet in the cache. Message/Reaction/User partials keep
-    // messageReactionAdd flowing for memory confirmations on messages that
-    // have fallen out of the cache — the handler reads only ids and fetches
-    // full structures before acting, so partial payloads are safe.
-    partials: [Partials.Channel, Partials.Message, Partials.Reaction, Partials.User],
+    // that are not yet in the cache. Every affordance the bot offers — reply
+    // controls, soul and memory confirmations — is a button and arrives as an
+    // interaction, so no reaction intent or partial is needed.
+    partials: [Partials.Channel, Partials.Message, Partials.User],
   });
 
   client.once("ready", () => {
@@ -106,13 +98,7 @@ async function main(): Promise<void> {
   client.on("messageCreate", (message) => {
     // Fire-and-forget: the handler catches and logs internally; awaiting
     // would block the gateway's event dispatch.
-    void handleMessageCreate(message, env, queue, client, registry, confirms, soulConfirms);
-  });
-
-  client.on("messageReactionAdd", (reaction, user) => {
-    // Fire-and-forget: the handler catches and logs internally; awaiting
-    // would block the gateway's event dispatch.
-    void handleReactionAdd(reaction, user, env, confirms);
+    void handleMessageCreate(message, env, queue, client, registry, memoryConfirms, soulConfirms);
   });
 
   client.on("interactionCreate", (interaction) => {
@@ -136,7 +122,7 @@ async function main(): Promise<void> {
         queue,
         client,
         registry,
-        confirms,
+        memoryConfirms,
         soulConfirms,
       );
       return;
@@ -166,7 +152,7 @@ async function handleMessageCreate(
   queue: ConversationQueue,
   client: Client,
   registry: ReplyRegistry,
-  confirms: MemoryConfirmRegistry,
+  memoryConfirms: MemoryConfirmRegistry,
   soulConfirms: SoulConfirmRegistry,
 ): Promise<void> {
   try {
@@ -177,7 +163,14 @@ async function handleMessageCreate(
     if (message.channel?.isDMBased()) {
       await handleDmMessage(message, env, (dmMessage) => {
         queue.enqueue(containerIdFromMessage(dmMessage), () =>
-          runGeneration(dmMessage, { kind: "dm-chat" }, env, registry, confirms, soulConfirms),
+          runGeneration(
+            dmMessage,
+            { kind: "dm-chat" },
+            env,
+            registry,
+            memoryConfirms,
+            soulConfirms,
+          ),
         );
       });
       return;
@@ -198,7 +191,7 @@ async function handleMessageCreate(
       }),
     );
     queue.enqueue(containerId, () =>
-      runGeneration(message, decision, env, registry, confirms, soulConfirms),
+      runGeneration(message, decision, env, registry, memoryConfirms, soulConfirms),
     );
   } catch (error) {
     console.log(
@@ -221,7 +214,7 @@ async function runGeneration(
   decision: TriggerDecision,
   env: EnvConfig,
   registry: ReplyRegistry,
-  confirms: MemoryConfirmRegistry,
+  memoryConfirms: MemoryConfirmRegistry,
   soulConfirms: SoulConfirmRegistry,
 ): Promise<void> {
   const channel = message.channel;
@@ -290,7 +283,7 @@ async function runGeneration(
     env,
     { regenerate: false },
     registry,
-    confirms,
+    memoryConfirms,
     soulConfirms,
   );
 }
@@ -330,7 +323,7 @@ async function executeGeneration(
   env: EnvConfig,
   run: GenerationRun,
   registry: ReplyRegistry,
-  confirms: MemoryConfirmRegistry,
+  memoryConfirms: MemoryConfirmRegistry,
   soulConfirms: SoulConfirmRegistry,
 ): Promise<void> {
   // Keep typing indicator alive during generation. Discord's typing
@@ -396,12 +389,11 @@ async function executeGeneration(
     request,
     ...(run.target ? { regen: run.target } : {}),
     registry,
-    confirms,
+    memoryConfirms,
     soulConfirms,
     staged,
     channel,
     language,
-    redactContent: request.scopeId === "dm",
   });
 }
 
@@ -411,8 +403,8 @@ interface PostContext {
   /** Present when this run regenerates a tracked reply in place (ADR-015). */
   regen?: RegenTarget;
   registry: ReplyRegistry;
-  /** Pending memory confirmations for this runtime (ADR-013). */
-  confirms: MemoryConfirmRegistry;
+  /** Pending guild memory confirmation cards for this runtime. */
+  memoryConfirms: MemoryConfirmRegistry;
   /** Pending soul confirmations for this runtime. */
   soulConfirms: SoulConfirmRegistry;
   /** Staged placeholder this run owns; settle/dismiss post or remove it. */
@@ -421,7 +413,6 @@ interface PostContext {
   channel: SendableChannels;
   /** UI language for this user's failure/rate-limit notices. */
   language: UiLanguage;
-  redactContent: boolean;
 }
 
 /**
@@ -429,7 +420,9 @@ interface PostContext {
  * staged status placeholder (if any) with the outcome text. A regenerate
  * replaces its tracked reply in place; any failed or rejected re-run
  * restores the previous reply instead of posting a notice over it.
- * DM-scope results never log content previews (ADR-011 privacy posture).
+ * Nothing here logs content in any scope: a reply can echo personal or
+ * shared memory, and the Worker's error text can quote a request, so the
+ * logs carry lengths, statuses, and codes only.
  */
 async function applyGenerationResult(result: GenerationResult, ctx: PostContext): Promise<void> {
   const messageId = ctx.request.messageId;
@@ -445,13 +438,11 @@ async function applyGenerationResult(result: GenerationResult, ctx: PostContext)
     case "completed": {
       const content = renderReply(result.reply);
       const replyLength = result.reply.length;
-      const replyPreview = ctx.redactContent ? "" : result.reply.slice(0, 100);
       console.log(
         JSON.stringify({
           event: "reply_posting",
           messageId,
           replyLength,
-          ...(replyPreview === "" ? {} : { replyPreview }),
           sources: result.sources.length,
         }),
       );
@@ -507,23 +498,24 @@ async function applyGenerationResult(result: GenerationResult, ctx: PostContext)
           await attachReplyControls(posted, ctx);
         }
       }
-      // Memory proposals from this generation (ADR-013): post the
-      // ✅/❌ confirmation message right after the reply. Count-only logs —
+      // Guild memory proposals from this generation (ADR-013 amendment):
+      // post the 是 / 不是 confirmation card right after the reply. Nothing
+      // reaches `guild_memory` until the owner clicks 是. Count-only logs —
       // proposal text never reaches the logs (DM posture applies everywhere).
-      if (result.memoryProposals !== undefined && result.memoryProposals.length > 0) {
+      if (result.guildMemoryProposals !== undefined && result.guildMemoryProposals.length > 0) {
         console.log(
           JSON.stringify({
-            event: "memory_proposals_posted",
+            event: "guild_memory_proposals_posted",
             messageId,
-            proposals: result.memoryProposals.length,
+            proposals: result.guildMemoryProposals.length,
           }),
         );
         await postMemoryConfirmation(
           ctx.channel,
           ctx.request.userId,
-          result.memoryProposals,
+          result.guildMemoryProposals,
           messages(ctx.language).memoryConfirm,
-          ctx.confirms,
+          ctx.memoryConfirms,
         );
       }
       // A soul proposal from this generation: post the 是 / 不是 card right
@@ -585,12 +577,13 @@ async function applyGenerationResult(result: GenerationResult, ctx: PostContext)
       );
       return;
     case "error":
+      // The Worker's message is provider text that may quote request
+      // content; its code (the error's name) is all the log needs.
       console.log(
         JSON.stringify({
           event: "generation_error",
           messageId,
           code: result.code,
-          message: result.message,
           retryable: result.retryable,
         }),
       );
@@ -712,32 +705,9 @@ async function attachReplyControls(posted: readonly Message[], ctx: PostContext)
 }
 
 /**
- * messageReactionAdd entry point for the memory confirmations (ADR-013).
- * The reply affordances moved to buttons and arrive as interactions
- * (ADR-015).
- */
-async function handleReactionAdd(
-  reaction: MessageReaction | PartialMessageReaction,
-  user: User | PartialUser,
-  env: EnvConfig,
-  confirms: MemoryConfirmRegistry,
-): Promise<void> {
-  try {
-    await handleMemoryConfirmReaction(reaction, user, env, confirms);
-  } catch (error) {
-    console.log(
-      JSON.stringify({
-        event: "reaction_handler_error",
-        messageId: reaction.message.id,
-        error: String(error),
-      }),
-    );
-  }
-}
-
-/**
- * interactionCreate entry point for the bot's buttons. The soul-confirmation
- * family (`xbl:soul:*`) is handed to its own handler first; everything below
+ * interactionCreate entry point for the bot's buttons. The confirmation
+ * families — the guild memory cards (`xbl:gmem:*`) and the soul cards
+ * (`xbl:soul:*`) — are handed to their own handlers first; everything below
  * is the reply controls (ADR-015):
  * 🔁 Regenerate re-runs the frozen request and edits the reply in place,
  * 🗑 Delete removes the whole reply.
@@ -755,12 +725,16 @@ async function handleComponentInteraction(
   queue: ConversationQueue,
   client: Client,
   registry: ReplyRegistry,
-  confirms: MemoryConfirmRegistry,
+  memoryConfirms: MemoryConfirmRegistry,
   soulConfirms: SoulConfirmRegistry,
 ): Promise<void> {
   try {
-    // The soul-confirmation family has its own registry and texts; it is
-    // routed here so the reply-control resolver below never sees it.
+    // Each confirmation family has its own registry and texts; both are
+    // routed here so the reply-control resolver below never sees them.
+    if (isMemoryConfirmCustomId(interaction.customId)) {
+      await handleMemoryConfirmInteraction(interaction, env, memoryConfirms);
+      return;
+    }
     if (isSoulConfirmCustomId(interaction.customId)) {
       await handleSoulConfirmInteraction(interaction, env, soulConfirms);
       return;
@@ -799,7 +773,16 @@ async function handleComponentInteraction(
       await deleteReply(interaction, entry, client, registry);
       return;
     }
-    await startRegenerate(interaction, entry, env, queue, client, registry, confirms, soulConfirms);
+    await startRegenerate(
+      interaction,
+      entry,
+      env,
+      queue,
+      client,
+      registry,
+      memoryConfirms,
+      soulConfirms,
+    );
   } catch (error) {
     console.log(
       JSON.stringify({
@@ -826,7 +809,7 @@ async function startRegenerate(
   queue: ConversationQueue,
   client: Client,
   registry: ReplyRegistry,
-  confirms: MemoryConfirmRegistry,
+  memoryConfirms: MemoryConfirmRegistry,
   soulConfirms: SoulConfirmRegistry,
 ): Promise<void> {
   const messageId = interaction.message.id;
@@ -885,7 +868,7 @@ async function startRegenerate(
       env,
       { regenerate: true, target: { entry, head, notify } },
       registry,
-      confirms,
+      memoryConfirms,
       soulConfirms,
     );
   });

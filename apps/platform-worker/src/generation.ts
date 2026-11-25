@@ -1,10 +1,11 @@
-import { generateText, isStepCount, type ToolSet } from "ai";
+import { APICallError, generateText, isStepCount, type ToolSet } from "ai";
 
 import { composeSystemPrompt, createModel, GENERATION_LIMITS, getModelChain } from "@xenoblade/ai";
 import type {
   GenerationRequest,
   GenerationResult,
   GenerationUsage,
+  GuildMemory,
   UserMemory,
 } from "@xenoblade/contracts";
 
@@ -15,6 +16,7 @@ import {
   DM_SCOPE,
   finishGeneration,
   GenerationBudgetExceededError,
+  getGuildMemory,
   getRecentSources,
   getRuntimeConfig,
   getUserContextState,
@@ -27,7 +29,7 @@ import {
   type InteractionRecord,
 } from "./db";
 import { buildContext } from "./context";
-import { extractMemoryProposals } from "./memory-proposals";
+import { extractGuildMemoryProposals } from "./memory";
 import { extractSources } from "./sources";
 import { extractSoulProposal, formatSoulSegment, getBotSoul } from "./soul";
 import {
@@ -44,6 +46,15 @@ function formatMemoryBlock(displayName: string, memories: readonly UserMemory[])
   const lines = memories.map((m) => `- ${m.key}: ${m.value}`);
   return [
     `What you already know about ${displayName} (weave in naturally; never list or cite this):`,
+    ...lines,
+  ].join("\n");
+}
+
+function formatGuildMemoryBlock(memories: readonly GuildMemory[]): string {
+  if (memories.length === 0) return "";
+  const lines = memories.map((m) => `- ${m.key}: ${m.value}`);
+  return [
+    "What this server asked you to remember (shared knowledge for everyone here; weave in naturally; never list or cite this):",
     ...lines,
   ].join("\n");
 }
@@ -249,10 +260,15 @@ async function runGenerationPipeline(
     console.log(JSON.stringify({ event: "memory_read_error", error: String(error) }));
   }
   const soul = await getBotSoul(env.DB, req.scopeId);
+  // A guild's shared memory reaches guild conversations only: a DM never
+  // reads it. It precedes the user's personal memory so that every member of
+  // the same guild shares the same prefix up to that point.
+  const guildMemory = req.scopeId === DM_SCOPE ? [] : await getGuildMemory(env.DB, req.scopeId);
   const system = composeSystemPrompt({
     safety: SAFETY_SYSTEM,
     base: MEMORY_GUIDANCE,
     soul: formatSoulSegment(soul.content),
+    guildMemory: formatGuildMemoryBlock(guildMemory),
     persona,
     now: new Date(now),
   });
@@ -265,8 +281,8 @@ async function runGenerationPipeline(
   );
 
   // Tools — ALL models get ALL tools (MCP + first-party + vision); the soul
-  // tools act on this request's scope
-  const firstPartyTools = createFirstPartyTools(env, req.scopeId);
+  // and memory tools act on this request's user and scope
+  const firstPartyTools = createFirstPartyTools(env, req.scopeId, req.userId);
   // The route tests pass a bare object as the context, so waitUntil is not assumed here.
   const mcpResult = await connectMcpServers(env, { waitUntil: ctx?.waitUntil?.bind(ctx) });
   const allTools = { ...firstPartyTools, ...mcpResult.tools };
@@ -337,7 +353,12 @@ async function runGenerationPipeline(
             messageId: req.messageId,
             model: config.id,
             retryable: isRetryable(error),
-            error: error instanceof Error ? error.message : String(error),
+            // Never the message: a provider or a tool may fill it with
+            // request content, which no log may carry in any scope.
+            error: error instanceof Error ? error.name : typeof error,
+            ...(APICallError.isInstance(error) && error.statusCode !== undefined
+              ? { statusCode: error.statusCode }
+              : {}),
           }),
         );
         // The chain's time is gone: nothing is left to try another model with.
@@ -441,7 +462,7 @@ async function runGenerationPipeline(
   await closeMcpClients(mcpResult.clients);
 
   const sources = extractSources(result.toolResults ?? []);
-  const memoryProposals = extractMemoryProposals(result.toolResults ?? []);
+  const guildMemoryProposals = extractGuildMemoryProposals(result.toolResults ?? []);
   const soulProposal = extractSoulProposal(result.toolResults ?? []);
   await recordInteractionSources(env.DB, {
     interactionId: requestId,
@@ -455,13 +476,13 @@ async function runGenerationPipeline(
       event: "generation_completed",
       messageId: req.messageId,
       model: usedModel,
+      // Length only: a reply can echo personal or shared memory, so no scope
+      // logs a preview of it.
       replyLength: result.text.length,
-      // DM-scope generations never log content previews (ADR-011 privacy posture).
-      ...(req.scopeId === DM_SCOPE ? {} : { replyPreview: result.text.slice(0, 100) }),
       toolCalls: (result.toolResults ?? []).length,
       steps: result.steps.length,
       sources: sources.length,
-      memoryProposals: memoryProposals.length,
+      guildMemoryProposals: guildMemoryProposals.length,
       soulProposal: soulProposal !== undefined,
     }),
   );
@@ -472,7 +493,7 @@ async function runGenerationPipeline(
     reply: result.text,
     usage,
     sources,
-    ...(memoryProposals.length > 0 ? { memoryProposals } : {}),
+    ...(guildMemoryProposals.length > 0 ? { guildMemoryProposals } : {}),
     ...(soulProposal !== undefined ? { soulProposal } : {}),
   };
 }

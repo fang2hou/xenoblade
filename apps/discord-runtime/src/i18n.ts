@@ -40,19 +40,33 @@ const zh = {
     restoreFailure: "撤销截断失败，请稍后重试。",
   },
   memoryConfirm: {
-    header: "我准备更新对你的记忆：",
-    saveLine: (label: string, key: string, value: string) => `＋ ${label} · ${key}：${value}`,
-    forgetLine: (label: string | null, key: string) =>
-      label === null ? `－ ${key}` : `－ ${label} · ${key}`,
-    footer: "回复 ✅ 保存，❌ 取消（5 分钟内有效）。",
-    saved: "✅ 已保存到记忆。",
-    savedPartial: (ok: number, total: number) => `部分保存成功（${ok}/${total}），其余请稍后重试。`,
-    full: "记忆条数已达上限（50 条），请先用 /memory clear 清理后再试。",
-    cancelled: "已取消，未修改记忆。",
-    expired: "⏱️ 未及时确认，本次未修改记忆。",
-    failed: "保存失败，请稍后重试。",
+    header: (count: number) => `确实要更新本服务器的全局记忆吗？共 ${count} 项：`,
+    headerDelete: (count: number) => `确实要删除本服务器的全局记忆吗？共 ${count} 项：`,
+    entry: (index: number, action: string, category: string) =>
+      `[${index}] ${action} · 类别：${category}`,
+    key: (index: number, key: string) => `[${index}] 键：${key}`,
+    value: (index: number, value: string) => `[${index}] 值：${value}`,
+    actionSave: "保存",
+    actionDelete: "删除",
+    footer: "点击后才会生效（5 分钟内有效）。",
+    escapeNote: "字段里的 \\n 表示换行，\\t 表示制表符，\\u{…} 表示其他不可见字符。",
+    attachmentNote:
+      "列表放不进一条消息，完整内容见附件 guild-memory-proposal.txt（确认后按附件里的内容原样执行）。",
+    yes: "是",
+    no: "不是",
+    saved: "✅ 已更新本服务器的全局记忆。",
+    savedPartial: (ok: number, total: number) => `部分更新成功（${ok}/${total}），其余请稍后重试。`,
+    full: "本服务器的全局记忆条数已达上限（100 条），请先删除一些再试。",
+    nothingToDelete: "没有找到要删除的记忆，本服务器的全局记忆未修改。",
+    cancelled: "已取消，本服务器的全局记忆未修改。",
+    expired: "⏱️ 未及时确认，本服务器的全局记忆未修改。",
+    failed: "更新本服务器的全局记忆失败，请稍后重试。",
+    notOwner: "只有发起这次全局记忆修改的用户可以确认。",
+    busy: "正在更新全局记忆，请稍候。",
+    expiredNotice: "该确认已失效（机器人可能已重启或已超时）。",
     labelFact: "事实",
     labelPreference: "偏好",
+    labelBothCategories: "事实和偏好",
   },
   soulConfirm: {
     header: "确实要更新本服务器的助手人设（soul）吗？",
@@ -95,7 +109,7 @@ const zh = {
       "/preference list · set · clear — 管理你的偏好",
       "/memory show · clear — 查看或清除全部记忆",
       "",
-      '也可以在对话中直接说"帮我记住…"/"忘掉…"，确认后即写入记忆。',
+      '也可以在对话中直接说"帮我记住…"/"忘掉…"，个人记忆会立即写入。',
       "",
       "/chat on|off — 开启/关闭私聊对话（默认关闭，仅限私聊使用）",
       "/learn on|off — 开启/关闭自动记忆学习（默认关闭）",
@@ -105,6 +119,8 @@ const zh = {
     ].join("\n"),
     genericError: "命令执行失败，请稍后重试。",
     memoryError: "读取记忆失败，请稍后重试。",
+    memoryFull:
+      "个人记忆条数已达上限（50 条），请先用 /preference clear 或 /memory clear 清理后再试。",
     memorySet: (label: string, key: string) => `已设置${label}记忆：${key}`,
     memoryCleared: (label: string) => `已清除${label}记忆。`,
     allMemoriesCleared: "已清除全部记忆。",
@@ -148,18 +164,31 @@ export type Messages = {
     restoreFailure: string;
   };
   memoryConfirm: {
-    header: string;
-    saveLine: (label: string, key: string, value: string) => string;
-    forgetLine: (label: string | null, key: string) => string;
+    header: (count: number) => string;
+    headerDelete: (count: number) => string;
+    entry: (index: number, action: string, category: string) => string;
+    key: (index: number, key: string) => string;
+    value: (index: number, value: string) => string;
+    actionSave: string;
+    actionDelete: string;
     footer: string;
+    escapeNote: string;
+    attachmentNote: string;
+    yes: string;
+    no: string;
     saved: string;
     savedPartial: (ok: number, total: number) => string;
     full: string;
+    nothingToDelete: string;
     cancelled: string;
     expired: string;
     failed: string;
+    notOwner: string;
+    busy: string;
+    expiredNotice: string;
     labelFact: string;
     labelPreference: string;
+    labelBothCategories: string;
   };
   soulConfirm: {
     header: string;
@@ -193,6 +222,7 @@ export type Messages = {
     help: string;
     genericError: string;
     memoryError: string;
+    memoryFull: string;
     memorySet: (label: string, key: string) => string;
     memoryCleared: (label: string) => string;
     allMemoriesCleared: string;
@@ -249,20 +279,40 @@ const en: Messages = {
     restoreFailure: "Failed to undo the truncation. Please try again later.",
   },
   memoryConfirm: {
-    header: "I'd like to update what I remember about you:",
-    saveLine: (label: string, key: string, value: string) => `+ ${label} · ${key}: ${value}`,
-    forgetLine: (label: string | null, key: string) =>
-      label === null ? `- ${key}` : `- ${label} · ${key}`,
-    footer: "React ✅ to save or ❌ to cancel (valid for 5 minutes).",
-    saved: "✅ Saved to memory.",
+    header: (count: number) =>
+      count === 1
+        ? "Update this server's shared memory? 1 change:"
+        : `Update this server's shared memory? ${count} changes:`,
+    headerDelete: (count: number) =>
+      count === 1
+        ? "Delete from this server's shared memory? 1 change:"
+        : `Delete from this server's shared memory? ${count} changes:`,
+    entry: (index: number, action: string, category: string) =>
+      `[${index}] ${action} · category: ${category}`,
+    key: (index: number, key: string) => `[${index}] key: ${key}`,
+    value: (index: number, value: string) => `[${index}] value: ${value}`,
+    actionSave: "Save",
+    actionDelete: "Delete",
+    footer: "Nothing changes until you choose (valid for 5 minutes).",
+    escapeNote: "\\n marks a line break, \\t a tab, and \\u{…} another invisible character.",
+    attachmentNote:
+      "The full list is too long to show here. It is attached as guild-memory-proposal.txt and will be applied exactly as shown in that file.",
+    yes: "Yes",
+    no: "No",
+    saved: "✅ This server's shared memory was updated.",
     savedPartial: (ok: number, total: number) =>
-      `Partially saved (${ok}/${total}); please retry the rest later.`,
-    full: "Your memory is full (50 entries); clear some with /memory clear first.",
-    cancelled: "Cancelled — nothing was changed.",
-    expired: "⏱️ Not confirmed in time — nothing was changed.",
-    failed: "Failed to save. Please try again later.",
+      `Partially updated (${ok}/${total}); please retry the rest later.`,
+    full: "This server's shared memory is full (100 entries); remove some entries first.",
+    nothingToDelete: "Nothing was found to delete — the server's shared memory was not changed.",
+    cancelled: "Cancelled — the server's shared memory was not changed.",
+    expired: "⏱️ Not confirmed in time — the server's shared memory was not changed.",
+    failed: "Failed to update the server's shared memory. Please try again later.",
+    notOwner: "Only the user who requested this change can confirm it.",
+    busy: "The memory update is already in progress — please wait.",
+    expiredNotice: "This confirmation has expired (the bot may have restarted or timed out).",
     labelFact: "fact",
     labelPreference: "preference",
+    labelBothCategories: "fact and preference",
   },
   soulConfirm: {
     header: "Update this server's assistant persona (soul)?",
@@ -305,7 +355,7 @@ const en: Messages = {
       "/preference list · set · clear — manage your preferences",
       "/memory show · clear — show or clear all memories",
       "",
-      'You can also just say "remember…" / "forget…" in chat; it\'s saved after you confirm.',
+      'You can also just say "remember…" / "forget…" in chat; personal memories are saved right away.',
       "",
       "/chat on|off — enable/disable DM chat (off by default, DMs only)",
       "/learn on|off — enable/disable auto memory learning (off by default)",
@@ -315,6 +365,8 @@ const en: Messages = {
     ].join("\n"),
     genericError: "Command failed. Please try again later.",
     memoryError: "Failed to read memories. Please try again later.",
+    memoryFull:
+      "Your personal memory is full (50 entries); clear some with /preference clear or /memory clear first.",
     memorySet: (label: string, key: string) => `Set ${label} memory: ${key}`,
     memoryCleared: (label: string) => `Cleared ${label} memories.`,
     allMemoriesCleared: "Cleared all memories.",

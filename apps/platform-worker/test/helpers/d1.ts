@@ -16,6 +16,23 @@ export function createTestD1(): D1Database {
   return new D1Facade(sqlite) as unknown as D1Database;
 }
 
+/** What a statement on an outage-struck D1 answers with, whichever method runs. */
+const unavailable = async (): Promise<never> => {
+  throw new Error("D1 unavailable");
+};
+
+/** A D1 whose every statement fails when it runs, as an outage would. */
+export function createFailingD1(): D1Database {
+  const statement = {
+    bind: (): unknown => statement,
+    first: unavailable,
+    all: unavailable,
+    run: unavailable,
+  };
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test double standing in for D1Database
+  return { prepare: () => statement } as unknown as D1Database;
+}
+
 function readMigrations(): string {
   // Fixed order: every numbered migration, exactly as wrangler applies them.
   const dir = new URL("../../migrations/", import.meta.url);
@@ -27,6 +44,7 @@ function readMigrations(): string {
     "0005_interaction_sources.sql",
     "0006_regenerate_leases.sql",
     "0007_bot_soul.sql",
+    "0008_guild_memory.sql",
   ];
   return names.map((name) => readFileSync(new URL(name, dir), "utf8")).join("\n");
 }

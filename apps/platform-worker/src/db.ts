@@ -1,5 +1,7 @@
 import type {
   ContextClearRequest,
+  GuildMemory,
+  GuildMemoryCategory,
   MemoryCategory,
   UiLanguage,
   SummonKind,
@@ -729,6 +731,46 @@ export async function setUserMemory(
     .run();
 }
 
+/** Outcome of a memory upsert under an entry cap. */
+export type MemorySaveOutcome = "saved" | "memory_full";
+
+/**
+ * Cap on personal fact+preference entries a user may hold through the memory
+ * tools (ADR-013, follows ADR-012's sizing). Slash commands are not capped.
+ */
+export const MAX_USER_MEMORY_ENTRIES = 50;
+
+/**
+ * Upsert one personal memory entry under the user's cap, as the memory tools
+ * do. An existing `(category, key)` is always updated; a new key is inserted
+ * only while the user holds fewer than {@link MAX_USER_MEMORY_ENTRIES}
+ * fact+preference entries, and `memory_full` is reported otherwise. The check
+ * and the write are one statement, so two racing saves cannot both take the
+ * last slot.
+ */
+export async function setUserMemoryWithinCap(
+  db: D1Database,
+  entry: { userId: string; category: GuildMemoryCategory; key: string; value: string },
+): Promise<MemorySaveOutcome> {
+  const now = Date.now();
+  const res = await db
+    .prepare(
+      `INSERT INTO user_memory (user_id, category, key, value, created_at, updated_at)
+       SELECT ?1, ?2, ?3, ?4, ?5, ?5
+       WHERE EXISTS (
+         SELECT 1 FROM user_memory WHERE user_id = ?1 AND category = ?2 AND key = ?3
+       ) OR (
+         SELECT COUNT(*) FROM user_memory
+         WHERE user_id = ?1 AND category IN ('fact', 'preference')
+       ) < ?6
+       ON CONFLICT(user_id, category, key) DO UPDATE SET
+         value = excluded.value, updated_at = excluded.updated_at`,
+    )
+    .bind(entry.userId, entry.category, entry.key, entry.value, now, MAX_USER_MEMORY_ENTRIES)
+    .run();
+  return res.meta.changes > 0 ? "saved" : "memory_full";
+}
+
 /**
  * Clear memories for a user. When `category` and/or `key` are given, only the
  * matching subset is deleted; otherwise everything for the user. Returns the
@@ -753,6 +795,132 @@ export async function clearUserMemory(
               .bind(entry.userId, entry.key)
           : db.prepare("DELETE FROM user_memory WHERE user_id = ?1").bind(entry.userId);
 
+  const res = await stmt.run();
+  return res.meta.changes;
+}
+
+/**
+ * Delete a user's fact and preference entries by key — in one of the two
+ * categories, or in both when `category` is omitted. Persona entries are never
+ * touched: only the `/persona` command manages them. Returns the number of
+ * rows deleted.
+ */
+export async function clearUserMemoryEntries(
+  db: D1Database,
+  entry: { userId: string; category?: GuildMemoryCategory; key: string },
+): Promise<number> {
+  const stmt =
+    entry.category === undefined
+      ? db
+          .prepare(
+            "DELETE FROM user_memory WHERE user_id = ?1 AND category IN ('fact', 'preference') AND key = ?2",
+          )
+          .bind(entry.userId, entry.key)
+      : db
+          .prepare("DELETE FROM user_memory WHERE user_id = ?1 AND category = ?2 AND key = ?3")
+          .bind(entry.userId, entry.category, entry.key);
+  const res = await stmt.run();
+  return res.meta.changes;
+}
+
+// ── Guild memory (shared server knowledge, ADR-013 amendment) ─────────────
+
+/** Cap on entries one guild may hold in its shared memory. */
+export const MAX_GUILD_MEMORY_ENTRIES = 100;
+
+type GuildMemoryRow = {
+  category: GuildMemoryCategory;
+  key: string;
+  value: string;
+  updated_at: number;
+};
+
+/**
+ * Read a guild's shared memory, newest first. The DM scope owns no shared
+ * memory, so it always reads as empty. Fail-safe: any D1 error logs and
+ * returns `[]`, leaving the generation without shared memory instead of
+ * failing it.
+ */
+export async function getGuildMemory(db: D1Database, guildId: string): Promise<GuildMemory[]> {
+  if (guildId === DM_SCOPE) return [];
+  try {
+    const { results } = await db
+      .prepare(
+        "SELECT category, key, value, updated_at FROM guild_memory WHERE guild_id = ?1 ORDER BY updated_at DESC",
+      )
+      .bind(guildId)
+      .all<GuildMemoryRow>();
+    return (results ?? []).map((row) => ({
+      category: row.category,
+      key: row.key,
+      value: row.value,
+      updatedAt: row.updated_at,
+    }));
+  } catch (error) {
+    console.log(JSON.stringify({ event: "guild_memory_read_error", error: String(error) }));
+    return [];
+  }
+}
+
+/**
+ * Upsert one entry of a guild's shared memory, capped at
+ * {@link MAX_GUILD_MEMORY_ENTRIES} entries per guild. An existing
+ * `(category, key)` is always updated; a new key is inserted only below the
+ * cap, and `memory_full` is reported otherwise. The check and the write are
+ * one statement, so two racing saves cannot both take the last slot.
+ */
+export async function setGuildMemory(
+  db: D1Database,
+  entry: {
+    guildId: string;
+    category: GuildMemoryCategory;
+    key: string;
+    value: string;
+    updatedBy?: string;
+    now: number;
+  },
+): Promise<MemorySaveOutcome> {
+  const res = await db
+    .prepare(
+      `INSERT INTO guild_memory (guild_id, category, key, value, updated_by, created_at, updated_at)
+       SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?6
+       WHERE EXISTS (
+         SELECT 1 FROM guild_memory WHERE guild_id = ?1 AND category = ?2 AND key = ?3
+       ) OR (SELECT COUNT(*) FROM guild_memory WHERE guild_id = ?1) < ?7
+       ON CONFLICT(guild_id, category, key) DO UPDATE SET
+         value = excluded.value,
+         updated_by = excluded.updated_by,
+         updated_at = excluded.updated_at`,
+    )
+    .bind(
+      entry.guildId,
+      entry.category,
+      entry.key,
+      entry.value,
+      entry.updatedBy ?? null,
+      entry.now,
+      MAX_GUILD_MEMORY_ENTRIES,
+    )
+    .run();
+  return res.meta.changes > 0 ? "saved" : "memory_full";
+}
+
+/**
+ * Delete a guild's shared-memory entries by key — in one category, or in both
+ * when `category` is omitted. Returns the number of rows deleted.
+ */
+export async function clearGuildMemory(
+  db: D1Database,
+  entry: { guildId: string; category?: GuildMemoryCategory; key: string },
+): Promise<number> {
+  const stmt =
+    entry.category === undefined
+      ? db
+          .prepare("DELETE FROM guild_memory WHERE guild_id = ?1 AND key = ?2")
+          .bind(entry.guildId, entry.key)
+      : db
+          .prepare("DELETE FROM guild_memory WHERE guild_id = ?1 AND category = ?2 AND key = ?3")
+          .bind(entry.guildId, entry.category, entry.key);
   const res = await stmt.run();
   return res.meta.changes;
 }

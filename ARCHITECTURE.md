@@ -17,7 +17,7 @@ lives in D1.
 ## Codebase Map
 
 - **platform-worker** — the Cloudflare Worker: `/internal/v1/*` routes with bearer auth, the generation pipeline (budget, dedup, memory injection, model chains), first-party tools (`web_search`, `web_answer`, `read_url`, `vision_describe`, model-info), MCP clients, and the D1 access layer
-- **discord-runtime** — the self-hosted gateway: discord.js client, trigger policy, per-container conversation queue, staged status, reply controls (regenerate/delete buttons, ADR-015), slash commands, and the DM control plane
+- **discord-runtime** — the self-hosted gateway: discord.js client, trigger policy, per-container conversation queue, staged status, reply controls (regenerate/delete buttons, ADR-015), 是 / 不是 confirmation cards (soul, guild memory), slash commands, and the DM control plane
 - **contracts** — wire types for every runtime↔worker call; shared verbatim by both apps
 - **ai** — model chains per role (generation/summarization/transcription/vision) via the OpenRouter provider, system-prompt composition, generation limits
 - **db** — legacy D1 helpers from the pre-split worker; unreferenced
@@ -32,7 +32,8 @@ What must remain true about the architecture:
 - **DM privacy**: DM content never enters AI context except in the explicitly opted-in DM scope (`/chat on`, ADR-011), whose context keys (`scopeId = "dm"`, `containerId = discord:@me:<channelId>`) cannot collide with any guild key. DM-scope logs carry lengths and statuses only — never content previews. DM content is never written to durable memory implicitly.
 - **Single-shot generation** (ADR-003 + amendment): the Worker runs one `generateText` and returns one complete `GenerationResult` — no token deltas cross the wire. Runtime-side feedback is bounded: typing renewal plus a staged status placeholder capped at 4 edits per generation.
 - **Per-user memory isolation**: only the triggering user's `user_memory` (persona/preferences/facts) is injected into a generation; one user's memory never reaches another user's prompt.
-- **Intent-based memory writes** (ADR-013): the generation model proposes memory changes through the `remember`/`forget` tools on explicit user intent; proposals are stateless until the user confirms them with a ✅ reaction (❌ drops, 5-minute window). Nothing reaches `user_memory` without that confirmation. DM write consent = explicit ask + reaction (ADR-012's command-only clause is amended, not abandoned); implicit extraction keeps its own opt-in.
+- **User memory writes** (ADR-013, amended 2026-11-25): on the triggering user's explicit request, `memory_save` / `memory_delete` write the triggering user's own `user_memory` at once — bound to the request's `userId`, so no generation can reach another user's memory — and report the real outcome to the model. DM write consent = explicit ask (ADR-012's command-only clause is amended, not abandoned); implicit extraction keeps its own opt-in.
+- **Guild memory** (ADR-013 amendment): `guild_memory` holds a server's shared knowledge (at most 100 entries), injected into guild conversations only — never into a DM. The generation model can only propose changes to it (`scope: "guild"`); the proposal is stateless until the triggering user clicks 是 on its card (不是 drops it, 5-minute window), and only that click makes the Runtime call `POST /internal/v1/memory/guild/apply`, which stores exactly the key and value the card showed. Nothing reaches `guild_memory` without the confirmation, and no guild write is possible from a DM.
 - **Button-confirmed soul writes**: the generation model proposes a persona change for a guild through `soul_update`, never writes it. The proposal is stateless until the triggering user clicks 是 on its confirmation card (不是 drops it, 5-minute window); only that click makes the Runtime call `POST /internal/v1/soul/apply`, which stores the exact text the card showed. Nothing reaches `bot_soul` without the confirmation, a DM cannot change a soul, and a guild's soul never reaches a DM.
 - **Wire contract**: `packages/contracts` is the single definition of every Runtime↔Worker message. Both apps import it verbatim; changes must stay compatible across the split or ship to both sides atomically.
 - **Ownership**: the Runtime owns everything Discord (Gateway, REST, interactions, slash commands); the Worker owns everything else (models, tools, D1, MCP). Dependency direction is `apps → packages`; the two apps share no code except `packages/*`.
@@ -40,7 +41,7 @@ What must remain true about the architecture:
 
 ## Cross-Cutting Concerns
 
-- **Logging**: structured JSON only — `console.log(JSON.stringify({ event, ... }))`, one line per event, on both tiers. DM-scope events never include content previews (lengths and statuses only).
+- **Logging**: structured JSON only — `console.log(JSON.stringify({ event, ... }))`, one line per event, on both tiers. No event carries a reply preview or a provider error message: replies can echo personal or shared memory and provider text can quote a request, so generation logs hold lengths, counts, statuses, and error names. DM-scope events never include content previews.
 
 ## Decisions
 
@@ -62,7 +63,7 @@ follow the ADR conflict workflow in the guidelines' architecture governance.
 | [010](docs/adr/010-cicd-docker-ssh.md)             | CI/CD with Docker Registry and SSH   | Self-hosted registry + SSH deploys; split CI (`ci.yml` check, `deploy.yml` deploy).                                         |
 | [011](docs/adr/011-dm-chat-optin.md)               | Opt-in DM Conversations              | DM chat behind a per-user opt-in with a dm-isolated context scope; fails closed.                                            |
 | [012](docs/adr/012-auto-memory-optin.md)           | Opt-in Auto Memory with Confirmation | Guild-only extraction for opted-in users; pending candidates confirmed in DM, never by default.                             |
-| [013](docs/adr/013-intent-memory-writes.md)        | Intent-Based Memory Writes           | Model-recognized memory intent; reaction-confirmed proposals; stateless until confirmed (amends ADR-012's DM-write clause). |
+| [013](docs/adr/013-intent-memory-writes.md)        | Intent-Based Memory Writes           | Model-recognized memory intent; user writes land at once, guild writes need a yes click (amends ADR-012's DM-write clause). |
 | [014](docs/adr/014-undoable-context-truncation.md) | Undoable Context Truncation          | `/context truncate`/`restore` over an undo stack with an irreversible hard-reset floor for clears.                          |
 | [015](docs/adr/015-button-reply-controls.md)       | Button Reply Controls                | Native regenerate/delete buttons; in-place regenerate with restore-on-failure; lease-guarded re-runs bounded by budget.     |
 
