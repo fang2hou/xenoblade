@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { generateText } from "ai";
 import type * as Ai from "ai";
 import type { AdminActionPlan, GenerationRequest } from "@xenoblade/contracts";
-import type * as Tools from "../src/tools";
 
 import { ADMIN_GENERATION_LIMITS, GENERATION_LIMITS } from "@xenoblade/ai";
 import {
@@ -25,7 +24,8 @@ import { setGuildMemory, setUserMemory } from "../src/db";
 import { generate } from "../src/generation";
 import worker from "../src/index";
 import { setBotSoul } from "../src/soul";
-import { createAdminTools, createFirstPartyTools, extractAdminOperations } from "../src/tools";
+import { createFirstPartyTools } from "../src/tools";
+import { createAdminTools, extractAdminOperations } from "../src/tools/admin-tools";
 import { createTestD1 } from "./helpers/d1";
 
 vi.mock("ai", async (importOriginal) => {
@@ -33,14 +33,10 @@ vi.mock("ai", async (importOriginal) => {
   return { ...actual, generateText: vi.fn() };
 });
 
-vi.mock("../src/tools", async (importOriginal) => {
-  const actual = await importOriginal<typeof Tools>();
-  return {
-    ...actual,
-    connectMcpServers: async () => ({ tools: {}, clients: [] }),
-    closeMcpClients: async () => {},
-  };
-});
+vi.mock("../src/tools/mcp-clients", () => ({
+  connectMcpServers: async () => ({ tools: {}, clients: [] }),
+  closeMcpClients: async () => {},
+}));
 
 const GUILD_ID = "100000000000000001";
 const OWNER_ID = "200000000000000002";

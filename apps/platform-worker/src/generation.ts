@@ -58,19 +58,20 @@ import {
   SAFETY_SYSTEM,
   formatSourcesBlock,
 } from "./prompt";
+import { createFirstPartyTools } from "./tools";
 import {
-  closeMcpClients,
-  connectMcpServers,
-  createFirstPartyTools,
   extractAdminOperations,
-  extractAskPrompt,
   extractDiscordReadRequests,
+  stoppedOnDiscordRead,
+} from "./tools/admin-tools";
+import {
+  extractAskPrompt,
   hasRetry,
   hasThreadPause,
   pauseThread,
   stoppedOnAskUser,
-  stoppedOnDiscordRead,
-} from "./tools";
+} from "./tools/interaction-tools";
+import { closeMcpClients, connectMcpServers } from "./tools/mcp-clients";
 
 function formatMemoryBlock(displayName: string, memories: readonly UserMemory[]): string {
   if (memories.length === 0) return "";

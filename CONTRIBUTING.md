@@ -27,10 +27,10 @@ Discuss before implementing: open an issue describing the use case and collect f
 1. Branch from `main`
 2. Implement; keep `mise run check` green
 3. Commit messages follow Conventional Commits (validated by Cocogitto via the prek `commit-msg` hook locally, and again in CI)
-4. Open a PR; CI (`ci.yml`) must pass
+4. Open a PR; CI (`ci.yml` and `pr-title.yml`) must pass
 5. Review, then **squash-merge** — one commit per PR keeps history linear (squash-only is enforced by the repo settings and the default-branch ruleset; other merge methods are disabled)
 
-The PR title must also follow Conventional Commits — CI validates it with `cog verify`, and it becomes the squash commit title on `main`. Expect review within a few days. The maintainer signs commits with SSH keys backed by 1Password; signing is welcome but not required.
+The PR title must also follow Conventional Commits — `pr-title.yml` validates it with `cog verify` on open, edit, and reopen, and it becomes the squash commit title on `main`. Expect review within a few days. The maintainer signs commits with SSH keys backed by 1Password; signing is welcome but not required.
 
 ## Review Expectations
 
@@ -53,10 +53,9 @@ docs(adr): amend ADR-003 for typing renewal
 
 The squash commit that lands on `main` is titled with the PR title and detailed with the PR's commit messages — keep each commit message informative because together they form the squash body.
 
-## AI-Assisted Pull Requests
+## Pull Request Descriptions
 
-AI-generated or AI-assisted PRs are welcome under the same standard.
-The description must clearly include:
+Every pull request description must clearly include:
 
 - **Purpose**: what the change is for
 - **Impact**: what is affected
@@ -64,6 +63,4 @@ The description must clearly include:
 - **Risks**: potential concerns
 - **Testing**: validation performed and its results
 
-Label AI-assisted PRs with the `ai-assisted` label.
-
-Keep the GitHub pull request template synchronized with these five requirements.
+AI-generated or AI-assisted PRs follow the same standard. Keep the GitHub pull request template synchronized with these five requirements.

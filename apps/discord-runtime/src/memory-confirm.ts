@@ -54,7 +54,7 @@ export interface MemoryConfirmEntry {
   userId: string;
   /** The card's message id once posted; a button must fire on that message. */
   messageId: string | null;
-  /** Every change the card lists; 是 applies them all, 不是 drops them all. */
+  /** Every change the card lists; the confirm button applies them all, the decline button drops them all. */
   proposals: GuildMemoryProposal[];
   texts: MemoryConfirmTexts;
   /** True while the confirmed apply call is in flight (double-click guard). */
@@ -231,7 +231,7 @@ export function buildMemoryConfirmCard(
   };
 }
 
-/** Build the card's button row: 是 (Primary) confirms, 不是 (Secondary) declines. */
+/** Build the card's button row: Primary confirms, Secondary declines. */
 export function buildMemoryConfirmRow(
   texts: MemoryConfirmTexts,
   cardId: string,

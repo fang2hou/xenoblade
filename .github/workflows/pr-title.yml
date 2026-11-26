@@ -1,0 +1,35 @@
+name: PR Title
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate PR title
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install toolchain (mise)
+        uses: jdx/mise-action@v5
+
+      - name: Configure Git identity for cocogitto
+        run: |
+          git config --global user.name "pr-title-check"
+          git config --global user.email "pr-title-check@users.noreply.github.com"
+
+      - name: Verify PR title (cog verify)
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: cog verify "$PR_TITLE"

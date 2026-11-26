@@ -6,7 +6,6 @@ import type * as Ai from "ai";
 import { createModel } from "@xenoblade/ai";
 import type { AskUserPrompt, GenerationRequest, HistoryMessage } from "@xenoblade/contracts";
 import type * as AiPackage from "@xenoblade/ai";
-import type * as Tools from "../src/tools";
 
 import { generate } from "../src/generation";
 import { getLastTurn, recordLastReply, recordLastTurn } from "../src/thread-sessions";
@@ -32,14 +31,10 @@ vi.mock("@xenoblade/ai", async (importOriginal) => {
 });
 
 // MCP connections stay offline; the first-party tools stay real.
-vi.mock("../src/tools", async (importOriginal) => {
-  const actual = await importOriginal<typeof Tools>();
-  return {
-    ...actual,
-    connectMcpServers: async () => ({ tools: {}, clients: [] }),
-    closeMcpClients: async () => {},
-  };
-});
+vi.mock("../src/tools/mcp-clients", () => ({
+  connectMcpServers: async () => ({ tools: {}, clients: [] }),
+  closeMcpClients: async () => {},
+}));
 
 const ASK = {
   question: "Which approach do you want?",

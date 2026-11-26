@@ -60,6 +60,14 @@ A hard operational constraint: Discord allows **one active Gateway session per b
 
 The runtime bundle step now uses rolldown instead of esbuild (branch `feat/rolldown-bundler`). Same contract otherwise: one self-contained ESM file, node platform, sourcemap, `createRequire` banner. The pipeline shape (local `scripts/deploy.sh` and `deploy-runtime` job both call the package build script) is unchanged.
 
+## Amendment (2026-11-26)
+
+Workflow structure and pinning were aligned with the shared GitHub Actions guidelines:
+
+- **Three focused workflows**: `ci.yml` runs on `push` (`main`) and `pull_request` (`main`) — `mise run check` (oxlint, oxfmt, tsc, `gitleaks`, `actionlint`), `pnpm test`, and `cog check` (full history); `pr-title.yml` runs exclusively on `pull_request` (`types: [opened, edited, reopened]`) with shallow checkout to run `cog verify` on the PR title; `deploy.yml` runs on `push` (`main`, where merges are gated by PR checks and the default-branch ruleset) and `workflow_dispatch`.
+- **Major-version action tags**: all workflows reference actions from trusted publishers by their current major version tag (`actions/checkout@v7`, `jdx/mise-action@v5`, `docker/setup-qemu-action@v4`, `docker/setup-buildx-action@v4`, `docker/login-action@v4`, `docker/build-push-action@v7`, `appleboy/ssh-action@v1`) rather than frozen commit SHAs, paired with least-privilege `permissions: contents: read` and no secrets on pull-request workflows.
+- **Layered build invocation**: `deploy.yml` invokes `mise run build` instead of duplicating the workspace filter command.
+
 ## Review Triggers
 
 - GitHub Actions offers native ARM64 runners (drop QEMU cross-compilation).

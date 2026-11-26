@@ -1,8 +1,11 @@
 [tools]
 node = "24"
-pnpm = "latest"
-prek = "latest"
-cocogitto = "latest"
+pnpm = "12.23.0"
+prek = "0.5.11"
+cocogitto = "7.0.0"
+gitleaks = "8.30.1"
+actionlint = "1.7.12"
+shellcheck = "0.11.0"
 
 [tasks.lint]
 run = "pnpm lint"
@@ -13,8 +16,14 @@ run = "pnpm format:check"
 [tasks.typecheck]
 run = "pnpm typecheck"
 
+[tasks.secrets]
+run = "gitleaks dir . --redact"
+
+[tasks.workflows]
+run = "actionlint"
+
 [tasks.check]
-depends = ["lint", "format", "typecheck"]
+depends = ["lint", "format", "typecheck", "secrets", "workflows"]
 
 [tasks.test]
 depends = ["check"]

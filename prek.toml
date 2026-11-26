@@ -1,0 +1,26 @@
+[[repos]]
+repo = "builtin"
+hooks = [
+  { id = "trailing-whitespace" },
+  { id = "end-of-file-fixer" },
+  { id = "check-added-large-files", args = [
+    "--maxkb=1024",
+  ] },
+  { id = "check-merge-conflict" },
+  { id = "detect-private-key" },
+  { id = "check-json", files = "\\.json$" },
+  { id = "check-yaml", files = "\\.ya?ml$", exclude = "^pnpm-lock\\.yaml$" },
+  { id = "check-toml", files = "\\.toml$" },
+]
+
+[[repos]]
+repo = "local"
+hooks = [
+  { id = "check", name = "project checks (mise run check)", entry = "mise run check", language = "system", pass_filenames = false },
+  { id = "cog-verify", name = "conventional commit", entry = "cog verify --file", language = "system", stages = [
+    "commit-msg",
+  ] },
+  { id = "test", name = "project tests (mise run test)", entry = "mise run test", language = "system", pass_filenames = false, stages = [
+    "pre-push",
+  ] },
+]
