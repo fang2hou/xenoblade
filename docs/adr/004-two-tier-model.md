@@ -34,6 +34,8 @@ _Evolution note:_ the original decision defined three roles; `vision` was added 
 
 _Amendment (2026-11-25):_ Review Trigger #1 has fired for two of the roles. `deepseek/deepseek-v4.1-flash-1017` — native-multimodal, with a 1M context — now leads both the `generation` and the `summarization` chain, with `deepseek/deepseek-v4-flash-0731` as the fallback. The roles stay separate, because they are still distinct failover and configuration units, but they no longer split for economic reasons. `transcription` is unchanged, and `vision` is unchanged — it still covers fallback models without native image input. The chains now live only in `packages/ai` (`DEFAULT_CHAINS`): `wrangler.jsonc` no longer hard-codes a `MODEL_CONFIG` var, so the drift between the two copies is gone and the var overrides a role only when an operator sets it explicitly.
 
+_Amendment (2026-11-26):_ Review Trigger #2 has fired for DeepSeek routing (PR #33 and PR #35). When `HYPER_API_KEY` is configured, `packages/ai` routes `generation` and `summarization` (and `vision` when `OPENROUTER_API_KEY` is absent) through Charm Hyper's OpenAI-compatible endpoint (`deepseek-v4.1-flash-1017-economy` primary, `deepseek-v4.1-flash-1017` fallback) via `@ai-sdk/openai-compatible`, keeping OpenRouter as a cross-provider fallback when both keys are present. `resolveMaxOutputTokens` clamps every call to verified per-provider output token ceilings so elevated budgets never trigger upstream 400 errors on fallback models.
+
 ## Alternatives Considered
 
 ### One model for all roles

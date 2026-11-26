@@ -11,17 +11,20 @@ All tools are managed by mise.
 mise install
 ```
 
-| Tool       | Purpose                                  | Managed via                 |
-| ---------- | ---------------------------------------- | --------------------------- |
-| node       | Runtime (24)                             | `mise.toml`                 |
-| pnpm       | Package manager (11.21.0)                | `mise.toml`, `package.json` |
-| prek       | Git hooks (hygiene, checks, commit lint) | `mise.toml`                 |
-| cocogitto  | Conventional Commits validation          | `mise.toml`                 |
-| oxlint     | Linter                                   | `package.json`              |
-| oxfmt      | Formatter (code **and** markdown)        | `package.json`              |
-| typescript | Type checking                            | `package.json`              |
-| vitest     | Test runner                              | `package.json`              |
-| wrangler   | Workers dev/deploy, D1, types            | `apps/platform-worker`      |
+| Tool       | Purpose                                      | Managed via                 |
+| ---------- | -------------------------------------------- | --------------------------- |
+| node       | Runtime (24)                                 | `mise.toml`                 |
+| pnpm       | Package manager (12.23.0)                    | `mise.toml`, `package.json` |
+| prek       | Git hooks (`prek.toml`: hygiene, check, cog) | `mise.toml`                 |
+| cocogitto  | Conventional Commits validation              | `mise.toml`                 |
+| gitleaks   | Secret scanning (`mise run secrets`)         | `mise.toml`                 |
+| actionlint | GitHub Actions lint (`mise run workflows`)   | `mise.toml`                 |
+| shellcheck | Shell script checks for `actionlint`         | `mise.toml`                 |
+| oxlint     | Linter                                       | `package.json`              |
+| oxfmt      | Formatter (code **and** markdown)            | `package.json`              |
+| typescript | Type checking                                | `package.json`              |
+| vitest     | Test runner                                  | `package.json`              |
+| wrangler   | Workers dev/deploy, D1, types                | `apps/platform-worker`      |
 
 Do not substitute tools without explicit approval (see the guidelines repository's toolchain standards).
 
@@ -69,7 +72,6 @@ mise run test -- {{filter}} # run a single test file or case, e.g. mise run test
 - `apps/discord-runtime/` — self-hosted discord.js gateway: triggers, auto-started threads, question cards, staged status, DM control plane
 - `packages/contracts/` — wire types shared by both apps
 - `packages/ai/` — model chains, Charm Hyper / OpenRouter providers, system prompt composition
-- `packages/db/` — legacy D1 helpers; unreferenced, do not add code here
 - `docs/adr/` — architecture decision records
 - `scripts/`, `deploy/` — local deploy tooling; docker-compose for the gateway host
 
@@ -102,18 +104,18 @@ Follow the guidelines repository's coding standards. Project-specific rules:
 
 ## Validation
 
-`mise run check` is the entry point for the project's main validation.
-It runs the same checks locally that CI runs (`ci.yml`: `mise run check` + `mise run test`, plus commit-message validation via cocogitto) — do not maintain separate logic.
+`mise run check` is the entry point for the project's main validation (`lint`, `format`, `typecheck`, `secrets` via `gitleaks`, and `workflows` via `actionlint`).
+It runs the same checks locally (and via `prek.toml`) that CI runs (`ci.yml`: `mise run check`, `pnpm test`, and `cog check`; `pr-title.yml`: `cog verify` on PR title open/edit/reopen) — do not maintain separate logic.
 
 ## Deployment
 
-Production deploys run in CI (`deploy.yml`) after `ci.yml` passes on `main`. Order matters:
+Production deploys run in CI (`deploy.yml`) on `push` to `main` (merges to `main` are gated by `ci.yml`, `pr-title.yml`, and the default-branch ruleset) or via manual `workflow_dispatch`. Order matters:
 
 1. **D1 remote migration first** — CI applies `wrangler d1 migrations apply xenoblade --remote` before the Worker deploy; locally, run `pnpm --filter @xenoblade/platform-worker db:migrate` first.
 2. **Worker secrets** (once, via `wrangler secret put`): `INTERNAL_API_TOKEN`, `HYPER_API_KEY` (routes DeepSeek via Charm Hyper when set) and/or `OPENROUTER_API_KEY`; optional: `BRAVE_SEARCH_API_KEY`, `BRAVE_ANSWER_API_KEY`, `GITHUB_MCP_TOKEN`, `ARTIFICIAL_ANALYSIS_API_KEY`, `ADMIN_GUILD_ID`, `ADMIN_OWNER_USER_ID` (CI syncs `HYPER_API_KEY` and `ADMIN_*` when set in GitHub Secrets). Discord credentials do **not** belong on the Worker.
 3. **Worker deploy** — `wrangler deploy` with `CLOUDFLARE_API_TOKEN`, then health verification (`/internal/v1/health` must return `status: "ok"`).
-4. **Runtime deploy** — build `linux/arm64` image, push to the self-hosted registry, SSH: `docker compose pull && down && up -d` (SIGTERM closes the Gateway socket gracefully first — Discord allows only one Gateway session per token), then `/health` poll on `:8397`.
-5. **Host `.env`** (runtime container): `DISCORD_BOT_TOKEN`, `DISCORD_APPLICATION_ID`, `WORKER_URL`, `INTERNAL_API_TOKEN`.
+4. **Runtime deploy** — bundle with `mise run build`, build the `linux/arm64` image, push to the self-hosted registry, SSH: `docker compose pull && down && up -d` (SIGTERM closes the Gateway socket gracefully first — Discord allows only one Gateway session per token), then `/health` poll on `:8397`.
+5. **Gateway host setup (`deploy/docker-compose.yml`)** — kept in `$GATEWAY_DEPLOY_PATH` on the host alongside a `0600` `.env` containing `DISCORD_BOT_TOKEN`, `DISCORD_APPLICATION_ID`, `WORKER_URL`, `INTERNAL_API_TOKEN`, and optionally `ADMIN_GUILD_ID` + `ADMIN_OWNER_USER_ID`. Log in once via `docker login $DOCKER_REGISTRY_URL`. The compose service binds `:8397` to `127.0.0.1` only (no inbound internet exposure) and probes `/health` with Node's built-in `fetch` because `node:24-slim` ships without `curl` or `wget`.
 6. **Slash commands & gateway** — automatic at runtime startup.
 
-Local deploy from a dev machine: `mise run deploy` (= `scripts/deploy.sh [all|gateway|worker]`), configured via `.env.deploy` (see `.env.deploy.example`). `compatibility_date` is bounded by the workderd cap of the pinned wrangler (currently `2026-08-12`) — bump it deliberately alongside lockfile upgrades.
+Local deploy from a dev machine: `mise run deploy` (= `scripts/deploy.sh [all|gateway|worker]`), configured via `.env.deploy` (see `.env.deploy.example`). `compatibility_date` is bounded by the workerd cap of the pinned wrangler (currently `2026-08-11`) — bump it deliberately alongside lockfile upgrades.

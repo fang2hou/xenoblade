@@ -1,24 +1,3 @@
-# Docker Compose for the Discord Runtime.
-#
-# This file lives on the self-hosted host at $GATEWAY_DEPLOY_PATH.
-# It is also kept in the repository for version control.
-#
-# Usage on the host:
-#   1. Clone the repo (or copy this file) to $GATEWAY_DEPLOY_PATH.
-#   2. Create a .env file with the secrets listed below.
-#   3. docker login $DOCKER_REGISTRY_URL (one-time).
-#   4. docker compose pull && docker compose up -d
-
-# Required environment variables in .env:
-#   DISCORD_BOT_TOKEN=
-#   DISCORD_APPLICATION_ID=
-#   WORKER_URL=https://your-worker.workers.dev
-#   INTERNAL_API_TOKEN=
-#
-# Optional owner-approved server administration (both required to enable):
-#   ADMIN_GUILD_ID=
-#   ADMIN_OWNER_USER_ID=
-#
 services:
   discord-runtime:
     image: ${DOCKER_REGISTRY_URL}/xenoblade/discord-runtime:latest
@@ -26,12 +5,8 @@ services:
     env_file: .env
     environment:
       - NODE_ENV=production
-    # Bind health endpoint to localhost only — not exposed to the public
-    # internet. All real traffic is outbound (Gateway WebSocket + Worker HTTPS).
     ports:
       - "127.0.0.1:8397:8397"
-    # node:24-slim ships no curl/wget; probe the health endpoint with the
-    # Node binary that is guaranteed to exist inside the image.
     healthcheck:
       test:
         [

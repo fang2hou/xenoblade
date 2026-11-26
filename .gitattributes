@@ -2,9 +2,6 @@
 *.ts linguist-detectable
 *.mjs linguist-detectable
 *.md linguist-detectable
-*.yaml linguist-detectable
-*.yml linguist-detectable
-*.toml linguist-detectable
 *.sql linguist-detectable
 *.sh linguist-detectable
 Dockerfile linguist-detectable

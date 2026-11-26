@@ -11,7 +11,6 @@ import type {
   HistoryMessage,
   SoulProposal,
 } from "@xenoblade/contracts";
-import type * as Tools from "../src/tools";
 
 import { containsLeakedToolMarkup, generate } from "../src/generation";
 import { setGuildMemory, setUserMemory } from "../src/db";
@@ -33,21 +32,17 @@ vi.mock("@xenoblade/ai", async (importOriginal) => {
 
 // MCP connections stay offline; the first-party tools stay real so the audit
 // attributes the production tool names.
-vi.mock("../src/tools", async (importOriginal) => {
-  const actual = await importOriginal<typeof Tools>();
-  return {
-    ...actual,
-    connectMcpServers: async () => ({
-      tools: {
-        context7_resolve_library_id: {},
-        github_search: {},
-        "artificial-analysis_aa_language_models_free": {},
-      },
-      clients: [],
-    }),
-    closeMcpClients: async () => {},
-  };
-});
+vi.mock("../src/tools/mcp-clients", () => ({
+  connectMcpServers: async () => ({
+    tools: {
+      context7_resolve_library_id: {},
+      github_search: {},
+      "artificial-analysis_aa_language_models_free": {},
+    },
+    clients: [],
+  }),
+  closeMcpClients: async () => {},
+}));
 
 /** One call per first-party tool and per MCP server the chain exposes. */
 const CALLED_TOOLS = [

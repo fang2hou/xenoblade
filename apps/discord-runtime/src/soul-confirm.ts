@@ -162,7 +162,7 @@ export function buildSoulConfirmCard(
   };
 }
 
-/** Build the card's button row: 是 (Primary) confirms, 不是 (Secondary) declines. */
+/** Build the card's button row: Primary confirms, Secondary declines. */
 export function buildSoulConfirmRow(
   texts: SoulConfirmTexts,
   proposalId: string,

@@ -14,9 +14,11 @@ mise run test -- {{filter}}  # run a single test file or case, e.g. mise run tes
 mise run lint                # lint only
 mise run format              # format check only — write with pnpm format
 mise run typecheck           # type checking only
+mise run secrets             # secret scan (gitleaks)
+mise run workflows           # GitHub Actions lint (actionlint)
 mise run build               # build discord-runtime (pnpm -r build)
 pnpm --filter @xenoblade/platform-worker types  # regenerate worker-configuration.d.ts
-mise run check               # full validation (lint + format + typecheck) — run before every commit
+mise run check               # full validation (lint + format + typecheck + secrets + workflows) — run before every commit
 ```
 
 Use pnpm, never npm or yarn. The Discord Runtime has no mise task: run `pnpm dev:runtime` (needs a real Discord bot token).
@@ -37,13 +39,12 @@ Project-specific overrides:
 
 ## Layout
 
-- `apps/platform-worker/` — Cloudflare Worker: `/internal/v1/*` routes, generation pipeline, tools, D1 access
-- `apps/discord-runtime/` — self-hosted discord.js gateway: triggers, auto-started threads, question cards, staged status, DM control plane
+- `apps/platform-worker/` — Cloudflare Worker: `/internal/v1/*` routes, generation pipeline, tools, admin plan lifecycle, D1 access
+- `apps/discord-runtime/` — self-hosted discord.js gateway: triggers, auto-started threads, question/confirmation/admin cards, staged status, DM control plane
 - `packages/contracts/` — wire types for every Runtime↔Worker call, shared verbatim by both apps
-- `packages/ai/` — model chains per role (OpenRouter), system prompt composition, generation limits
-- `packages/db/` — legacy D1 helpers from the pre-split worker; unreferenced, do not add code here
+- `packages/ai/` — model chains per role (Charm Hyper & OpenRouter), system prompt composition, generation limits, output clamping
 - `docs/adr/` — architecture decision records
-- `scripts/` — local deploy script and legacy registrars
+- `scripts/` — local deploy script
 - `deploy/` — docker-compose definition used on the gateway host
 
 ## Boundaries

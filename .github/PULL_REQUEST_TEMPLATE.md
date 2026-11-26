@@ -1,7 +1,5 @@
 <!--
-AI-generated or AI-assisted PRs: fill in every section below.
-Human-authored PRs: Purpose, Impact, and Testing are required;
-Context and Risks may be shortened but not removed.
+Fill in every section below so reviewers can evaluate the change without guessing.
 -->
 
 ## Purpose of the change
