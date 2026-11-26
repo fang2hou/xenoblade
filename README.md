@@ -6,8 +6,8 @@ An LLM-powered Discord assistant for community operators, split between a self-h
 
 [Usage](#-usage) | [Features](#-features) | [Development](#-development)
 
-[![CI](https://github.com/fang2hou/xenoblade/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/fang2hou/xenoblade/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](./LICENSE)
+[![CI](https://badgen.net/github/checks/fang2hou/xenoblade/main?label=CI)](https://github.com/fang2hou/xenoblade/actions/workflows/ci.yml)
+[![License: MIT](https://badgen.net/badge/License/MIT/green)](./LICENSE)
 
 </div>
 
