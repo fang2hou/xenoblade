@@ -21,10 +21,10 @@ Once the Worker and Discord Runtime are deployed, interact with Xenoblade direct
 | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | `@bot <message>` or watched-role mention in a channel   | Starts a public thread on your message and answers there; the bot keeps following the thread so no further `@` mention is needed   |
 | `@bot` (bare mention)                                   | Answers your most recent prior message in the channel                                                                              |
-| Chat in a followed thread                               | Answered automatically when relevant; say "先到这" or "stop following" to pause following, or `@bot` to resume                     |
+| Chat in a followed thread                               | Answered automatically when relevant; say "stop following" to pause following, or `@bot` to resume                                 |
 | Reply to a bot message                                  | Continues the conversation in place in your language                                                                               |
 | Click a question or confirmation card                   | Answers clarifying questions (`ask_user`) or confirms proposed guild memory, bot soul, or owner-only server administration changes |
-| "重新回答", "再说简单点", or "try again, shorter"       | Redoes the previous reply as a new message without editing the original                                                            |
+| "try again" or "try again, shorter"                     | Redoes the previous reply as a new message without editing the original                                                            |
 | `/status`, `/usage`, `/language`                        | Checks gateway status, shows 24h token usage (ephemeral), or switches UI notice language (`zh` or `en`)                            |
 | `/context truncate` or `/context restore`               | Hides earlier channel messages from context with an undoable stack                                                                 |
 | `/persona`, `/preference`, `/memory`, `/learn`, `/help` | Manages per-user memories, opt-in auto-learning, and command help                                                                  |
